@@ -9,13 +9,14 @@ int main() {
     GRRTParams params{};
     params.width = 256;
     params.height = 256;
-    params.metric_type = GRRT_METRIC_KERR;
+    params.metric_type = GRRT_METRIC_SCHWARZSCHILD;
     params.mass = 1.0;
     params.spin = 0.998;
     params.observer_r = 50.0;
     params.observer_theta = 1.396; // ~80 degrees
     params.observer_phi = 0.0;
     params.fov = 1.047; // ~60 degrees
+    params.integrator_max_steps = 10000;
 
     const char* output_path = "output.png";
 

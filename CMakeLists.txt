@@ -6,6 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Shared library
 add_library(grrt SHARED
     src/api.cpp
+    src/schwarzschild.cpp
+    src/rk4.cpp
+    src/geodesic_tracer.cpp
+    src/camera.cpp
+    src/renderer.cpp
 )
 target_include_directories(grrt PUBLIC include/ ${CMAKE_BINARY_DIR}/include PRIVATE third_party/)
 target_compile_definitions(grrt PRIVATE GRRT_BUILDING_DLL)
