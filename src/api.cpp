@@ -1,5 +1,6 @@
 #include "grrt/api.h"
 #include "grrt/spacetime/schwarzschild.h"
+#include "grrt/spacetime/kerr.h"
 #include "grrt/geodesic/rk4.h"
 #include "grrt/geodesic/geodesic_tracer.h"
 #include "grrt/camera/camera.h"
@@ -34,8 +35,15 @@ GRRTContext* grrt_create(const GRRTParams* params) {
     double fov = params->fov > 0.0 ? params->fov : 1.047;
     int max_steps = params->integrator_max_steps > 0 ? params->integrator_max_steps : 10000;
 
-    // Core physics
-    ctx->metric = std::make_unique<grrt::Schwarzschild>(mass);
+    // Core physics — select metric
+    double spin_a = 0.0;
+    if (params->metric_type == GRRT_METRIC_KERR) {
+        double spin_param = params->spin > 0.0 ? params->spin : 0.998;
+        spin_a = spin_param * mass;
+        ctx->metric = std::make_unique<grrt::Kerr>(mass, spin_a);
+    } else {
+        ctx->metric = std::make_unique<grrt::Schwarzschild>(mass);
+    }
     ctx->integrator = std::make_unique<grrt::RK4>();
     ctx->tracer = std::make_unique<grrt::GeodesicTracer>(
         *ctx->metric, *ctx->integrator, observer_r, max_steps);
@@ -51,8 +59,10 @@ GRRTContext* grrt_create(const GRRTParams* params) {
     if (params->disk_enabled) {
         double disk_temp = params->disk_temperature > 0.0 ? params->disk_temperature : 1e7;
         double disk_outer = params->disk_outer > 0.0 ? params->disk_outer : 20.0;
+        double isco = ctx->metric->isco_radius();
+        double r_inner = params->disk_inner > 0.0 ? params->disk_inner : isco;
         ctx->disk = std::make_unique<grrt::AccretionDisk>(
-            mass, params->disk_inner, disk_outer, disk_temp);
+            mass, spin_a, r_inner, disk_outer, disk_temp);
     }
 
     // Background (optional)
@@ -66,8 +76,9 @@ GRRTContext* grrt_create(const GRRTParams* params) {
         ctx->disk.get(), ctx->sphere.get(),
         ctx->spectrum.get(), *ctx->tonemapper);
 
-    std::println("grrt: created context ({}x{}, schwarzschild, M={}, r_obs={}, disk={}, stars={})",
-                 params->width, params->height, mass, observer_r,
+    const char* metric_name = params->metric_type == GRRT_METRIC_KERR ? "kerr" : "schwarzschild";
+    std::println("grrt: created context ({}x{}, {}, M={}, a={}, r_obs={}, disk={}, stars={})",
+                 params->width, params->height, metric_name, mass, spin_a, observer_r,
                  params->disk_enabled ? "on" : "off",
                  params->background_type == GRRT_BG_STARS ? "on" : "off");
     return ctx;

@@ -42,6 +42,26 @@ struct Matrix4 {
             1.0 / m[3][3]
         );
     }
+
+    // General inverse exploiting block-diagonal structure of BL metrics:
+    // (t,φ) form a 2×2 block; r and θ are diagonal.
+    // Also works for fully diagonal matrices.
+    Matrix4 inverse() const {
+        Matrix4 inv;
+
+        // (t,φ) 2×2 block inverse
+        double det_tf = m[0][0] * m[3][3] - m[0][3] * m[3][0];
+        inv.m[0][0] = m[3][3] / det_tf;
+        inv.m[3][3] = m[0][0] / det_tf;
+        inv.m[0][3] = -m[0][3] / det_tf;
+        inv.m[3][0] = -m[3][0] / det_tf;
+
+        // Diagonal entries
+        inv.m[1][1] = 1.0 / m[1][1];
+        inv.m[2][2] = 1.0 / m[2][2];
+
+        return inv;
+    }
 };
 
 } // namespace grrt

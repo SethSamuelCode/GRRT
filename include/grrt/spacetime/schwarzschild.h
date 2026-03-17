@@ -12,6 +12,7 @@ public:
     Matrix4 g_lower(const Vec4& x) const override;
     Matrix4 g_upper(const Vec4& x) const override;
     double horizon_radius() const override;
+    double isco_radius() const override;
 
 private:
     double mass_;

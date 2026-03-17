@@ -15,6 +15,7 @@ add_library(grrt SHARED
     src/tonemapper.cpp
     src/accretion_disk.cpp
     src/celestial_sphere.cpp
+    src/kerr.cpp
 )
 target_include_directories(grrt PUBLIC include/ ${CMAKE_BINARY_DIR}/include PRIVATE third_party/)
 target_compile_definitions(grrt PRIVATE GRRT_BUILDING_DLL)

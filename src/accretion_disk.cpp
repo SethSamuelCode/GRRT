@@ -5,28 +5,40 @@
 
 namespace grrt {
 
-AccretionDisk::AccretionDisk(double mass, double r_inner, double r_outer,
-                             double peak_temperature, int flux_lut_size)
-    : mass_(mass),
-      r_inner_(r_inner > 0.0 ? r_inner : 6.0 * mass),  // Default: ISCO = 6M
+AccretionDisk::AccretionDisk(double mass, double spin, double r_isco,
+                             double r_outer, double peak_temperature, int flux_lut_size)
+    : mass_(mass), spin_(spin),
+      r_inner_(r_isco),
       r_outer_(r_outer),
       peak_temperature_(peak_temperature),
       flux_lut_size_(flux_lut_size) {
     build_flux_lut();
 }
 
+double AccretionDisk::omega_kepler(double r) const {
+    return std::sqrt(mass_ / (r * r * r));
+}
+
+double AccretionDisk::Omega(double r) const {
+    double w = omega_kepler(r);
+    return w / (1.0 + spin_ * w);
+}
+
 double AccretionDisk::E_circ(double r) const {
     double M = mass_;
-    return (1.0 - 2.0 * M / r) / std::sqrt(1.0 - 3.0 * M / r);
+    double a = spin_;
+    double w = omega_kepler(r);
+    double aw = a * w;
+    return (1.0 - 2.0 * M / r + aw) / std::sqrt(1.0 - 3.0 * M / r + 2.0 * aw);
 }
 
 double AccretionDisk::L_circ(double r) const {
     double M = mass_;
-    return std::sqrt(M * r) / std::sqrt(1.0 - 3.0 * M / r);
-}
-
-double AccretionDisk::Omega(double r) const {
-    return std::sqrt(mass_ / (r * r * r));
+    double a = spin_;
+    double w = omega_kepler(r);
+    double aw = a * w;
+    return std::sqrt(M * r) * (1.0 - 2.0 * aw + a * a / (r * r))
+           / std::sqrt(1.0 - 3.0 * M / r + 2.0 * aw);
 }
 
 void AccretionDisk::build_flux_lut() {
@@ -40,7 +52,6 @@ void AccretionDisk::build_flux_lut() {
     flux_max_ = 0.0;
     double I_cumulative = 0.0;
     constexpr double fd_eps = 1e-6;
-
     double prev_integrand = 0.0;
 
     for (int i = 0; i < flux_lut_size_; ++i) {
@@ -51,7 +62,6 @@ void AccretionDisk::build_flux_lut() {
             continue;
         }
 
-        // Derivatives by central finite differences
         double E_prime = (E_circ(r + fd_eps) - E_circ(r - fd_eps)) / (2.0 * fd_eps);
         double L_prime = (L_circ(r + fd_eps) - L_circ(r - fd_eps)) / (2.0 * fd_eps);
 
@@ -61,7 +71,6 @@ void AccretionDisk::build_flux_lut() {
         I_cumulative += 0.5 * (prev_integrand + integrand) * dr;
         prev_integrand = integrand;
 
-        // F(r) = (3M / (8π r³)) × 1/(E - ΩL) × (-dΩ/dr) × I(r)
         double Om = Omega(r);
         double E_r = E_circ(r);
         double L_r = L_circ(r);
@@ -102,17 +111,19 @@ double AccretionDisk::temperature(double r) const {
 
 double AccretionDisk::redshift(double r_cross, const Vec4& p, double observer_r) const {
     double M = mass_;
+    double a = spin_;
 
     // Observer: static at r_obs
     double u_t_obs = 1.0 / std::sqrt(1.0 - 2.0 * M / observer_r);
     double pu_obs = p[0] * u_t_obs;
 
     // Emitter: circular orbit at r_cross
-    double u_t_emit = 1.0 / std::sqrt(1.0 - 3.0 * M / r_cross);
+    double w = omega_kepler(r_cross);
+    double aw = a * w;
+    double u_t_emit = 1.0 / std::sqrt(1.0 - 3.0 * M / r_cross + 2.0 * aw);
     double u_phi_emit = Omega(r_cross) * u_t_emit;
     double pu_emit = p[0] * u_t_emit + p[3] * u_phi_emit;
 
-    // g = (p_μ u^μ)_emit / (p_μ u^μ)_obs
     if (std::abs(pu_obs) < 1e-30) return 1.0;
     return pu_emit / pu_obs;
 }
@@ -128,7 +139,6 @@ Vec3 AccretionDisk::emission(double r_cross, const Vec4& p_cross,
     if (T_obs < 100.0) return {};
 
     Vec3 color = spectrum.temperature_to_color(T_obs);
-
     double g3 = g * g * g;
     return color * g3;
 }

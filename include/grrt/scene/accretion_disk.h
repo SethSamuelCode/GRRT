@@ -10,23 +10,21 @@ namespace grrt {
 
 class AccretionDisk {
 public:
-    AccretionDisk(double mass, double r_inner, double r_outer,
-                  double peak_temperature, int flux_lut_size = 500);
+    AccretionDisk(double mass, double spin, double r_isco,
+                  double r_outer, double peak_temperature, int flux_lut_size = 500);
 
     double r_inner() const { return r_inner_; }
     double r_outer() const { return r_outer_; }
 
-    // Temperature at radius r (Page-Thorne profile)
     double temperature(double r) const;
 
-    // Compute disk emission color for a ray hitting at r_cross
-    // with covariant momentum p_cross. Includes redshift and g³ scaling.
     Vec3 emission(double r_cross, const Vec4& p_cross,
                   double observer_r, const SpectrumLUT& spectrum) const;
 
 private:
     double mass_;
-    double r_inner_;
+    double spin_;     // a (Kerr spin parameter, 0 for Schwarzschild)
+    double r_inner_;  // ISCO
     double r_outer_;
     double peak_temperature_;
 
@@ -36,9 +34,11 @@ private:
     double flux_r_max_;
     int flux_lut_size_;
 
+    // Kerr-aware circular orbit quantities
+    double omega_kepler(double r) const;
+    double Omega(double r) const;
     double E_circ(double r) const;
     double L_circ(double r) const;
-    double Omega(double r) const;
 
     void build_flux_lut();
     double flux(double r) const;

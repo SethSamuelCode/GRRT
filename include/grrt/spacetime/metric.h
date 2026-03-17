@@ -18,6 +18,9 @@ public:
 
     // Event horizon radius
     virtual double horizon_radius() const = 0;
+
+    // Innermost stable circular orbit radius
+    virtual double isco_radius() const = 0;
 };
 
 } // namespace grrt

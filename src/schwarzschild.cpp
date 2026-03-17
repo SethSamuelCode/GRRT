@@ -30,4 +30,8 @@ double Schwarzschild::horizon_radius() const {
     return 2.0 * mass_;
 }
 
+double Schwarzschild::isco_radius() const {
+    return 6.0 * mass_;
+}
+
 } // namespace grrt
