@@ -7,15 +7,15 @@
 
 int main() {
     GRRTParams params{};
-    params.width = 256;
-    params.height = 256;
+    params.width = 1024;
+    params.height = 1024;
     params.metric_type = GRRT_METRIC_SCHWARZSCHILD;
     params.mass = 1.0;
     params.spin = 0.998;
     params.observer_r = 50.0;
     params.observer_theta = 1.396; // ~80 degrees
     params.observer_phi = 0.0;
-    params.fov = 1.047; // ~60 degrees
+    params.fov = 1.5708; // ~90 degrees (wider FOV to zoom out)
     params.integrator_max_steps = 10000;
     params.disk_enabled = 1;
     params.disk_inner = 0.0;       // 0 = use ISCO

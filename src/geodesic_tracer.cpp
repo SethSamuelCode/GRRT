@@ -41,8 +41,11 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
             double theta_prev = prev.position[2];
             double theta_new = state.position[2];
 
-            if ((theta_prev - half_pi) * (theta_new - half_pi) < 0.0) {
-                double frac = (half_pi - theta_prev) / (theta_new - theta_prev);
+            double d_prev = theta_prev - half_pi;
+            double d_new = theta_new - half_pi;
+            // Only count real crossings, not floating-point noise
+            if (d_prev * d_new < 0.0 && std::abs(d_prev - d_new) > 1e-12) {
+                double frac = -d_prev / (d_new - d_prev);
 
                 double r_cross = prev.position[1] + frac * (state.position[1] - prev.position[1]);
 

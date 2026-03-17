@@ -64,8 +64,9 @@ void Camera::build_tetrad() {
 
 GeodesicState Camera::ray_for_pixel(int i, int j) const {
     // Screen angles
-    double alpha = (static_cast<double>(i) - width_ / 2.0) * fov_ / width_;
-    double beta = (static_cast<double>(j) - height_ / 2.0) * fov_ / width_;
+    // Sample at pixel center (i+0.5, j+0.5) to avoid exact α=0 meridional plane
+    double alpha = (i + 0.5 - width_ / 2.0) * fov_ / width_;
+    double beta = (j + 0.5 - height_ / 2.0) * fov_ / width_;
 
     // Local 3-direction in tetrad frame
     double ca = std::cos(beta) * std::sin(alpha);

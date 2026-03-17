@@ -16,7 +16,7 @@ CelestialSphere::CelestialSphere(int num_stars, unsigned int seed)
     for (int i = 0; i < num_stars; ++i) {
         Star s;
         s.theta = std::acos(1.0 - 2.0 * uniform(rng));
-        s.phi = 2.0 * std::numbers::pi * uniform(rng);
+        s.phi = 2.0 * std::numbers::pi * uniform(rng) - std::numbers::pi; // [-π, π]
 
         // Power-law brightness: many dim, few bright
         double u = uniform(rng);
@@ -46,8 +46,20 @@ void CelestialSphere::build_grid() {
 }
 
 Vec3 CelestialSphere::sample(const Vec4& position) const {
+    // Normalize θ to [0, π] and φ to [-π, π]
     double theta = position[2];
-    double phi = std::fmod(position[3], 2.0 * std::numbers::pi);
+    double phi = position[3];
+
+    // θ can drift outside [0, π] during integration — reflect it
+    theta = std::fmod(theta, 2.0 * std::numbers::pi);
+    if (theta < 0.0) theta += 2.0 * std::numbers::pi;
+    if (theta > std::numbers::pi) {
+        theta = 2.0 * std::numbers::pi - theta;
+        phi += std::numbers::pi; // Reflecting θ flips the hemisphere
+    }
+
+    // Normalize φ to [-π, π]
+    phi = std::fmod(phi, 2.0 * std::numbers::pi);
     if (phi > std::numbers::pi) phi -= 2.0 * std::numbers::pi;
     if (phi < -std::numbers::pi) phi += 2.0 * std::numbers::pi;
 

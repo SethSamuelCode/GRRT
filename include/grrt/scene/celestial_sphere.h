@@ -22,7 +22,7 @@ private:
     };
 
     std::vector<Star> stars_;
-    double angular_tolerance_ = 0.01;
+    double angular_tolerance_ = 0.003;
 
     static constexpr int grid_theta = 180;
     static constexpr int grid_phi = 360;
