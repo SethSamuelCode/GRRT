@@ -17,6 +17,11 @@ int main() {
     params.observer_phi = 0.0;
     params.fov = 1.047; // ~60 degrees
     params.integrator_max_steps = 10000;
+    params.disk_enabled = 1;
+    params.disk_inner = 0.0;       // 0 = use ISCO
+    params.disk_outer = 20.0;
+    params.disk_temperature = 1e7; // 10 million K peak
+    params.background_type = GRRT_BG_STARS;
 
     const char* output_path = "output.png";
 

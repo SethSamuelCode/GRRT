@@ -1,31 +1,36 @@
 #include "grrt/render/renderer.h"
+#include "grrt/scene/accretion_disk.h"
+#include "grrt/scene/celestial_sphere.h"
+#include "grrt/color/spectrum.h"
 
 namespace grrt {
 
-Renderer::Renderer(const Camera& camera, const GeodesicTracer& tracer)
-    : camera_(camera), tracer_(tracer) {}
+Renderer::Renderer(const Camera& camera, const GeodesicTracer& tracer,
+                   const AccretionDisk* disk, const CelestialSphere* sphere,
+                   const SpectrumLUT* spectrum, const ToneMapper& tonemapper)
+    : camera_(camera), tracer_(tracer), disk_(disk), sphere_(sphere),
+      spectrum_(spectrum), tonemapper_(tonemapper) {}
 
 void Renderer::render(float* framebuffer, int width, int height) const {
     #pragma omp parallel for schedule(dynamic)
     for (int j = 0; j < height; ++j) {
         for (int i = 0; i < width; ++i) {
             GeodesicState state = camera_.ray_for_pixel(i, j);
-            RayTermination result = tracer_.trace(state);
+            TraceResult result = tracer_.trace(state, disk_, spectrum_);
+
+            Vec3 color = result.accumulated_color;
+
+            if (result.termination == RayTermination::Escaped && sphere_) {
+                color += sphere_->sample(result.final_position);
+            }
+
+            color = tonemapper_.apply(color);
 
             const int idx = (j * width + i) * 4;
-            if (result == RayTermination::Escaped) {
-                // White pixel
-                framebuffer[idx + 0] = 1.0f;
-                framebuffer[idx + 1] = 1.0f;
-                framebuffer[idx + 2] = 1.0f;
-                framebuffer[idx + 3] = 1.0f;
-            } else {
-                // Black pixel (horizon hit or max steps)
-                framebuffer[idx + 0] = 0.0f;
-                framebuffer[idx + 1] = 0.0f;
-                framebuffer[idx + 2] = 0.0f;
-                framebuffer[idx + 3] = 1.0f;
-            }
+            framebuffer[idx + 0] = static_cast<float>(color[0]);
+            framebuffer[idx + 1] = static_cast<float>(color[1]);
+            framebuffer[idx + 2] = static_cast<float>(color[2]);
+            framebuffer[idx + 3] = 1.0f;
         }
     }
 }
