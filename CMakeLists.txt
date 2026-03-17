@@ -26,3 +26,4 @@ endif()
 # CLI tool
 add_executable(grrt-cli cli/main.cpp)
 target_link_libraries(grrt-cli PRIVATE grrt)
+target_include_directories(grrt-cli PRIVATE third_party/)

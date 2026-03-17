@@ -1,3 +1,6 @@
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #include "grrt/api.h"
 #include <print>
 #include <vector>
@@ -14,6 +17,8 @@ int main() {
     params.observer_phi = 0.0;
     params.fov = 1.047; // ~60 degrees
 
+    const char* output_path = "output.png";
+
     std::println("gr-raytracer CLI");
     std::println("================");
 
@@ -27,8 +32,18 @@ int main() {
     int result = grrt_render(ctx, framebuffer.data());
 
     if (result == 0) {
-        std::println("Render complete. ({} pixels)", params.width * params.height);
-        // TODO: save to PNG via stb_image_write
+        // Convert float RGBA [0,1] to uint8 RGBA [0,255]
+        std::vector<unsigned char> pixels(params.width * params.height * 4);
+        for (int i = 0; i < params.width * params.height * 4; ++i) {
+            float v = framebuffer[i];
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            pixels[i] = static_cast<unsigned char>(v * 255.0f);
+        }
+
+        stbi_write_png(output_path, params.width, params.height, 4,
+                       pixels.data(), params.width * 4);
+        std::println("Saved to {}", output_path);
     } else {
         std::println(stderr, "Render failed: {}", grrt_error(ctx));
     }
