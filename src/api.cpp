@@ -34,6 +34,7 @@ GRRTContext* grrt_create(const GRRTParams* params) {
     double observer_theta = params->observer_theta > 0.0 ? params->observer_theta : 1.396;
     double fov = params->fov > 0.0 ? params->fov : 1.047;
     int max_steps = params->integrator_max_steps > 0 ? params->integrator_max_steps : 10000;
+    double tolerance = params->integrator_tolerance > 0.0 ? params->integrator_tolerance : 1e-8;
 
     // Core physics — select metric
     double spin_a = 0.0;
@@ -46,7 +47,7 @@ GRRTContext* grrt_create(const GRRTParams* params) {
     }
     ctx->integrator = std::make_unique<grrt::RK4>();
     ctx->tracer = std::make_unique<grrt::GeodesicTracer>(
-        *ctx->metric, *ctx->integrator, observer_r, max_steps);
+        *ctx->metric, *ctx->integrator, observer_r, max_steps, 1000.0, tolerance);
     ctx->camera = std::make_unique<grrt::Camera>(
         *ctx->metric, observer_r, observer_theta, params->observer_phi,
         fov, params->width, params->height);
@@ -115,4 +116,9 @@ const char* grrt_error(const GRRTContext* /*ctx*/) {
 
 int grrt_cuda_available(void) {
     return 0;
+}
+
+void grrt_tonemap(float* framebuffer, int width, int height) {
+    grrt::ToneMapper tonemapper;
+    tonemapper.apply_all(framebuffer, width, height);
 }

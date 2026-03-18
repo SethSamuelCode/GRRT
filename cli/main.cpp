@@ -42,17 +42,15 @@ int main() {
     params.observer_r = 50.0;
     params.observer_theta = 1.396; // ~80 degrees
     params.observer_phi = 0.0;
-    params.fov = 1.5708; // ~90 degrees (wider FOV to zoom out)
+    params.fov = 1.5708; // ~90 degrees
     params.integrator_max_steps = 10000;
     params.disk_enabled = 1;
-    params.disk_inner = 0.0;       // 0 = use ISCO
+    params.disk_inner = 0.0;
     params.disk_outer = 20.0;
-    params.disk_temperature = 1e7; // 10 million K peak
+    params.disk_temperature = 1e7;
     params.background_type = GRRT_BG_STARS;
 
-    bool draw_horizon_circle = true;  // Debug flag
-
-    const char* output_path = "output.png";
+    bool draw_horizon_circle = false;
 
     std::println("gr-raytracer CLI");
     std::println("================");
@@ -63,24 +61,25 @@ int main() {
         return 1;
     }
 
+    // Render to linear HDR
     std::vector<float> framebuffer(params.width * params.height * 4);
     int result = grrt_render(ctx, framebuffer.data());
 
     if (result == 0) {
-        // Debug: compare disk brightness left vs right at disk height
-        int mid_y = params.height / 2;  // equatorial row
-        int left_x = params.width / 4;
-        int right_x = 3 * params.width / 4;
-        auto px = [&](int x, int y) -> double {
-            int idx = (y * params.width + x) * 4;
-            double r = framebuffer[idx], g = framebuffer[idx+1], b = framebuffer[idx+2];
-            return std::sqrt(r*r + g*g + b*b);
-        };
-        double left_val = px(left_x, mid_y);
-        double right_val = px(right_x, mid_y);
-        std::println("Disk brightness (tone-mapped) — left({},{})={:.4f}  right({},{})={:.4f}  ratio={:.2f}",
-                     left_x, mid_y, left_val, right_x, mid_y, right_val,
-                     left_val / std::max(right_val, 1e-10));
+        // Save linear HDR as Radiance .hdr (before tone mapping)
+        // stbi_write_hdr wants RGB (3 channels), so strip alpha
+        std::vector<float> hdr_rgb(params.width * params.height * 3);
+        for (int i = 0; i < params.width * params.height; ++i) {
+            hdr_rgb[i * 3 + 0] = framebuffer[i * 4 + 0];
+            hdr_rgb[i * 3 + 1] = framebuffer[i * 4 + 1];
+            hdr_rgb[i * 3 + 2] = framebuffer[i * 4 + 2];
+        }
+        stbi_write_hdr("output.hdr", params.width, params.height, 3, hdr_rgb.data());
+        std::println("Saved HDR to output.hdr (raw linear)");
+
+        // Tone map in-place for PNG output
+        grrt_tonemap(framebuffer.data(), params.width, params.height);
+
         // Convert float RGBA [0,1] to uint8 RGBA [0,255]
         std::vector<unsigned char> pixels(params.width * params.height * 4);
         for (int i = 0; i < params.width * params.height * 4; ++i) {
@@ -93,33 +92,20 @@ int main() {
         if (draw_horizon_circle) {
             double M = params.mass;
             double a = params.spin * M;
-
-            // Event horizon: r_+ = M + √(M² - a²)
             double r_horizon = M + std::sqrt(M * M - a * a);
-
-            // Angular radius of the horizon sphere as seen from r_obs
-            // (small-angle, flat-space projection — the "true" coordinate size)
             double ang_radius = r_horizon / params.observer_r;
-
-            // Convert to pixels
             double pixels_per_rad = params.width / params.fov;
             double circle_radius_px = ang_radius * pixels_per_rad;
-
             double cx = params.width / 2.0;
             double cy = params.height / 2.0;
-
-            // Red circle = event horizon (coordinate size, no lensing)
             draw_circle(pixels, params.width, params.height,
-                        cx, cy, circle_radius_px,
-                        255, 50, 50, 1.5);
-
-            std::println("Horizon r_+ = {:.4f}M, angular radius = {:.4f} rad, {:.1f} px",
-                         r_horizon, ang_radius, circle_radius_px);
+                        cx, cy, circle_radius_px, 255, 50, 50, 1.5);
+            std::println("Horizon r_+ = {:.4f}M, {:.1f} px radius", r_horizon, circle_radius_px);
         }
 
-        stbi_write_png(output_path, params.width, params.height, 4,
+        stbi_write_png("output.png", params.width, params.height, 4,
                        pixels.data(), params.width * 4);
-        std::println("Saved to {}", output_path);
+        std::println("Saved PNG to output.png");
     } else {
         std::println(stderr, "Render failed: {}", grrt_error(ctx));
     }

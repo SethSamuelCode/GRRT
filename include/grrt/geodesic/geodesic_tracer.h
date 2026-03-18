@@ -26,7 +26,8 @@ struct TraceResult {
 class GeodesicTracer {
 public:
     GeodesicTracer(const Metric& metric, const Integrator& integrator,
-                   double observer_r, int max_steps = 10000, double r_escape = 1000.0);
+                   double observer_r, int max_steps = 10000, double r_escape = 1000.0,
+                   double tolerance = 1e-8);
 
     TraceResult trace(GeodesicState state,
                       const AccretionDisk* disk,
@@ -38,6 +39,7 @@ private:
     double observer_r_;
     int max_steps_;
     double r_escape_;
+    double tolerance_;
     double horizon_epsilon_ = 0.01;
 };
 

@@ -7,7 +7,12 @@ namespace grrt {
 
 class ToneMapper {
 public:
-    Vec3 apply(const Vec3& hdr) const;
+    // Two-pass auto-exposure tone mapping applied to entire framebuffer
+    // Computes log-average luminance, then applies extended Reinhard with auto white point
+    void apply_all(float* framebuffer, int width, int height) const;
+
+private:
+    double key_value_ = 0.18;  // Photographic middle gray
 };
 
 } // namespace grrt

@@ -1,4 +1,5 @@
 #include "grrt/geodesic/geodesic_tracer.h"
+#include "grrt/geodesic/rk4.h"
 #include "grrt/scene/accretion_disk.h"
 #include "grrt/color/spectrum.h"
 #include <cmath>
@@ -7,9 +8,11 @@
 namespace grrt {
 
 GeodesicTracer::GeodesicTracer(const Metric& metric, const Integrator& integrator,
-                               double observer_r, int max_steps, double r_escape)
+                               double observer_r, int max_steps, double r_escape,
+                               double tolerance)
     : metric_(metric), integrator_(integrator),
-      observer_r_(observer_r), max_steps_(max_steps), r_escape_(r_escape) {}
+      observer_r_(observer_r), max_steps_(max_steps), r_escape_(r_escape),
+      tolerance_(tolerance) {}
 
 TraceResult GeodesicTracer::trace(GeodesicState state,
                                   const AccretionDisk* disk,
@@ -17,6 +20,12 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
     const double r_horizon = metric_.horizon_radius();
     const double half_pi = std::numbers::pi / 2.0;
     Vec3 color;
+
+    // Try to use adaptive stepping if the integrator is RK4
+    const auto* rk4 = dynamic_cast<const RK4*>(&integrator_);
+
+    // Initial step size — conservative, adapts quickly
+    double dlambda = 0.01 * observer_r_;
 
     GeodesicState prev = state;
 
@@ -33,8 +42,14 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
 
         prev = state;
 
-        const double dlambda = 0.005 * r;
-        state = integrator_.step(metric_, state, dlambda);
+        // Adaptive step (or fixed fallback)
+        if (rk4) {
+            auto result = rk4->adaptive_step(metric_, state, dlambda, tolerance_);
+            state = result.state;
+            dlambda = result.next_dlambda;
+        } else {
+            state = integrator_.step(metric_, state, 0.005 * r);
+        }
 
         // Check for disk crossing (θ crosses π/2)
         if (disk && spectrum) {
@@ -43,7 +58,6 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
 
             double d_prev = theta_prev - half_pi;
             double d_new = theta_new - half_pi;
-            // Only count real crossings, not floating-point noise
             if (d_prev * d_new < 0.0 && std::abs(d_prev - d_new) > 1e-12) {
                 double frac = -d_prev / (d_new - d_prev);
 

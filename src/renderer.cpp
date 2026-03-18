@@ -12,6 +12,7 @@ Renderer::Renderer(const Camera& camera, const GeodesicTracer& tracer,
       spectrum_(spectrum), tonemapper_(tonemapper) {}
 
 void Renderer::render(float* framebuffer, int width, int height) const {
+    // Render to linear HDR — caller decides whether to tone map
     #pragma omp parallel for schedule(dynamic)
     for (int j = 0; j < height; ++j) {
         for (int i = 0; i < width; ++i) {
@@ -23,8 +24,6 @@ void Renderer::render(float* framebuffer, int width, int height) const {
             if (result.termination == RayTermination::Escaped && sphere_) {
                 color += sphere_->sample(result.final_position);
             }
-
-            color = tonemapper_.apply(color);
 
             const int idx = (j * width + i) * 4;
             framebuffer[idx + 0] = static_cast<float>(color[0]);

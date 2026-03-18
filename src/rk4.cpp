@@ -1,4 +1,6 @@
 #include "grrt/geodesic/rk4.h"
+#include <cmath>
+#include <algorithm>
 
 namespace grrt {
 
@@ -54,6 +56,63 @@ GeodesicState RK4::step(const Metric& metric, const GeodesicState& state, double
         + (k1.momentum + k2.momentum * 2.0 + k3.momentum * 2.0 + k4.momentum) * (dl / 6.0);
 
     return {new_pos, new_mom};
+}
+
+AdaptiveResult RK4::adaptive_step(const Metric& metric, const GeodesicState& state,
+                                  double dlambda, double tolerance) const {
+    constexpr double dl_min = 1e-6;
+    constexpr int max_retries = 20;
+    constexpr double eps = 1e-10;
+
+    double dl = dlambda;
+
+    for (int retry = 0; retry < max_retries; ++retry) {
+        // One full step
+        GeodesicState s_full = step(metric, state, dl);
+
+        // Two half steps
+        GeodesicState s_mid = step(metric, state, dl * 0.5);
+        GeodesicState s_half = step(metric, s_mid, dl * 0.5);
+
+        // Compute max relative error across spatial position (r,θ,φ) and all momentum
+        double err = 0.0;
+        for (int i = 1; i < 4; ++i) {  // Skip t (index 0) for position
+            double diff = std::abs(s_full.position[i] - s_half.position[i]);
+            double scale = std::abs(s_half.position[i]) + eps;
+            err = std::max(err, diff / scale);
+        }
+        for (int i = 0; i < 4; ++i) {  // All momentum components
+            double diff = std::abs(s_full.momentum[i] - s_half.momentum[i]);
+            double scale = std::abs(s_half.momentum[i]) + eps;
+            err = std::max(err, diff / scale);
+        }
+
+        if (err <= tolerance) {
+            // Accept — decide whether to grow step
+            double next_dl = dl;
+            if (err < tolerance * 0.01) {
+                next_dl = dl * 2.0;
+            }
+            // Clamp max
+            double r = std::abs(s_half.position[1]);
+            next_dl = std::min(next_dl, 5.0 * std::max(r, 1.0));
+            return {s_half, next_dl};
+        }
+
+        // Reject — shrink step
+        dl *= 0.5;
+        if (dl < dl_min) {
+            // Force-accept at minimum step size to prevent infinite loop
+            double r = std::abs(s_half.position[1]);
+            double next_dl = std::min(dl_min, 5.0 * std::max(r, 1.0));
+            return {s_half, next_dl};
+        }
+    }
+
+    // Exhausted retries — force-accept whatever we have
+    GeodesicState s_mid = step(metric, state, dl * 0.5);
+    GeodesicState s_half = step(metric, s_mid, dl * 0.5);
+    return {s_half, dl};
 }
 
 } // namespace grrt

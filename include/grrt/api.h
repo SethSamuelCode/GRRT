@@ -19,6 +19,9 @@ GRRT_EXPORT float grrt_progress(const GRRTContext* ctx);
 GRRT_EXPORT const char* grrt_error(const GRRTContext* ctx);
 GRRT_EXPORT int grrt_cuda_available(void);
 
+// Apply auto-exposure tone mapping to a linear HDR framebuffer (RGBA float, in-place)
+GRRT_EXPORT void grrt_tonemap(float* framebuffer, int width, int height);
+
 #ifdef __cplusplus
 }
 #endif

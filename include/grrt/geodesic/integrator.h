@@ -11,6 +11,11 @@ struct GeodesicState {
     Vec4 momentum;  // p_μ — covariant
 };
 
+struct AdaptiveResult {
+    GeodesicState state;    // Accepted new state (always valid)
+    double next_dlambda;    // Recommended step size for next iteration
+};
+
 class Integrator {
 public:
     virtual ~Integrator() = default;
