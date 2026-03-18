@@ -67,6 +67,20 @@ int main() {
     int result = grrt_render(ctx, framebuffer.data());
 
     if (result == 0) {
+        // Debug: compare disk brightness left vs right at disk height
+        int mid_y = params.height / 2;  // equatorial row
+        int left_x = params.width / 4;
+        int right_x = 3 * params.width / 4;
+        auto px = [&](int x, int y) -> double {
+            int idx = (y * params.width + x) * 4;
+            double r = framebuffer[idx], g = framebuffer[idx+1], b = framebuffer[idx+2];
+            return std::sqrt(r*r + g*g + b*b);
+        };
+        double left_val = px(left_x, mid_y);
+        double right_val = px(right_x, mid_y);
+        std::println("Disk brightness (tone-mapped) — left({},{})={:.4f}  right({},{})={:.4f}  ratio={:.2f}",
+                     left_x, mid_y, left_val, right_x, mid_y, right_val,
+                     left_val / std::max(right_val, 1e-10));
         // Convert float RGBA [0,1] to uint8 RGBA [0,255]
         std::vector<unsigned char> pixels(params.width * params.height * 4);
         for (int i = 0; i < params.width * params.height * 4; ++i) {

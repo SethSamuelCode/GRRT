@@ -112,4 +112,22 @@ Vec3 SpectrumLUT::temperature_to_color(double temperature) const {
     return color * lum;
 }
 
+Vec3 SpectrumLUT::chromaticity(double temperature) const {
+    temperature = std::clamp(temperature, t_min_, t_max_);
+
+    double frac = (temperature - t_min_) / (t_max_ - t_min_) * (num_entries_ - 1);
+    int idx = static_cast<int>(frac);
+    double t = frac - idx;
+
+    if (idx >= num_entries_ - 1) return color_lut_[num_entries_ - 1];
+    return color_lut_[idx] * (1.0 - t) + color_lut_[idx + 1] * t;
+}
+
+double SpectrumLUT::luminosity(double temperature) const {
+    // Luminosity = σT⁴, computed analytically — never clamped.
+    // Normalized relative to t_max so values near the LUT ceiling are ~1.0.
+    double ratio = temperature / t_max_;
+    return ratio * ratio * ratio * ratio;
+}
+
 } // namespace grrt

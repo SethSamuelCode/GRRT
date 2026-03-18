@@ -2,6 +2,7 @@
 #include <cmath>
 #include <algorithm>
 #include <numbers>
+#include <cstdio>
 
 namespace grrt {
 
@@ -138,9 +139,11 @@ Vec3 AccretionDisk::emission(double r_cross, const Vec4& p_cross,
     double T_obs = g * T;
     if (T_obs < 100.0) return {};
 
-    Vec3 color = spectrum.temperature_to_color(T_obs);
-    double g3 = g * g * g;
-    return color * g3;
+    Vec3 chroma = spectrum.chromaticity(T_obs);
+    double lum = spectrum.luminosity(T);
+    double g4 = g * g * g * g;
+
+    return chroma * (lum * g4);
 }
 
 } // namespace grrt

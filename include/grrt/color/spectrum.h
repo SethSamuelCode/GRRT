@@ -13,6 +13,12 @@ public:
     // Look up color × luminosity for a given temperature
     Vec3 temperature_to_color(double temperature) const;
 
+    // Look up chromaticity only (no luminosity scaling) for a given temperature
+    Vec3 chromaticity(double temperature) const;
+
+    // Look up relative luminosity (σT⁴ normalized) for a given temperature
+    double luminosity(double temperature) const;
+
 private:
     double t_min_;
     double t_max_;
