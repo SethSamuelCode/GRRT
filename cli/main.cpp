@@ -66,16 +66,44 @@ int main() {
     int result = grrt_render(ctx, framebuffer.data());
 
     if (result == 0) {
-        // Save linear HDR as Radiance .hdr (before tone mapping)
-        // stbi_write_hdr wants RGB (3 channels), so strip alpha
-        std::vector<float> hdr_rgb(params.width * params.height * 3);
-        for (int i = 0; i < params.width * params.height; ++i) {
-            hdr_rgb[i * 3 + 0] = framebuffer[i * 4 + 0];
-            hdr_rgb[i * 3 + 1] = framebuffer[i * 4 + 1];
-            hdr_rgb[i * 3 + 2] = framebuffer[i * 4 + 2];
+        // Save raw linear HDR (for Blender / programmatic use)
+        {
+            std::vector<float> hdr_rgb(params.width * params.height * 3);
+            for (int i = 0; i < params.width * params.height; ++i) {
+                hdr_rgb[i * 3 + 0] = framebuffer[i * 4 + 0];
+                hdr_rgb[i * 3 + 1] = framebuffer[i * 4 + 1];
+                hdr_rgb[i * 3 + 2] = framebuffer[i * 4 + 2];
+            }
+            stbi_write_hdr("output_linear.hdr", params.width, params.height, 3, hdr_rgb.data());
+            std::println("Saved output_linear.hdr (raw linear)");
         }
-        stbi_write_hdr("output.hdr", params.width, params.height, 3, hdr_rgb.data());
-        std::println("Saved HDR to output.hdr (raw linear)");
+
+        // Save normalized HDR (for darktable / post-processing)
+        // Median-lit-pixel exposure: average brightness of lit pixels → 0.18 (middle gray)
+        {
+            double log_sum = 0.0;
+            int lit = 0;
+            for (int i = 0; i < params.width * params.height; ++i) {
+                int idx = i * 4;
+                double L = 0.2126 * framebuffer[idx] + 0.7152 * framebuffer[idx+1]
+                         + 0.0722 * framebuffer[idx+2];
+                if (L > 1e-10) {
+                    log_sum += std::log(1e-6 + L);
+                    ++lit;
+                }
+            }
+            double L_avg = (lit > 0) ? std::exp(log_sum / lit) : 1.0;
+            float scale = static_cast<float>(0.18 / L_avg);
+
+            std::vector<float> hdr_rgb(params.width * params.height * 3);
+            for (int i = 0; i < params.width * params.height; ++i) {
+                hdr_rgb[i * 3 + 0] = framebuffer[i * 4 + 0] * scale;
+                hdr_rgb[i * 3 + 1] = framebuffer[i * 4 + 1] * scale;
+                hdr_rgb[i * 3 + 2] = framebuffer[i * 4 + 2] * scale;
+            }
+            stbi_write_hdr("output.hdr", params.width, params.height, 3, hdr_rgb.data());
+            std::println("Saved output.hdr (normalized, scale={:.2e})", scale);
+        }
 
         // Tone map in-place for PNG output
         grrt_tonemap(framebuffer.data(), params.width, params.height);
