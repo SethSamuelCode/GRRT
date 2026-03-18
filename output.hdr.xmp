@@ -12,16 +12,16 @@
    xmpMM:DerivedFrom="output.hdr"
    xmp:Rating="1"
    darktable:import_timestamp="63909422069354461"
-   darktable:change_timestamp="-1"
+   darktable:change_timestamp="63909422335686393"
    darktable:export_timestamp="-1"
    darktable:print_timestamp="-1"
    darktable:xmp_version="5"
    darktable:raw_params="0"
    darktable:auto_presets_applied="1"
-   darktable:history_end="5"
+   darktable:history_end="7"
    darktable:iop_order_version="5"
    darktable:history_basic_hash="81966402ceba6321bda67c3cacb1eb6a"
-   darktable:history_current_hash="29e5f6f20c0467c00e0f3d884d652cd6">
+   darktable:history_current_hash="f4cc7018523623bb5ada1047b7d88aca">
    <darktable:masks_history>
     <rdf:Seq/>
    </darktable:masks_history>
@@ -73,10 +73,32 @@
       darktable:blendop_params="gz11eJxjYIAACQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dcF/IADRAGpyHQU="/>
      <rdf:li
       darktable:num="4"
+      darktable:operation="filmicrgb"
+      darktable:enabled="1"
+      darktable:modversion="6"
+      darktable:params="gz02eJybNXOyIxPDhAO//9s7MoCBgwMDwwknCAYBD6dZQDX6yypsQGLTG5bZc11XBrIb7Bmg4OwZHztmIM0CxIxQMUYkNgwwQWkAXLMTtg=="
+      darktable:multi_name=""
+      darktable:multi_name_hand_edited="0"
+      darktable:multi_priority="0"
+      darktable:blendop_version="14"
+      darktable:blendop_params="gz08eJxjYGBgYAFiCQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dlAx68oBEMbFxwX+AwGIBgCbGCeh"/>
+     <rdf:li
+      darktable:num="5"
       darktable:operation="exposure"
       darktable:enabled="1"
       darktable:modversion="7"
       darktable:params="0000000000000000feff3fc000004842000080c00000000001000000"
+      darktable:multi_name=""
+      darktable:multi_name_hand_edited="0"
+      darktable:multi_priority="0"
+      darktable:blendop_version="14"
+      darktable:blendop_params="gz08eJxjYGBgYAFiCQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dlAx68oBEMbFxwX+AwGIBgCbGCeh"/>
+     <rdf:li
+      darktable:num="6"
+      darktable:operation="filmicrgb"
+      darktable:enabled="1"
+      darktable:modversion="6"
+      darktable:params="gz02eJybNXOyIxPDhAO//9s7MjAccKgWyXNgYDjhBMEg4OE0C6hGf1mFDUhsesMye87ryjYv1Art5VpnHiywvXTg7BkfO2agShYgZoRoAtMwNgwwQcUAI34arg=="
       darktable:multi_name=""
       darktable:multi_name_hand_edited="0"
       darktable:multi_priority="0"
