@@ -50,6 +50,7 @@ if(GRRT_ENABLE_CUDA)
     target_include_directories(grrt PRIVATE cuda/)
     target_link_libraries(grrt PRIVATE CUDA::cudart)
     target_compile_definitions(grrt PRIVATE GRRT_HAS_CUDA)
+    set_property(TARGET grrt PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 endif()
 
 # CLI tool

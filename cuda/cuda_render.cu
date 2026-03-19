@@ -9,49 +9,34 @@
 /// CRITICAL: cudaMemcpyToSymbol must be called from the SAME translation unit that
 /// defines the symbol. That's why the upload wrappers live here, not in cuda_backend.cu.
 
-// We need to define __constant__/__device__ symbols before the headers
-// declare them extern, so that the compiler sees the definitions first and the
-// subsequent extern declarations become compatible redeclarations (not errors).
-// This requires including prerequisite headers for the types used in the symbols.
-
+#include "cuda_types.h"
 #include "cuda_math.h"
 #include "cuda_metric.h"
-#include <cuda_runtime.h>
-
-// Forward-declare types needed for symbol definitions (before cuda_types.h
-// is included, which would pull in the full headers and extern declarations).
-// Actually cuda_types.h is needed for RenderParams, Star, MAX_* constants.
-// We include cuda_math.h and cuda_metric.h first (they have no extern symbols),
-// then cuda_types.h which defines the structs but has no extern symbols either.
-#include "cuda_types.h"
-
-// ---------------------------------------------------------------------------
-// Define __constant__ and __device__ symbols BEFORE headers that declare them
-// extern. This way the definitions come first, and the extern redeclarations
-// in the headers are compatible (just re-declarations of already-defined symbols).
-// ---------------------------------------------------------------------------
-namespace cuda {
-
-__constant__ RenderParams d_params;
-__constant__ double d_color_lut[MAX_SPECTRUM_ENTRIES][3];
-__constant__ double d_luminosity_lut[MAX_SPECTRUM_ENTRIES];
-__constant__ double d_flux_lut[MAX_FLUX_LUT_ENTRIES];
-
-// d_stars is __device__ (global memory) — 5000 stars x 24 bytes = 120 KB,
-// which exceeds the 64 KB constant memory limit.
-__device__ Star d_stars[MAX_STARS];
-
-} // namespace cuda
-
-// NOW include the remaining headers (which contain extern declarations for
-// d_color_lut, d_luminosity_lut, d_flux_lut, d_stars — these will be
-// compatible redeclarations of the symbols we just defined).
 #include "cuda_geodesic.h"
 #include "cuda_camera.h"
 #include "cuda_color.h"
 #include "cuda_scene.h"
+#include <cuda_runtime.h>
+
+// ---------------------------------------------------------------------------
+// Constant/device memory definitions
+// ---------------------------------------------------------------------------
+// d_color_lut, d_luminosity_lut, d_flux_lut, d_stars are declared extern in
+// cuda_color.h and cuda_scene.h. With CUDA_SEPARABLE_COMPILATION enabled
+// (-rdc=true), nvcc correctly handles the extern + definition pattern.
+__constant__ double cuda::d_color_lut[cuda::MAX_SPECTRUM_ENTRIES][3];
+__constant__ double cuda::d_luminosity_lut[cuda::MAX_SPECTRUM_ENTRIES];
+__constant__ double cuda::d_flux_lut[cuda::MAX_FLUX_LUT_ENTRIES];
+
+// d_stars is __device__ (global memory) — 5000 stars x 24 bytes = 120 KB,
+// which exceeds the 64 KB constant memory limit.
+__device__ cuda::Star cuda::d_stars[cuda::MAX_STARS];
 
 namespace cuda {
+
+// d_params has no extern declaration in any header, so we define it directly
+// inside the namespace block.
+__constant__ RenderParams d_params;
 
 // ---------------------------------------------------------------------------
 // Ray termination categories
