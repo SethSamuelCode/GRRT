@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cuda_runtime.h>
 #include "cuda_math.h"
+#include "cuda_metric.h"
 
 // ---------------------------------------------------------------------------
 // Device kernel: runs 7 independent math sub-tests, writing pass/fail (1/0)
@@ -150,6 +151,126 @@ void run_math_tests() {
 }
 
 // ---------------------------------------------------------------------------
+// Device kernel: runs 8 metric sub-tests, writing pass/fail (1/0)
+// into results[0..7].
+//
+// Position used throughout: equatorial plane at r=10M, theta=pi/2.
+// x = {t=0, r=10, theta=pi/2, phi=0}
+// ---------------------------------------------------------------------------
+__global__ void test_metric_kernel(int* results) {
+    const double M   = 1.0;
+    const double a   = 0.998;   // near-extremal Kerr spin
+    const double r   = 10.0;
+    const cuda::Vec4 x{0.0, r, 1.5707963267948966, 0.0};  // theta = pi/2
+
+    // --- results[0]: Schwarzschild g_tt at r=10M ---
+    // Expected: -(1 - 2/10) = -0.8
+    {
+        cuda::Matrix4 g = cuda::schwarzschild_g_lower(M, x);
+        bool ok = (fabs(g.m[0][0] - (-0.8)) < 1e-12);
+        results[0] = ok ? 1 : 0;
+    }
+
+    // --- results[1]: Schwarzschild g_rr at r=10M ---
+    // Expected: 1/(1 - 2/10) = 1.25
+    {
+        cuda::Matrix4 g = cuda::schwarzschild_g_lower(M, x);
+        bool ok = (fabs(g.m[1][1] - 1.25) < 1e-12);
+        results[1] = ok ? 1 : 0;
+    }
+
+    // --- results[2]: Schwarzschild horizon = 2M (M=1) ---
+    {
+        double rh = cuda::horizon_radius(cuda::MetricType::Schwarzschild, M, 0.0);
+        bool ok = (fabs(rh - 2.0) < 1e-14);
+        results[2] = ok ? 1 : 0;
+    }
+
+    // --- results[3]: Schwarzschild ISCO = 6M (M=1) ---
+    {
+        double ri = cuda::isco_radius(cuda::MetricType::Schwarzschild, M, 0.0);
+        bool ok = (fabs(ri - 6.0) < 1e-14);
+        results[3] = ok ? 1 : 0;
+    }
+
+    // --- results[4]: Kerr g_tphi != 0 at r=10M, spin=0.998 (off-diagonal test) ---
+    // g_tphi = -2 * M * a * r * sin²θ / Σ  which is nonzero for a > 0
+    {
+        cuda::Matrix4 g = cuda::kerr_g_lower(M, a, x);
+        bool ok = (fabs(g.m[0][3]) > 1e-6);   // must be non-trivially nonzero
+        results[4] = ok ? 1 : 0;
+    }
+
+    // --- results[5]: Kerr horizon < 2M for spin=0.998 ---
+    // r_h = M + sqrt(M² - a²) < 2M since a > 0
+    {
+        double rh = cuda::horizon_radius(cuda::MetricType::Kerr, M, a);
+        bool ok = (rh < 2.0 * M) && (rh > 0.0);
+        results[5] = ok ? 1 : 0;
+    }
+
+    // --- results[6]: Schwarzschild g * g^-1 ≈ I (check [1][1] element) ---
+    {
+        cuda::Matrix4 g     = cuda::schwarzschild_g_lower(M, x);
+        cuda::Matrix4 g_inv = cuda::schwarzschild_g_upper(M, x);
+        // Product [1][1]: only m[1][1] * inv[1][1] is nonzero (diagonal metric)
+        double prod = g.m[1][1] * g_inv.m[1][1];
+        bool ok = (fabs(prod - 1.0) < 1e-10);
+        results[6] = ok ? 1 : 0;
+    }
+
+    // --- results[7]: Kerr g * g^-1 ≈ I (check [0][0] element, tolerance 1e-10) ---
+    // Row 0 of g has non-zero entries at [0][0] and [0][3].
+    // Col 0 of g_inv has non-zero entries at [0][0] and [3][0].
+    {
+        cuda::Matrix4 g     = cuda::kerr_g_lower(M, a, x);
+        cuda::Matrix4 g_inv = cuda::kerr_g_upper(M, a, x);
+        double prod_00 = g.m[0][0] * g_inv.m[0][0] + g.m[0][3] * g_inv.m[3][0];
+        bool ok = (fabs(prod_00 - 1.0) < 1e-10);
+        results[7] = ok ? 1 : 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host function: allocates device memory, launches metric kernel, reports.
+// ---------------------------------------------------------------------------
+void run_metric_tests() {
+    const int NUM_TESTS = 8;
+    const char* test_names[NUM_TESTS] = {
+        "Schwarzschild g_tt at r=10M (expected -0.8)",
+        "Schwarzschild g_rr at r=10M (expected 1.25)",
+        "Schwarzschild horizon = 2M",
+        "Schwarzschild ISCO = 6M",
+        "Kerr g_tphi != 0 (frame-dragging off-diagonal)",
+        "Kerr horizon < 2M for spin=0.998",
+        "Schwarzschild g * g^-1 = I ([1][1])",
+        "Kerr g * g^-1 = I ([0][0])"
+    };
+
+    int* d_results = nullptr;
+    cudaMalloc(&d_results, NUM_TESTS * sizeof(int));
+    cudaMemset(d_results, 0, NUM_TESTS * sizeof(int));
+
+    test_metric_kernel<<<1, 1>>>(d_results);
+
+    int h_results[NUM_TESTS] = {};
+    cudaMemcpy(h_results, d_results, NUM_TESTS * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaFree(d_results);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::printf("CUDA kernel error (metric): %s\n", cudaGetErrorString(err));
+    }
+
+    int passed = 0;
+    for (int i = 0; i < NUM_TESTS; ++i) {
+        std::printf("[%s] %s\n", h_results[i] ? "PASS" : "FAIL", test_names[i]);
+        passed += h_results[i];
+    }
+    std::printf("Metric tests: %d/%d passed\n", passed, NUM_TESTS);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 int main() {
@@ -163,6 +284,7 @@ int main() {
         std::printf("Global memory: %.0f MB\n", prop.totalGlobalMem / 1048576.0);
 
         run_math_tests();
+        run_metric_tests();
     }
     return (count > 0) ? 0 : 1;
 }
