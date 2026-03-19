@@ -1,6 +1,10 @@
 #ifndef GRRT_CUDA_MATH_H
 #define GRRT_CUDA_MATH_H
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 /// @file cuda_math.h
 /// @brief CUDA device-compatible math types mirroring the CPU grrt math types.
 ///
