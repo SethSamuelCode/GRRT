@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include "cuda_math.h"
 #include "cuda_metric.h"
+#include "cuda_geodesic.h"
 
 // ---------------------------------------------------------------------------
 // Device kernel: runs 7 independent math sub-tests, writing pass/fail (1/0)
@@ -271,6 +272,109 @@ void run_metric_tests() {
 }
 
 // ---------------------------------------------------------------------------
+// Device kernel: radial infall geodesic in Schwarzschild spacetime.
+//
+// Setup: M=1, observer at r=20, equatorial plane (theta=pi/2).
+// Initial momentum: p_t = -1 (E=1), p_phi=0, p_theta=0.
+//   Null condition: g^{tt} p_t^2 + g^{rr} p_r^2 = 0
+//   => p_r = -sqrt(-g^tt / g^rr) * |p_t|   (negative = falling inward)
+//
+// Integrates 100 adaptive steps with tolerance 1e-8, tracking:
+//   outputs[0] = max |H|           (Hamiltonian constraint violation)
+//   outputs[1] = |E_final - E_0|   (energy conservation error)
+//   outputs[2] = final radius r    (should approach 2M = 2)
+// ---------------------------------------------------------------------------
+__global__ void test_geodesic_kernel(double* outputs) {
+    const double M   = 1.0;
+    const double a   = 0.0;   // Schwarzschild (no spin)
+    const double r0  = 20.0;
+    const double pi  = 3.14159265358979323846;
+
+    // Initial position: equatorial plane
+    cuda::Vec4 x0{0.0, r0, pi * 0.5, 0.0};
+
+    // Compute initial p_r from null condition: g^tt p_t^2 + g^rr p_r^2 = 0
+    cuda::Matrix4 g_inv0 = cuda::metric_upper(cuda::MetricType::Schwarzschild, M, a, x0);
+    double g_tt_up = g_inv0.m[0][0];  // negative
+    double g_rr_up = g_inv0.m[1][1];  // positive
+
+    double p_t = -1.0;   // E = -p_t = 1
+    // |p_r| = sqrt(-g^tt / g^rr) * |p_t|; negative sign = inward
+    double p_r = -sqrt(-g_tt_up / g_rr_up) * fabs(p_t);
+
+    cuda::Vec4 p0{p_t, p_r, 0.0, 0.0};
+
+    cuda::GeodesicState state;
+    state.position = x0;
+    state.momentum = p0;
+
+    double E_initial = -state.momentum[0];  // E = -p_t
+
+    double max_H  = 0.0;
+    double dlambda = 1.0;  // initial step size
+
+    // Integrate 100 adaptive steps
+    for (int step = 0; step < 100; ++step) {
+        // Check Hamiltonian before advancing
+        double H = cuda::hamiltonian(cuda::MetricType::Schwarzschild, M, a, state);
+        double absH = fabs(H);
+        if (absH > max_H) max_H = absH;
+
+        // Stop if we've fallen into the horizon (r < 2.1 * M)
+        if (state.position[1] < 2.1 * M) break;
+
+        cuda::AdaptiveResult res = cuda::rk4_adaptive_step(
+            cuda::MetricType::Schwarzschild, M, a, state, dlambda, 1e-8);
+        state    = res.state;
+        dlambda  = res.next_dlambda;
+    }
+
+    double E_final = -state.momentum[0];
+
+    outputs[0] = max_H;
+    outputs[1] = fabs(E_final - E_initial);
+    outputs[2] = state.position[1];  // final radius
+}
+
+// ---------------------------------------------------------------------------
+// Host function: allocates device memory, launches geodesic kernel, reports.
+// ---------------------------------------------------------------------------
+void run_geodesic_tests() {
+    const int NUM_OUTPUTS = 3;
+
+    double* d_outputs = nullptr;
+    cudaMalloc(&d_outputs, NUM_OUTPUTS * sizeof(double));
+    cudaMemset(d_outputs, 0, NUM_OUTPUTS * sizeof(double));
+
+    test_geodesic_kernel<<<1, 1>>>(d_outputs);
+
+    double h_outputs[NUM_OUTPUTS] = {};
+    cudaMemcpy(h_outputs, d_outputs, NUM_OUTPUTS * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaFree(d_outputs);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::printf("CUDA kernel error (geodesic): %s\n", cudaGetErrorString(err));
+    }
+
+    std::printf("\n--- Geodesic Tests (Schwarzschild radial infall from r=20M) ---\n");
+    std::printf("  Max |H| (Hamiltonian violation) : %.3e\n", h_outputs[0]);
+    std::printf("  |E_final - E_initial|           : %.3e\n", h_outputs[1]);
+    std::printf("  Final radius                    : %.6f M\n", h_outputs[2]);
+
+    bool pass_H  = (h_outputs[0] < 1e-8);
+    bool pass_E  = (h_outputs[1] < 1e-8);
+    bool pass_r  = (h_outputs[2] < 5.0);
+
+    std::printf("[%s] Hamiltonian constraint |H| < 1e-8\n",  pass_H ? "PASS" : "FAIL");
+    std::printf("[%s] Energy conservation |dE| < 1e-8\n",    pass_E ? "PASS" : "FAIL");
+    std::printf("[%s] Final radius < 5.0 M (approaching horizon)\n", pass_r ? "PASS" : "FAIL");
+
+    int passed = (pass_H ? 1 : 0) + (pass_E ? 1 : 0) + (pass_r ? 1 : 0);
+    std::printf("Geodesic tests: %d/3 passed\n", passed);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 int main() {
@@ -285,6 +389,7 @@ int main() {
 
         run_math_tests();
         run_metric_tests();
+        run_geodesic_tests();
     }
     return (count > 0) ? 0 : 1;
 }
