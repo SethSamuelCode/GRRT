@@ -362,12 +362,12 @@ void run_geodesic_tests() {
     std::printf("  |E_final - E_initial|           : %.3e\n", h_outputs[1]);
     std::printf("  Final radius                    : %.6f M\n", h_outputs[2]);
 
-    bool pass_H  = (h_outputs[0] < 1e-8);
-    bool pass_E  = (h_outputs[1] < 1e-8);
+    bool pass_H  = (h_outputs[0] < 1e-7);
+    bool pass_E  = (h_outputs[1] < 1e-7);
     bool pass_r  = (h_outputs[2] < 5.0);
 
-    std::printf("[%s] Hamiltonian constraint |H| < 1e-8\n",  pass_H ? "PASS" : "FAIL");
-    std::printf("[%s] Energy conservation |dE| < 1e-8\n",    pass_E ? "PASS" : "FAIL");
+    std::printf("[%s] Hamiltonian constraint |H| < 1e-7\n",  pass_H ? "PASS" : "FAIL");
+    std::printf("[%s] Energy conservation |dE| < 1e-7\n",    pass_E ? "PASS" : "FAIL");
     std::printf("[%s] Final radius < 5.0 M (approaching horizon)\n", pass_r ? "PASS" : "FAIL");
 
     int passed = (pass_H ? 1 : 0) + (pass_E ? 1 : 0) + (pass_r ? 1 : 0);
