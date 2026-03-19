@@ -5,6 +5,15 @@
 #include "cuda_geodesic.h"
 #include "cuda_types.h"
 #include "cuda_camera.h"
+#include "cuda_scene.h"
+
+// ---------------------------------------------------------------------------
+// Device/constant memory definitions required by cuda_scene.h (and cuda_color.h)
+// ---------------------------------------------------------------------------
+__constant__ double cuda::d_flux_lut[cuda::MAX_FLUX_LUT_ENTRIES];
+__device__ cuda::Star cuda::d_stars[cuda::MAX_STARS];       // global (too large for __constant__)
+__constant__ double cuda::d_color_lut[cuda::MAX_SPECTRUM_ENTRIES][3];
+__constant__ double cuda::d_luminosity_lut[cuda::MAX_SPECTRUM_ENTRIES];
 
 // ---------------------------------------------------------------------------
 // Device kernel: runs 7 independent math sub-tests, writing pass/fail (1/0)
@@ -470,6 +479,74 @@ void run_camera_tests() {
 }
 
 // ---------------------------------------------------------------------------
+// Device kernel: disk orbital mechanics tests.
+//
+// results[0]: omega_kepler at r=10M, Schwarzschild (a=0)
+//             Expected: sqrt(M/r^3) = sqrt(1/1000) ≈ 0.031622776601683795
+// results[1]: omega_kepler Kerr (a=0.998) at r=10M should differ from a=0 value
+//             because Omega_kepler = w/(1+a*w) != w for a != 0
+// ---------------------------------------------------------------------------
+__global__ void test_disk_kernel(double* results) {
+    const double M = 1.0;
+    const double r = 10.0;
+
+    // results[0]: Schwarzschild (a=0) omega_kepler = sqrt(M/r^3)
+    {
+        double a   = 0.0;
+        double w   = cuda::omega_kepler(r, M, a);
+        results[0] = w;   // expected ~0.031622776601683795
+    }
+
+    // results[1]: Kerr (a=0.998) Omega_kepler != omega_kepler (frame-dragging)
+    {
+        double a        = 0.998;
+        double w_schwarz = cuda::omega_kepler(r, M, 0.0);
+        double w_kerr    = cuda::Omega_kepler(r, M, a);
+        // Store the difference — must be non-zero (frame-dragging effect)
+        results[1] = fabs(w_kerr - w_schwarz);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host function: allocates device memory, launches disk kernel, reports.
+// ---------------------------------------------------------------------------
+void run_disk_tests() {
+    const int NUM_OUTPUTS = 2;
+
+    double* d_results = nullptr;
+    cudaMalloc(&d_results, NUM_OUTPUTS * sizeof(double));
+    cudaMemset(d_results, 0, NUM_OUTPUTS * sizeof(double));
+
+    test_disk_kernel<<<1, 1>>>(d_results);
+
+    double h_results[NUM_OUTPUTS] = {};
+    cudaMemcpy(h_results, d_results, NUM_OUTPUTS * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaFree(d_results);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::printf("CUDA kernel error (disk): %s\n", cudaGetErrorString(err));
+    }
+
+    const double expected_omega_schwarz = 0.031622776601683795; // sqrt(1/1000)
+
+    std::printf("\n--- Disk Tests (Keplerian orbital mechanics) ---\n");
+    std::printf("  omega_kepler(r=10M, a=0)         : %.15f\n", h_results[0]);
+    std::printf("  expected                          : %.15f\n", expected_omega_schwarz);
+    std::printf("  |Omega_kerr - omega_schwarz|      : %.6e\n",  h_results[1]);
+
+    bool pass0 = (fabs(h_results[0] - expected_omega_schwarz) < 1e-12);
+    bool pass1 = (h_results[1] > 1e-6);  // frame-dragging must produce a measurable difference
+
+    std::printf("[%s] omega_kepler(r=10M, a=0) = sqrt(1/1000)\n", pass0 ? "PASS" : "FAIL");
+    std::printf("[%s] Kerr Omega_kepler differs from Schwarzschild (frame-dragging)\n",
+                pass1 ? "PASS" : "FAIL");
+
+    int passed = (pass0 ? 1 : 0) + (pass1 ? 1 : 0);
+    std::printf("Disk tests: %d/2 passed\n", passed);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 int main() {
@@ -486,6 +563,7 @@ int main() {
         run_metric_tests();
         run_geodesic_tests();
         run_camera_tests();
+        run_disk_tests();
     }
     return (count > 0) ? 0 : 1;
 }
