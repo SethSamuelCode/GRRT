@@ -9,17 +9,21 @@ namespace grrt {
 
 class CelestialSphere {
 public:
-    explicit CelestialSphere(int num_stars = 5000, unsigned int seed = 42);
-
-    // Sample the sky at the given escaped ray position
-    Vec3 sample(const Vec4& position) const;
-
-private:
     struct Star {
         double theta;
         double phi;
         double brightness;
     };
+
+    explicit CelestialSphere(int num_stars = 5000, unsigned int seed = 42);
+
+    // Sample the sky at the given escaped ray position
+    Vec3 sample(const Vec4& position) const;
+
+    // CUDA backend accessor for star data extraction
+    const std::vector<Star>& star_data() const { return stars_; }
+
+private:
 
     std::vector<Star> stars_;
     double angular_tolerance_ = 0.003;

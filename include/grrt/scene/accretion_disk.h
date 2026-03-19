@@ -18,6 +18,13 @@ public:
 
     double temperature(double r) const;
 
+    // CUDA backend accessors for LUT data extraction
+    const std::vector<double>& flux_lut_data() const { return flux_lut_; }
+    double flux_max() const { return flux_max_; }
+    double flux_r_min() const { return flux_r_min_; }
+    double flux_r_max() const { return flux_r_max_; }
+    int flux_lut_size() const { return flux_lut_size_; }
+
     Vec3 emission(double r_cross, const Vec4& p_cross,
                   double observer_r, const SpectrumLUT& spectrum) const;
 

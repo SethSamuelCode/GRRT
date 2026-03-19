@@ -19,6 +19,10 @@ public:
     // Look up relative luminosity (σT⁴ normalized) for a given temperature
     double luminosity(double temperature) const;
 
+    // CUDA backend accessors for LUT data extraction
+    const std::vector<Vec3>& color_lut_data() const { return color_lut_; }
+    const std::vector<double>& luminosity_lut_data() const { return luminosity_lut_; }
+
 private:
     double t_min_;
     double t_max_;
