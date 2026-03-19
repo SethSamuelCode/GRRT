@@ -3,6 +3,8 @@
 #include "cuda_math.h"
 #include "cuda_metric.h"
 #include "cuda_geodesic.h"
+#include "cuda_types.h"
+#include "cuda_camera.h"
 
 // ---------------------------------------------------------------------------
 // Device kernel: runs 7 independent math sub-tests, writing pass/fail (1/0)
@@ -375,6 +377,99 @@ void run_geodesic_tests() {
 }
 
 // ---------------------------------------------------------------------------
+// Device kernel: camera tetrad and pixel-to-ray tests.
+//
+// Setup: Schwarzschild M=1, observer at r=50, equatorial plane (θ=π/2, φ=0),
+//        100x100 pixels, fov=0.5.
+//
+// results[0]: Observer position preserved (ray.position[1] ≈ 50.0)
+// results[1]: Center pixel ray is null (H = ½ g^{ab} p_a p_b ≈ 0, |H| < 1e-10)
+// results[2]: Center pixel ray points inward (p^r contravariant < 0)
+// ---------------------------------------------------------------------------
+__global__ void test_camera_kernel(int* results) {
+    const double pi = M_PI;
+
+    // Build RenderParams for a Schwarzschild observer at r=50, equatorial plane
+    cuda::RenderParams params{};
+    params.metric_type  = cuda::MetricType::Schwarzschild;
+    params.mass         = 1.0;
+    params.spin         = 0.0;
+    params.width        = 100;
+    params.height       = 100;
+    params.fov          = 0.5;
+    params.cam_position = cuda::Vec4{0.0, 50.0, pi * 0.5, 0.0};
+
+    // Build tetrad in-place
+    cuda::build_tetrad(params);
+
+    // Generate center pixel ray (i=50, j=50)
+    cuda::GeodesicState ray = cuda::ray_for_pixel(params, 50, 50);
+
+    // --- results[0]: observer position r component preserved ---
+    {
+        bool ok = (fabs(ray.position[1] - 50.0) < 1e-10);
+        results[0] = ok ? 1 : 0;
+    }
+
+    // --- results[1]: ray is null (Hamiltonian ≈ 0) ---
+    {
+        double H = cuda::hamiltonian(cuda::MetricType::Schwarzschild,
+                                     params.mass, params.spin, ray);
+        bool ok = (fabs(H) < 1e-10);
+        results[1] = ok ? 1 : 0;
+    }
+
+    // --- results[2]: center pixel p^r contravariant < 0 (points inward) ---
+    // p^r = g^{rμ} p_μ = g^{rr} * p_r   (Schwarzschild is diagonal)
+    {
+        cuda::Matrix4 g_up = cuda::metric_upper(cuda::MetricType::Schwarzschild,
+                                                 params.mass, params.spin,
+                                                 ray.position);
+        double p_r_contra = 0.0;
+        for (int nu = 0; nu < 4; ++nu) {
+            p_r_contra += g_up.m[1][nu] * ray.momentum[nu];
+        }
+        bool ok = (p_r_contra < 0.0);
+        results[2] = ok ? 1 : 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host function: allocates device memory, launches camera kernel, reports.
+// ---------------------------------------------------------------------------
+void run_camera_tests() {
+    const int NUM_TESTS = 3;
+    const char* test_names[NUM_TESTS] = {
+        "Observer position r=50 preserved in ray",
+        "Center pixel ray is null (|H| < 1e-10)",
+        "Center pixel p^r contravariant < 0 (inward)"
+    };
+
+    int* d_results = nullptr;
+    cudaMalloc(&d_results, NUM_TESTS * sizeof(int));
+    cudaMemset(d_results, 0, NUM_TESTS * sizeof(int));
+
+    test_camera_kernel<<<1, 1>>>(d_results);
+
+    int h_results[NUM_TESTS] = {};
+    cudaMemcpy(h_results, d_results, NUM_TESTS * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaFree(d_results);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::printf("CUDA kernel error (camera): %s\n", cudaGetErrorString(err));
+    }
+
+    std::printf("\n--- Camera Tests (Schwarzschild observer r=50, 100x100, fov=0.5) ---\n");
+    int passed = 0;
+    for (int i = 0; i < NUM_TESTS; ++i) {
+        std::printf("[%s] %s\n", h_results[i] ? "PASS" : "FAIL", test_names[i]);
+        passed += h_results[i];
+    }
+    std::printf("Camera tests: %d/%d passed\n", passed, NUM_TESTS);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 int main() {
@@ -390,6 +485,7 @@ int main() {
         run_math_tests();
         run_metric_tests();
         run_geodesic_tests();
+        run_camera_tests();
     }
     return (count > 0) ? 0 : 1;
 }
