@@ -24,12 +24,12 @@
 // d_color_lut, d_luminosity_lut, d_flux_lut, d_stars are declared extern in
 // cuda_color.h and cuda_scene.h. With CUDA_SEPARABLE_COMPILATION enabled
 // (-rdc=true), nvcc correctly handles the extern + definition pattern.
-__constant__ double cuda::d_color_lut[cuda::MAX_SPECTRUM_ENTRIES][3];
-__constant__ double cuda::d_luminosity_lut[cuda::MAX_SPECTRUM_ENTRIES];
+__constant__ float cuda::d_color_lut[cuda::MAX_SPECTRUM_ENTRIES][3];
+__constant__ float cuda::d_luminosity_lut[cuda::MAX_SPECTRUM_ENTRIES];
 __constant__ double cuda::d_flux_lut[cuda::MAX_FLUX_LUT_ENTRIES];
 
-// d_stars is __device__ (global memory) — 5000 stars x 24 bytes = 120 KB,
-// which exceeds the 64 KB constant memory limit.
+// d_stars remains __device__ (global memory) — 60 KB with float fields still
+// exceeds remaining constant memory budget after LUTs.
 __device__ cuda::Star cuda::d_stars[cuda::MAX_STARS];
 
 namespace cuda {
@@ -156,12 +156,12 @@ void upload_render_params(const RenderParams& params) {
     cudaMemcpyToSymbol(d_params, &params, sizeof(RenderParams));
 }
 
-void upload_color_lut(const double data[][3], size_t count) {
-    cudaMemcpyToSymbol(d_color_lut, data, count * 3 * sizeof(double));
+void upload_color_lut(const float data[][3], size_t count) {
+    cudaMemcpyToSymbol(d_color_lut, data, count * 3 * sizeof(float));
 }
 
-void upload_luminosity_lut(const double* data, size_t count) {
-    cudaMemcpyToSymbol(d_luminosity_lut, data, count * sizeof(double));
+void upload_luminosity_lut(const float* data, size_t count) {
+    cudaMemcpyToSymbol(d_luminosity_lut, data, count * sizeof(float));
 }
 
 void upload_flux_lut(const double* data, size_t count) {
@@ -173,8 +173,9 @@ void upload_stars(const Star* data, size_t count) {
 }
 
 void launch_render_kernel(float4* output, int* cancel_flag, int width, int height) {
-    dim3 threads(16, 16);
-    dim3 blocks((width + 15) / 16, (height + 15) / 16);
+    // 32-wide ensures warp threads are horizontally adjacent pixels (similar rays = less divergence)
+    dim3 threads(32, 8);
+    dim3 blocks((width + 31) / 32, (height + 7) / 8);
     render_kernel<<<blocks, threads>>>(output, cancel_flag);
 }
 

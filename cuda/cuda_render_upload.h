@@ -17,14 +17,14 @@ namespace cuda {
 void upload_render_params(const RenderParams& params);
 
 /// @brief Upload chromaticity (normalized RGB) lookup table to constant memory.
-/// @param data   Array of [count][3] doubles
+/// @param data   Array of [count][3] floats
 /// @param count  Number of entries (must be <= MAX_SPECTRUM_ENTRIES)
-void upload_color_lut(const double data[][3], size_t count);
+void upload_color_lut(const float data[][3], size_t count);
 
 /// @brief Upload luminosity lookup table to constant memory.
-/// @param data   Array of count doubles
+/// @param data   Array of count floats
 /// @param count  Number of entries (must be <= MAX_SPECTRUM_ENTRIES)
-void upload_luminosity_lut(const double* data, size_t count);
+void upload_luminosity_lut(const float* data, size_t count);
 
 /// @brief Upload Novikov-Thorne flux lookup table to constant memory.
 /// @param data   Array of count doubles

@@ -7,12 +7,12 @@
 namespace cuda {
 
 // These arrays live in __constant__ memory, defined in cuda_render.cu.
-// Declared extern here so device functions can access them.
-extern __constant__ double d_color_lut[MAX_SPECTRUM_ENTRIES][3];
-extern __constant__ double d_luminosity_lut[MAX_SPECTRUM_ENTRIES];
+// Float precision is sufficient for perceptual color data (chromaticity + luminosity).
+extern __constant__ float d_color_lut[MAX_SPECTRUM_ENTRIES][3];
+extern __constant__ float d_luminosity_lut[MAX_SPECTRUM_ENTRIES];
 
 /// Spectrum chromaticity lookup (normalized RGB at temperature T).
-/// Linear interpolation over the precomputed LUT.
+/// Linear interpolation over the precomputed LUT. Uses float for LUT data.
 __device__ inline Vec3 spectrum_chromaticity(double temperature,
                                               double t_min, double t_max, int num_entries) {
     // Clamp to range
@@ -22,15 +22,16 @@ __device__ inline Vec3 spectrum_chromaticity(double temperature,
         return {d_color_lut[last][0], d_color_lut[last][1], d_color_lut[last][2]};
     }
 
-    double frac = (temperature - t_min) / (t_max - t_min) * (num_entries - 1);
+    float frac = (float)((temperature - t_min) / (t_max - t_min) * (num_entries - 1));
     int idx = (int)frac;
-    double t = frac - idx;
-    if (idx >= num_entries - 1) { idx = num_entries - 2; t = 1.0; }
+    float t = frac - idx;
+    if (idx >= num_entries - 1) { idx = num_entries - 2; t = 1.0f; }
 
+    float one_minus_t = 1.0f - t;
     return {
-        d_color_lut[idx][0] * (1.0 - t) + d_color_lut[idx + 1][0] * t,
-        d_color_lut[idx][1] * (1.0 - t) + d_color_lut[idx + 1][1] * t,
-        d_color_lut[idx][2] * (1.0 - t) + d_color_lut[idx + 1][2] * t
+        (double)(d_color_lut[idx][0] * one_minus_t + d_color_lut[idx + 1][0] * t),
+        (double)(d_color_lut[idx][1] * one_minus_t + d_color_lut[idx + 1][1] * t),
+        (double)(d_color_lut[idx][2] * one_minus_t + d_color_lut[idx + 1][2] * t)
     };
 }
 

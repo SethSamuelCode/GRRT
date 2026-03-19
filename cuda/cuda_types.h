@@ -10,11 +10,16 @@ constexpr int MAX_SPECTRUM_ENTRIES = 1000;
 constexpr int MAX_FLUX_LUT_ENTRIES = 500;
 constexpr int MAX_STARS = 5000;
 
+// Spatial bucketing grid for celestial sphere star search
+constexpr int STAR_GRID_THETA = 32;   // bins in θ ∈ [0, π]
+constexpr int STAR_GRID_PHI   = 64;   // bins in φ ∈ [-π, π]
+constexpr int STAR_GRID_CELLS = STAR_GRID_THETA * STAR_GRID_PHI;  // 2048
+
 struct Star {
-    double theta;
-    double phi;
-    double brightness;
-};
+    float theta;
+    float phi;
+    float brightness;
+};  // 12 bytes × 5000 = 60 KB — fits in __constant__ memory
 
 struct RenderParams {
     // Image dimensions

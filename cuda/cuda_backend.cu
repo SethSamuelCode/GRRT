@@ -108,23 +108,25 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
     rp.spectrum_t_max = 100000.0;
     rp.spectrum_num_entries = 1000;
 
-    // Upload spectrum LUTs via wrappers
+    // Upload spectrum LUTs via wrappers (float precision — perceptual data)
     {
         const auto& colors = cpu_spectrum.color_lut_data();
-        double flat_colors[cuda::MAX_SPECTRUM_ENTRIES][3];
-        for (int i = 0; i < (int)colors.size() && i < cuda::MAX_SPECTRUM_ENTRIES; ++i) {
-            flat_colors[i][0] = colors[i][0];
-            flat_colors[i][1] = colors[i][1];
-            flat_colors[i][2] = colors[i][2];
+        int n = std::min((int)colors.size(), cuda::MAX_SPECTRUM_ENTRIES);
+        std::vector<float> flat_colors(n * 3);
+        for (int i = 0; i < n; ++i) {
+            flat_colors[i * 3 + 0] = static_cast<float>(colors[i][0]);
+            flat_colors[i * 3 + 1] = static_cast<float>(colors[i][1]);
+            flat_colors[i * 3 + 2] = static_cast<float>(colors[i][2]);
         }
-        cuda::upload_color_lut(flat_colors, colors.size());
+        cuda::upload_color_lut(reinterpret_cast<const float(*)[3]>(flat_colors.data()), n);
 
         const auto& lums = cpu_spectrum.luminosity_lut_data();
-        double flat_lums[cuda::MAX_SPECTRUM_ENTRIES];
-        for (int i = 0; i < (int)lums.size() && i < cuda::MAX_SPECTRUM_ENTRIES; ++i) {
-            flat_lums[i] = lums[i];
+        int nl = std::min((int)lums.size(), cuda::MAX_SPECTRUM_ENTRIES);
+        std::vector<float> flat_lums(nl);
+        for (int i = 0; i < nl; ++i) {
+            flat_lums[i] = static_cast<float>(lums[i]);
         }
-        cuda::upload_luminosity_lut(flat_lums, lums.size());
+        cuda::upload_luminosity_lut(flat_lums.data(), nl);
     }
 
     // Celestial sphere
@@ -137,13 +139,13 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
         rp.num_stars = (int)stars.size();
         if (rp.num_stars > cuda::MAX_STARS) rp.num_stars = cuda::MAX_STARS;
 
-        cuda::Star flat_stars[cuda::MAX_STARS];
+        std::vector<cuda::Star> flat_stars(rp.num_stars);
         for (int i = 0; i < rp.num_stars; ++i) {
-            flat_stars[i].theta = stars[i].theta;
-            flat_stars[i].phi = stars[i].phi;
-            flat_stars[i].brightness = stars[i].brightness;
+            flat_stars[i].theta = static_cast<float>(stars[i].theta);
+            flat_stars[i].phi = static_cast<float>(stars[i].phi);
+            flat_stars[i].brightness = static_cast<float>(stars[i].brightness);
         }
-        cuda::upload_stars(flat_stars, rp.num_stars);
+        cuda::upload_stars(flat_stars.data(), rp.num_stars);
     }
 
     // Build camera tetrad on host
@@ -161,19 +163,11 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
         return -1;
     }
 
-    // --- Download results ---
+    // --- Download results directly into framebuffer ---
+    // float4 is layout-compatible with float[4] (x,y,z,w = R,G,B,A)
     int num_pixels = params->width * params->height;
-    std::vector<float4> host_output(num_pixels);
-    cudaMemcpy(host_output.data(), ctx->d_output,
+    cudaMemcpy(framebuffer, ctx->d_output,
                num_pixels * sizeof(float4), cudaMemcpyDeviceToHost);
-
-    // Convert float4 to RGBA float layout
-    for (int p = 0; p < num_pixels; ++p) {
-        framebuffer[p * 4 + 0] = host_output[p].x;
-        framebuffer[p * 4 + 1] = host_output[p].y;
-        framebuffer[p * 4 + 2] = host_output[p].z;
-        framebuffer[p * 4 + 3] = host_output[p].w;
-    }
 
     return 0;
 }

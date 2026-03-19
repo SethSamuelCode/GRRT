@@ -72,15 +72,29 @@ __device__ inline GeodesicState geodesic_add(const GeodesicState& s,
 __device__ inline GeodesicState derivatives(MetricType type, double M, double a,
                                              const GeodesicState& state) {
     constexpr double fd_eps = 1e-6;
+    constexpr double inv_2eps = 1.0 / (2.0 * fd_eps);
 
     const Vec4& x = state.position;
     const Vec4& p = state.momentum;
 
-    // dx^μ/dλ = g^{μν} p_ν
+    // dx^μ/dλ = g^{μν} p_ν — exploit Boyer-Lindquist sparsity
     Matrix4 g_inv = metric_upper(type, M, a, x);
-    Vec4 dx = g_inv.contract(p);
+    Vec4 dx{};
+    if (type == MetricType::Schwarzschild) {
+        // Diagonal: g^{μν} = 0 for μ≠ν
+        for (int mu = 0; mu < 4; ++mu)
+            dx.data[mu] = g_inv.m[mu][mu] * p[mu];
+    } else {
+        // Kerr: diagonal + (t,φ) off-diagonal block
+        dx.data[0] = g_inv.m[0][0] * p[0] + g_inv.m[0][3] * p[3];
+        dx.data[1] = g_inv.m[1][1] * p[1];
+        dx.data[2] = g_inv.m[2][2] * p[2];
+        dx.data[3] = g_inv.m[3][0] * p[0] + g_inv.m[3][3] * p[3];
+    }
 
     // dp_μ/dλ = -½ Σ_{α,β} (∂g^{αβ}/∂x^μ) p_α p_β
+    // Process one coordinate at a time to minimize register pressure:
+    // only two Matrix4 live simultaneously (plus/minus), immediately reduced to scalar.
     Vec4 dp{};
     for (int mu = 0; mu < 4; ++mu) {
         Vec4 x_plus  = x;
@@ -88,16 +102,28 @@ __device__ inline GeodesicState derivatives(MetricType type, double M, double a,
         x_plus.data[mu]  += fd_eps;
         x_minus.data[mu] -= fd_eps;
 
-        Matrix4 g_inv_plus  = metric_upper(type, M, a, x_plus);
-        Matrix4 g_inv_minus = metric_upper(type, M, a, x_minus);
+        Matrix4 g_plus  = metric_upper(type, M, a, x_plus);
+        Matrix4 g_minus = metric_upper(type, M, a, x_minus);
 
-        double force = 0.0;
-        for (int alpha = 0; alpha < 4; ++alpha) {
-            for (int beta = 0; beta < 4; ++beta) {
-                double dg = (g_inv_plus.m[alpha][beta] - g_inv_minus.m[alpha][beta])
-                            / (2.0 * fd_eps);
-                force += dg * p[alpha] * p[beta];
+        // Exploit sparsity: only sum over non-zero metric components
+        double force;
+        if (type == MetricType::Schwarzschild) {
+            // Diagonal only: α==β terms
+            force = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                double dg = (g_plus.m[i][i] - g_minus.m[i][i]) * inv_2eps;
+                force += dg * p[i] * p[i];
             }
+        } else {
+            // Kerr: diagonal + (0,3) and (3,0) off-diagonal
+            force = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                double dg = (g_plus.m[i][i] - g_minus.m[i][i]) * inv_2eps;
+                force += dg * p[i] * p[i];
+            }
+            // Off-diagonal (t,φ) block: contributes 2 * dg^{tφ} * p_t * p_φ
+            double dg_tphi = (g_plus.m[0][3] - g_minus.m[0][3]) * inv_2eps;
+            force += 2.0 * dg_tphi * p[0] * p[3];
         }
         dp.data[mu] = -0.5 * force;
     }
@@ -260,11 +286,15 @@ __device__ inline AdaptiveResult rk4_adaptive_step(MetricType type, double M, do
 __device__ inline double hamiltonian(MetricType type, double M, double a,
                                       const GeodesicState& state) {
     Matrix4 g_inv = metric_upper(type, M, a, state.position);
-    double H = 0.0;
-    for (int alpha = 0; alpha < 4; ++alpha) {
-        for (int beta = 0; beta < 4; ++beta) {
-            H += g_inv.m[alpha][beta] * state.momentum[alpha] * state.momentum[beta];
-        }
+    const Vec4& p = state.momentum;
+    double H;
+    if (type == MetricType::Schwarzschild) {
+        H = g_inv.m[0][0] * p[0] * p[0] + g_inv.m[1][1] * p[1] * p[1]
+          + g_inv.m[2][2] * p[2] * p[2] + g_inv.m[3][3] * p[3] * p[3];
+    } else {
+        H = g_inv.m[0][0] * p[0] * p[0] + g_inv.m[1][1] * p[1] * p[1]
+          + g_inv.m[2][2] * p[2] * p[2] + g_inv.m[3][3] * p[3] * p[3]
+          + 2.0 * g_inv.m[0][3] * p[0] * p[3];
     }
     return 0.5 * H;
 }

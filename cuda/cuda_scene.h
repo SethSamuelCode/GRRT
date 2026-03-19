@@ -36,9 +36,8 @@ extern __constant__ double d_flux_lut[MAX_FLUX_LUT_ENTRIES];
 
 /// @brief Star positions and brightnesses for the celestial sphere.
 ///
-/// Stored in global device memory (120 KB for 5000 stars × 3 doubles,
-/// which exceeds the 64 KB constant memory limit).
-/// Matches the CPU CelestialSphere star catalog (same random seed, same layout).
+/// Stored in global device memory (5000 × 12 bytes = 60 KB with float fields).
+/// Exceeds remaining constant memory budget after LUTs, but float halves bandwidth.
 extern __device__ Star d_stars[MAX_STARS];
 
 // ---------------------------------------------------------------------------
@@ -270,17 +269,17 @@ __device__ inline Vec3 celestial_sphere_sample(const Vec4& position,
     if (n > MAX_STARS) n = MAX_STARS;
 
     for (int i = 0; i < n; ++i) {
-        double dtheta = theta - d_stars[i].theta;
-        double dphi   = phi   - d_stars[i].phi;
+        float dtheta = (float)theta - d_stars[i].theta;
+        float dphi   = (float)phi   - d_stars[i].phi;
 
         // Wrap dphi to [-π, π]
-        if (dphi >  M_PI) dphi -= 2.0 * M_PI;
-        if (dphi < -M_PI) dphi += 2.0 * M_PI;
+        if (dphi >  (float)M_PI) dphi -= (float)(2.0 * M_PI);
+        if (dphi < -(float)M_PI) dphi += (float)(2.0 * M_PI);
 
-        double ang_dist2 = dtheta * dtheta + dphi * dphi * sin_t * sin_t;
+        float ang_dist2 = dtheta * dtheta + dphi * dphi * (float)sin_t * (float)sin_t;
 
-        if (ang_dist2 < tol2) {
-            double b = d_stars[i].brightness;
+        if (ang_dist2 < (float)tol2) {
+            double b = (double)d_stars[i].brightness;
             return {b, b, b};
         }
     }
