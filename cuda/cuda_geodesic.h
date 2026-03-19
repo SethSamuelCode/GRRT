@@ -56,13 +56,147 @@ __device__ inline GeodesicState geodesic_add(const GeodesicState& s,
 // derivatives: compute (dx^μ/dλ, dp_μ/dλ) at given state
 // ---------------------------------------------------------------------------
 
+/// @brief Analytical geodesic force for Schwarzschild spacetime.
+///
+/// Computes dp_μ/dλ = ½ ∂g_{αβ}/∂x^μ · ẋ^α ẋ^β using closed-form derivatives
+/// of the covariant Schwarzschild metric. Eliminates finite-difference error.
+///
+/// Non-zero components: dp_r and dp_θ only (dp_t = dp_φ = 0 by Killing symmetries).
+///
+/// @param M   Mass
+/// @param x   Boyer-Lindquist position
+/// @param v   Contravariant velocity ẋ^μ = g^{μν} p_ν (already computed)
+/// @return    Force vector dp_μ/dλ
+__device__ inline Vec4 schwarzschild_force(double M, const Vec4& x, const Vec4& v) {
+    const double r = x[1];
+    const double theta = x[2];
+    const double r2 = r * r;
+    const double f = 1.0 - 2.0 * M / r;
+
+    double sin_t = sin(theta);
+    if (fabs(sin_t) < 1e-10) sin_t = (sin_t >= 0.0) ? 1e-10 : -1e-10;
+    const double sin2 = sin_t * sin_t;
+
+    const double vt = v[0], vr = v[1], vth = v[2], vph = v[3];
+
+    Vec4 dp{};
+
+    // dp_r = ½[∂g_tt/∂r · vt² + ∂g_rr/∂r · vr² + ∂g_θθ/∂r · vθ² + ∂g_φφ/∂r · vφ²]
+    //   ∂g_tt/∂r  = -2M/r²
+    //   ∂g_rr/∂r  = -2M/(r²f²)
+    //   ∂g_θθ/∂r  = 2r
+    //   ∂g_φφ/∂r  = 2r sin²θ
+    const double two_M_over_r2 = 2.0 * M / r2;
+    dp.data[1] = 0.5 * (
+        -two_M_over_r2 * vt * vt
+        - two_M_over_r2 / (f * f) * vr * vr
+        + 2.0 * r * vth * vth
+        + 2.0 * r * sin2 * vph * vph
+    );
+
+    // dp_θ = ½[∂g_φφ/∂θ · vφ²]
+    //   ∂g_φφ/∂θ = r² sin(2θ)
+    dp.data[2] = 0.5 * r2 * sin(2.0 * theta) * vph * vph;
+
+    return dp;
+}
+
+/// @brief Analytical geodesic force for Kerr spacetime.
+///
+/// Computes dp_μ/dλ = ½ ∂g_{αβ}/∂x^μ · ẋ^α ẋ^β using closed-form derivatives
+/// of the covariant Kerr metric. Eliminates 8 metric evaluations per call.
+///
+/// Non-zero: dp_r and dp_θ only (dp_t = dp_φ = 0 by stationarity + axisymmetry).
+///
+/// @param M   Mass
+/// @param a   Spin parameter
+/// @param x   Boyer-Lindquist position
+/// @param v   Contravariant velocity ẋ^μ = g^{μν} p_ν
+/// @return    Force vector dp_μ/dλ
+__device__ inline Vec4 kerr_force(double M, double a, const Vec4& x, const Vec4& v) {
+    const double r = x[1];
+    const double theta = x[2];
+    const double r2 = r * r;
+    const double a2 = a * a;
+
+    double sin_t = sin(theta);
+    double cos_t = cos(theta);
+    if (fabs(sin_t) < 1e-10) sin_t = (sin_t >= 0.0) ? 1e-10 : -1e-10;
+    const double sin2 = sin_t * sin_t;
+    const double sin4 = sin2 * sin2;
+    const double sin2theta = 2.0 * sin_t * cos_t;  // sin(2θ)
+    const double cos2 = cos_t * cos_t;
+
+    const double Sigma = r2 + a2 * cos2;
+    const double Delta = r2 - 2.0 * M * r + a2;
+    const double Sigma2 = Sigma * Sigma;
+    const double Delta2 = Delta * Delta;
+    const double Mr = M * r;
+    const double Sigma_m2r2 = Sigma - 2.0 * r2;  // = a²cos²θ - r²
+
+    const double vt = v[0], vr = v[1], vth = v[2], vph = v[3];
+
+    // ---- r-derivatives of covariant metric ----
+    // ∂g_tt/∂r = 2M(Σ - 2r²)/Σ²
+    const double dg_tt_dr = 2.0 * M * Sigma_m2r2 / Sigma2;
+
+    // ∂g_tφ/∂r = -2Ma sin²θ (Σ - 2r²)/Σ²
+    const double dg_tphi_dr = -2.0 * M * a * sin2 * Sigma_m2r2 / Sigma2;
+
+    // ∂g_rr/∂r = (2rΔ - 2Σ(r - M))/Δ²
+    const double dg_rr_dr = (2.0 * r * Delta - 2.0 * Sigma * (r - M)) / Delta2;
+
+    // ∂g_θθ/∂r = 2r
+    // ∂g_φφ/∂r = 2r sin²θ + 2Ma² sin⁴θ (Σ - 2r²)/Σ²
+    const double dg_phph_dr = 2.0 * r * sin2
+                              + 2.0 * M * a2 * sin4 * Sigma_m2r2 / Sigma2;
+
+    // dp_r = ½[∂g_tt/∂r vt² + 2∂g_tφ/∂r vt vφ + ∂g_rr/∂r vr² + 2r vθ² + ∂g_φφ/∂r vφ²]
+    const double dp_r = 0.5 * (
+        dg_tt_dr * vt * vt
+        + 2.0 * dg_tphi_dr * vt * vph
+        + dg_rr_dr * vr * vr
+        + 2.0 * r * vth * vth
+        + dg_phph_dr * vph * vph
+    );
+
+    // ---- θ-derivatives of covariant metric ----
+    // ∂g_tt/∂θ = 2Ma²r sin(2θ)/Σ²
+    const double dg_tt_dth = 2.0 * Mr * a2 * sin2theta / Sigma2;
+
+    // ∂g_tφ/∂θ = -2Mar sin(2θ)(Σ + a²sin²θ)/Σ²
+    const double dg_tphi_dth = -2.0 * Mr * a * sin2theta * (Sigma + a2 * sin2) / Sigma2;
+
+    // ∂g_rr/∂θ = -a²sin(2θ)/Δ
+    const double dg_rr_dth = -a2 * sin2theta / Delta;
+
+    // ∂g_θθ/∂θ = -a²sin(2θ)
+    // ∂g_φφ/∂θ = (r²+a²)sin(2θ) + 2Ma²r sin(2θ) sin²θ (2Σ + a²sin²θ)/Σ²
+    const double dg_phph_dth = (r2 + a2) * sin2theta
+        + 2.0 * Mr * a2 * sin2theta * sin2 * (2.0 * Sigma + a2 * sin2) / Sigma2;
+
+    // dp_θ = ½[∂g_tt/∂θ vt² + 2∂g_tφ/∂θ vt vφ + ∂g_rr/∂θ vr² + ∂g_θθ/∂θ vθ² + ∂g_φφ/∂θ vφ²]
+    const double dp_th = 0.5 * (
+        dg_tt_dth * vt * vt
+        + 2.0 * dg_tphi_dth * vt * vph
+        + dg_rr_dth * vr * vr
+        + (-a2 * sin2theta) * vth * vth
+        + dg_phph_dth * vph * vph
+    );
+
+    Vec4 dp{};
+    dp.data[1] = dp_r;
+    dp.data[2] = dp_th;
+    return dp;
+}
+
 /// @brief Compute geodesic derivatives at the given state.
 ///
 /// dx^μ/dλ = g^{μν} p_ν
-/// dp_μ/dλ = -½ Σ_{α,β} (∂g^{αβ}/∂x^μ) p_α p_β
+/// dp_μ/dλ = ½ ∂g_{αβ}/∂x^μ ẋ^α ẋ^β  (analytical — no finite differences)
 ///
-/// The metric derivatives are approximated by central finite differences:
-///   ∂g^{αβ}/∂x^μ ≈ (g^{αβ}(x + ε e_μ) - g^{αβ}(x - ε e_μ)) / (2ε)
+/// Uses closed-form metric derivatives for both Schwarzschild and Kerr,
+/// eliminating 8 metric evaluations per call vs. the finite-difference approach.
 ///
 /// @param type    MetricType::Schwarzschild or MetricType::Kerr
 /// @param M       Mass in geometrized units
@@ -71,9 +205,6 @@ __device__ inline GeodesicState geodesic_add(const GeodesicState& s,
 /// @return        Derivatives (dx^μ/dλ, dp_μ/dλ) packaged as a GeodesicState
 __device__ inline GeodesicState derivatives(MetricType type, double M, double a,
                                              const GeodesicState& state) {
-    constexpr double fd_eps = 1e-6;
-    constexpr double inv_2eps = 1.0 / (2.0 * fd_eps);
-
     const Vec4& x = state.position;
     const Vec4& p = state.momentum;
 
@@ -92,41 +223,10 @@ __device__ inline GeodesicState derivatives(MetricType type, double M, double a,
         dx.data[3] = g_inv.m[3][0] * p[0] + g_inv.m[3][3] * p[3];
     }
 
-    // dp_μ/dλ = -½ Σ_{α,β} (∂g^{αβ}/∂x^μ) p_α p_β
-    // Process one coordinate at a time to minimize register pressure:
-    // only two Matrix4 live simultaneously (plus/minus), immediately reduced to scalar.
-    Vec4 dp{};
-    for (int mu = 0; mu < 4; ++mu) {
-        Vec4 x_plus  = x;
-        Vec4 x_minus = x;
-        x_plus.data[mu]  += fd_eps;
-        x_minus.data[mu] -= fd_eps;
-
-        Matrix4 g_plus  = metric_upper(type, M, a, x_plus);
-        Matrix4 g_minus = metric_upper(type, M, a, x_minus);
-
-        // Exploit sparsity: only sum over non-zero metric components
-        double force;
-        if (type == MetricType::Schwarzschild) {
-            // Diagonal only: α==β terms
-            force = 0.0;
-            for (int i = 0; i < 4; ++i) {
-                double dg = (g_plus.m[i][i] - g_minus.m[i][i]) * inv_2eps;
-                force += dg * p[i] * p[i];
-            }
-        } else {
-            // Kerr: diagonal + (0,3) and (3,0) off-diagonal
-            force = 0.0;
-            for (int i = 0; i < 4; ++i) {
-                double dg = (g_plus.m[i][i] - g_minus.m[i][i]) * inv_2eps;
-                force += dg * p[i] * p[i];
-            }
-            // Off-diagonal (t,φ) block: contributes 2 * dg^{tφ} * p_t * p_φ
-            double dg_tphi = (g_plus.m[0][3] - g_minus.m[0][3]) * inv_2eps;
-            force += 2.0 * dg_tphi * p[0] * p[3];
-        }
-        dp.data[mu] = -0.5 * force;
-    }
+    // dp_μ/dλ — analytical force (no metric evaluations needed)
+    Vec4 dp = (type == MetricType::Schwarzschild)
+              ? schwarzschild_force(M, x, dx)
+              : kerr_force(M, a, x, dx);
 
     GeodesicState deriv;
     deriv.position = dx;

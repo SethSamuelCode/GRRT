@@ -12,29 +12,8 @@ GeodesicState RK4::derivatives(const Metric& metric, const GeodesicState& state)
     Matrix4 g_inv = metric.g_upper(x);
     Vec4 dx = g_inv.contract(p);
 
-    // dp_μ/dλ = -½ Σ_{α,β} (∂g^αβ/∂x^μ) p_α p_β
-    // Compute ∂g^αβ/∂x^μ by central finite differences
-    Vec4 dp;
-    for (int mu = 0; mu < 4; ++mu) {
-        // Perturb position along coordinate mu
-        Vec4 x_plus = x;
-        Vec4 x_minus = x;
-        x_plus[mu] += fd_epsilon;
-        x_minus[mu] -= fd_epsilon;
-
-        Matrix4 g_inv_plus = metric.g_upper(x_plus);
-        Matrix4 g_inv_minus = metric.g_upper(x_minus);
-
-        // Sum over all α, β
-        double force = 0.0;
-        for (int a = 0; a < 4; ++a) {
-            for (int b = 0; b < 4; ++b) {
-                double dg = (g_inv_plus.m[a][b] - g_inv_minus.m[a][b]) / (2.0 * fd_epsilon);
-                force += dg * p[a] * p[b];
-            }
-        }
-        dp[mu] = -0.5 * force;
-    }
+    // dp_μ/dλ = ½ ∂g_{αβ}/∂x^μ ẋ^α ẋ^β  (analytical when available)
+    Vec4 dp = metric.geodesic_force(x, dx);
 
     return {dx, dp};
 }

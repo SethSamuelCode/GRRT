@@ -28,9 +28,12 @@ __constant__ float cuda::d_color_lut[cuda::MAX_SPECTRUM_ENTRIES][3];
 __constant__ float cuda::d_luminosity_lut[cuda::MAX_SPECTRUM_ENTRIES];
 __constant__ double cuda::d_flux_lut[cuda::MAX_FLUX_LUT_ENTRIES];
 
-// d_stars remains __device__ (global memory) — 60 KB with float fields still
-// exceeds remaining constant memory budget after LUTs.
+// d_stars remains __device__ (global memory) — 60 KB with float fields.
+// Stars are sorted by spatial bucket for O(1) average lookup.
 __device__ cuda::Star cuda::d_stars[cuda::MAX_STARS];
+
+// CSR prefix-sum offset array for star spatial grid (8 KB in constant memory)
+__constant__ int cuda::d_star_grid_offset[cuda::STAR_GRID_CELLS + 1];
 
 namespace cuda {
 
@@ -170,6 +173,10 @@ void upload_flux_lut(const double* data, size_t count) {
 
 void upload_stars(const Star* data, size_t count) {
     cudaMemcpyToSymbol(d_stars, data, count * sizeof(Star));
+}
+
+void upload_star_grid(const int* offsets, size_t count) {
+    cudaMemcpyToSymbol(d_star_grid_offset, offsets, count * sizeof(int));
 }
 
 void launch_render_kernel(float4* output, int* cancel_flag, int width, int height) {

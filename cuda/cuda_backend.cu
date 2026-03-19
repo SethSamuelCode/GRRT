@@ -129,7 +129,7 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
         cuda::upload_luminosity_lut(flat_lums.data(), nl);
     }
 
-    // Celestial sphere
+    // Celestial sphere with spatial bucketing
     rp.background_type = params->background_type;
     rp.num_stars = 0;
     rp.star_angular_tolerance = 0.003;
@@ -139,13 +139,39 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
         rp.num_stars = (int)stars.size();
         if (rp.num_stars > cuda::MAX_STARS) rp.num_stars = cuda::MAX_STARS;
 
-        std::vector<cuda::Star> flat_stars(rp.num_stars);
+        // Build spatial grid: assign each star to a bucket
+        constexpr int GT = cuda::STAR_GRID_THETA;
+        constexpr int GP = cuda::STAR_GRID_PHI;
+        std::vector<int> bucket(rp.num_stars);
+        std::vector<int> cell_count(cuda::STAR_GRID_CELLS, 0);
+
         for (int i = 0; i < rp.num_stars; ++i) {
-            flat_stars[i].theta = static_cast<float>(stars[i].theta);
-            flat_stars[i].phi = static_cast<float>(stars[i].phi);
-            flat_stars[i].brightness = static_cast<float>(stars[i].brightness);
+            int tb = (int)(stars[i].theta * GT / M_PI);
+            int pb = (int)((stars[i].phi + M_PI) * GP / (2.0 * M_PI));
+            if (tb < 0) tb = 0; if (tb >= GT) tb = GT - 1;
+            if (pb < 0) pb = 0; if (pb >= GP) pb = GP - 1;
+            bucket[i] = tb * GP + pb;
+            cell_count[bucket[i]]++;
         }
-        cuda::upload_stars(flat_stars.data(), rp.num_stars);
+
+        // Build prefix-sum offset array
+        std::vector<int> offsets(cuda::STAR_GRID_CELLS + 1, 0);
+        for (int c = 0; c < cuda::STAR_GRID_CELLS; ++c)
+            offsets[c + 1] = offsets[c] + cell_count[c];
+
+        // Sort stars by bucket (stable, preserves original order within each cell)
+        std::vector<int> write_pos(offsets.begin(), offsets.end() - 1);
+        std::vector<cuda::Star> sorted_stars(rp.num_stars);
+        for (int i = 0; i < rp.num_stars; ++i) {
+            int cell = bucket[i];
+            int pos = write_pos[cell]++;
+            sorted_stars[pos].theta = static_cast<float>(stars[i].theta);
+            sorted_stars[pos].phi = static_cast<float>(stars[i].phi);
+            sorted_stars[pos].brightness = static_cast<float>(stars[i].brightness);
+        }
+
+        cuda::upload_stars(sorted_stars.data(), rp.num_stars);
+        cuda::upload_star_grid(offsets.data(), offsets.size());
     }
 
     // Build camera tetrad on host

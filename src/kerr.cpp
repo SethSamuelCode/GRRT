@@ -62,4 +62,68 @@ double Kerr::isco_radius() const {
     return M * (3.0 + Z2 - std::sqrt((3.0 - Z1) * (3.0 + Z1 + 2.0 * Z2)));
 }
 
+Vec4 Kerr::geodesic_force(const Vec4& x, const Vec4& velocity) const {
+    const double M = mass_;
+    const double a = spin_;
+    const double r = x[1];
+    const double theta = x[2];
+    const double r2 = r * r;
+    const double a2 = a * a;
+
+    double sin_t = std::sin(theta);
+    double cos_t = std::cos(theta);
+    if (std::abs(sin_t) < 1e-10) sin_t = (sin_t >= 0.0) ? 1e-10 : -1e-10;
+    const double sin2 = sin_t * sin_t;
+    const double sin4 = sin2 * sin2;
+    const double sin2theta = 2.0 * sin_t * cos_t;  // sin(2θ)
+    const double cos2 = cos_t * cos_t;
+
+    const double Sigma = r2 + a2 * cos2;
+    const double Delta = r2 - 2.0 * M * r + a2;
+    const double Sigma2 = Sigma * Sigma;
+    const double Delta2 = Delta * Delta;
+    const double Mr = M * r;
+    const double Sigma_m2r2 = Sigma - 2.0 * r2;  // = a²cos²θ - r²
+
+    const double vt = velocity[0], vr = velocity[1];
+    const double vth = velocity[2], vph = velocity[3];
+
+    // ---- r-derivatives of covariant metric ----
+    const double dg_tt_dr = 2.0 * M * Sigma_m2r2 / Sigma2;
+    const double dg_tphi_dr = -2.0 * M * a * sin2 * Sigma_m2r2 / Sigma2;
+    const double dg_rr_dr = (2.0 * r * Delta - 2.0 * Sigma * (r - M)) / Delta2;
+    const double dg_phph_dr = 2.0 * r * sin2
+                              + 2.0 * M * a2 * sin4 * Sigma_m2r2 / Sigma2;
+
+    const double dp_r = 0.5 * (
+        dg_tt_dr * vt * vt
+        + 2.0 * dg_tphi_dr * vt * vph
+        + dg_rr_dr * vr * vr
+        + 2.0 * r * vth * vth
+        + dg_phph_dr * vph * vph
+    );
+
+    // ---- θ-derivatives of covariant metric ----
+    const double dg_tt_dth = 2.0 * Mr * a2 * sin2theta / Sigma2;
+    const double dg_tphi_dth = -2.0 * Mr * a * sin2theta * (Sigma + a2 * sin2) / Sigma2;
+    const double dg_rr_dth = -a2 * sin2theta / Delta;
+    const double dg_phph_dth = (r2 + a2) * sin2theta
+        + 2.0 * Mr * a2 * sin2theta * sin2 * (2.0 * Sigma + a2 * sin2) / Sigma2;
+
+    const double dp_th = 0.5 * (
+        dg_tt_dth * vt * vt
+        + 2.0 * dg_tphi_dth * vt * vph
+        + dg_rr_dth * vr * vr
+        + (-a2 * sin2theta) * vth * vth
+        + dg_phph_dth * vph * vph
+    );
+
+    Vec4 dp;
+    dp[0] = 0.0;
+    dp[1] = dp_r;
+    dp[2] = dp_th;
+    dp[3] = 0.0;
+    return dp;
+}
+
 } // namespace grrt

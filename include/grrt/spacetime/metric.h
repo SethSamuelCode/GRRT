@@ -21,6 +21,10 @@ public:
 
     // Innermost stable circular orbit radius
     virtual double isco_radius() const = 0;
+
+    // Geodesic force dp_μ/dλ = ½ ∂g_{αβ}/∂x^μ ẋ^α ẋ^β
+    // Default: finite differences on g_lower. Override for analytical derivatives.
+    virtual Vec4 geodesic_force(const Vec4& x, const Vec4& velocity) const;
 };
 
 } // namespace grrt

@@ -14,6 +14,7 @@ __constant__ double cuda::d_flux_lut[cuda::MAX_FLUX_LUT_ENTRIES];
 __device__ cuda::Star cuda::d_stars[cuda::MAX_STARS];       // global (60KB with float, exceeds cmem budget)
 __constant__ float cuda::d_color_lut[cuda::MAX_SPECTRUM_ENTRIES][3];
 __constant__ float cuda::d_luminosity_lut[cuda::MAX_SPECTRUM_ENTRIES];
+__constant__ int cuda::d_star_grid_offset[cuda::STAR_GRID_CELLS + 1];
 
 // ---------------------------------------------------------------------------
 // Device kernel: runs 7 independent math sub-tests, writing pass/fail (1/0)

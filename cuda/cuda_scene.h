@@ -37,8 +37,15 @@ extern __constant__ double d_flux_lut[MAX_FLUX_LUT_ENTRIES];
 /// @brief Star positions and brightnesses for the celestial sphere.
 ///
 /// Stored in global device memory (5000 × 12 bytes = 60 KB with float fields).
-/// Exceeds remaining constant memory budget after LUTs, but float halves bandwidth.
+/// Stars are sorted by spatial bucket for O(1) average lookup.
 extern __device__ Star d_stars[MAX_STARS];
+
+/// @brief CSR-style prefix sum for spatial bucketing grid.
+///
+/// Stars in cell (t_bin, p_bin) are d_stars[d_star_grid_offset[idx] .. d_star_grid_offset[idx+1])
+/// where idx = t_bin * STAR_GRID_PHI + p_bin.
+/// Size: (STAR_GRID_CELLS + 1) × 4 bytes = 8,196 bytes in constant memory.
+extern __constant__ int d_star_grid_offset[STAR_GRID_CELLS + 1];
 
 // ---------------------------------------------------------------------------
 // Kerr-aware orbital mechanics
@@ -247,6 +254,8 @@ __device__ inline Vec3 disk_emission(double r_cross, const Vec4& p_cross,
 /// @param params    RenderParams (num_stars, star_angular_tolerance)
 __device__ inline Vec3 celestial_sphere_sample(const Vec4& position,
                                                 const RenderParams& params) {
+    if (params.num_stars == 0) return {0.0, 0.0, 0.0};
+
     // Normalize θ to [0, π], reflecting if needed
     double theta = position[2];
     double phi   = position[3];
@@ -263,24 +272,44 @@ __device__ inline Vec3 celestial_sphere_sample(const Vec4& position,
     if (phi >  M_PI) phi -= 2.0 * M_PI;
     if (phi < -M_PI) phi += 2.0 * M_PI;
 
-    double tol2   = params.star_angular_tolerance * params.star_angular_tolerance;
-    double sin_t  = sin(theta);
-    int    n      = params.num_stars;
-    if (n > MAX_STARS) n = MAX_STARS;
+    float tol2  = (float)(params.star_angular_tolerance * params.star_angular_tolerance);
+    float sin_t = (float)sin(theta);
+    float f_theta = (float)theta;
+    float f_phi   = (float)phi;
 
-    for (int i = 0; i < n; ++i) {
-        float dtheta = (float)theta - d_stars[i].theta;
-        float dphi   = (float)phi   - d_stars[i].phi;
+    // Compute grid cell
+    int t_bin = (int)(theta * STAR_GRID_THETA / M_PI);
+    int p_bin = (int)((phi + M_PI) * STAR_GRID_PHI / (2.0 * M_PI));
+    if (t_bin < 0) t_bin = 0;
+    if (t_bin >= STAR_GRID_THETA) t_bin = STAR_GRID_THETA - 1;
+    if (p_bin < 0) p_bin = 0;
+    if (p_bin >= STAR_GRID_PHI) p_bin = STAR_GRID_PHI - 1;
 
-        // Wrap dphi to [-π, π]
-        if (dphi >  (float)M_PI) dphi -= (float)(2.0 * M_PI);
-        if (dphi < -(float)M_PI) dphi += (float)(2.0 * M_PI);
+    // Check this cell + 8 neighbors (3x3 stencil)
+    for (int dt = -1; dt <= 1; ++dt) {
+        int tb = t_bin + dt;
+        if (tb < 0 || tb >= STAR_GRID_THETA) continue;
 
-        float ang_dist2 = dtheta * dtheta + dphi * dphi * (float)sin_t * (float)sin_t;
+        for (int dp = -1; dp <= 1; ++dp) {
+            int pb = (p_bin + dp + STAR_GRID_PHI) % STAR_GRID_PHI;  // wrap φ
+            int cell = tb * STAR_GRID_PHI + pb;
+            int start = d_star_grid_offset[cell];
+            int end   = d_star_grid_offset[cell + 1];
 
-        if (ang_dist2 < (float)tol2) {
-            double b = (double)d_stars[i].brightness;
-            return {b, b, b};
+            for (int i = start; i < end; ++i) {
+                float dtheta = f_theta - d_stars[i].theta;
+                float dphi   = f_phi   - d_stars[i].phi;
+
+                if (dphi >  (float)M_PI) dphi -= (float)(2.0 * M_PI);
+                if (dphi < -(float)M_PI) dphi += (float)(2.0 * M_PI);
+
+                float ang_dist2 = dtheta * dtheta + dphi * dphi * sin_t * sin_t;
+
+                if (ang_dist2 < tol2) {
+                    double b = (double)d_stars[i].brightness;
+                    return {b, b, b};
+                }
+            }
         }
     }
 

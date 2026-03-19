@@ -31,10 +31,15 @@ void upload_luminosity_lut(const float* data, size_t count);
 /// @param count  Number of entries (must be <= MAX_FLUX_LUT_ENTRIES)
 void upload_flux_lut(const double* data, size_t count);
 
-/// @brief Upload star catalog to device global memory.
-/// @param data   Array of count Star structs
+/// @brief Upload star catalog (sorted by bucket) to device global memory.
+/// @param data   Array of count Star structs, sorted by spatial bucket
 /// @param count  Number of stars (must be <= MAX_STARS)
 void upload_stars(const Star* data, size_t count);
+
+/// @brief Upload star spatial grid prefix-sum offsets to constant memory.
+/// @param offsets  Array of (STAR_GRID_CELLS + 1) ints
+/// @param count    Number of entries (STAR_GRID_CELLS + 1)
+void upload_star_grid(const int* offsets, size_t count);
 
 /// @brief Launch the render kernel with a 16x16 thread block configuration.
 /// @param output      Device float4 buffer (width * height elements)

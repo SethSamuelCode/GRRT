@@ -13,6 +13,7 @@ public:
     Matrix4 g_upper(const Vec4& x) const override;
     double horizon_radius() const override;
     double isco_radius() const override;
+    Vec4 geodesic_force(const Vec4& x, const Vec4& velocity) const override;
 
 private:
     double mass_;
