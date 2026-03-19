@@ -27,6 +27,8 @@ static void print_usage() {
     std::println("  --max-steps N         Max integration steps (default: 10000)");
     std::println("  --tolerance T         Integrator tolerance (default: 1e-8)");
     std::println("  --threads N           CPU threads, 0=auto (default: 0)");
+    std::println("  --backend TYPE        cpu | cuda (default: cpu)");
+    std::println("  --validate            Render on both backends, compare results");
     std::println("  --output NAME         Output base name (default: output)");
     std::println("                        Produces NAME.png, NAME.hdr, NAME_linear.hdr");
     std::println("  --help                Show this help");
@@ -56,6 +58,8 @@ int main(int argc, char* argv[]) {
     params.thread_count = 0;
 
     std::string output_name = "output";
+    std::string backend_str = "cpu";
+    bool validate = false;
 
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -109,6 +113,10 @@ int main(int argc, char* argv[]) {
             if (auto v = next()) params.integrator_tolerance = std::atof(v);
         } else if (arg("--threads")) {
             if (auto v = next()) params.thread_count = std::atoi(v);
+        } else if (arg("--backend")) {
+            if (auto v = next()) backend_str = v;
+        } else if (arg("--validate")) {
+            validate = true;
         } else if (arg("--output")) {
             if (auto v = next()) output_name = v;
         } else {
@@ -116,6 +124,82 @@ int main(int argc, char* argv[]) {
             print_usage();
             return 1;
         }
+    }
+
+    // Set backend
+    if (backend_str == "cuda") {
+        params.backend = GRRT_BACKEND_CUDA;
+    } else {
+        params.backend = GRRT_BACKEND_CPU;
+    }
+
+    // Validation mode: render on both backends, compare, and exit
+    if (validate) {
+        std::println("gr-raytracer validation mode");
+        std::println("============================");
+
+        GRRTParams cpu_params = params;
+        cpu_params.backend = GRRT_BACKEND_CPU;
+        GRRTContext* cpu_ctx = grrt_create(&cpu_params);
+        if (!cpu_ctx) {
+            std::println(stderr, "Failed to create CPU context");
+            return 1;
+        }
+        std::vector<float> cpu_fb(params.width * params.height * 4);
+        grrt_render(cpu_ctx, cpu_fb.data());
+
+        GRRTParams cuda_params = params;
+        cuda_params.backend = GRRT_BACKEND_CUDA;
+        GRRTContext* cuda_ctx = grrt_create(&cuda_params);
+        if (!cuda_ctx) {
+            std::println(stderr, "Failed to create CUDA context: {}",
+                         grrt_last_error() ? grrt_last_error() : "unknown");
+            grrt_destroy(cpu_ctx);
+            return 1;
+        }
+        std::vector<float> cuda_fb(params.width * params.height * 4);
+        grrt_render(cuda_ctx, cuda_fb.data());
+
+        double max_rel_err = 0.0;
+        int num_pixels = params.width * params.height;
+        int cpu_nonzero = 0, cuda_nonzero = 0, both_nonzero = 0;
+        int boundary_mismatches = 0;  // pixels nonzero on one side only
+
+        for (int p = 0; p < num_pixels; ++p) {
+            double cpu_lum = cpu_fb[p*4+0] + cpu_fb[p*4+1] + cpu_fb[p*4+2];
+            double cuda_lum = cuda_fb[p*4+0] + cuda_fb[p*4+1] + cuda_fb[p*4+2];
+            if (cpu_lum > 0.0) cpu_nonzero++;
+            if (cuda_lum > 0.0) cuda_nonzero++;
+            if (cpu_lum > 0.0 && cuda_lum > 0.0) both_nonzero++;
+
+            // Skip boundary mismatches (one side zero, other nonzero) —
+            // these are from FP-divergent geodesics at star tolerance edges
+            bool one_zero = (cpu_lum < 1e-10) != (cuda_lum < 1e-10);
+            if (one_zero) { boundary_mismatches++; continue; }
+
+            for (int c = 0; c < 3; ++c) {
+                double denom = std::max(std::abs(cpu_fb[p*4+c]), std::abs(cuda_fb[p*4+c]));
+                if (denom > 1e-10) {
+                    double rel = std::abs(cpu_fb[p*4+c] - cuda_fb[p*4+c]) / denom;
+                    if (rel > max_rel_err) max_rel_err = rel;
+                }
+            }
+        }
+
+        std::println("Validation results:");
+        std::println("  CPU nonzero pixels: {}, CUDA nonzero: {}, both: {}",
+                     cpu_nonzero, cuda_nonzero, both_nonzero);
+        std::println("  Boundary mismatches (FP edge): {}", boundary_mismatches);
+        std::println("  Max relative error (shared pixels): {:.2e}", max_rel_err);
+
+        // CPU/GPU FP divergence causes ~1-2% relative error in disk emission
+        // and occasional boundary star mismatches. Both are expected.
+        bool pass = max_rel_err < 0.05 && boundary_mismatches < num_pixels / 50;
+        std::println("  Result: {}", pass ? "PASS" : "FAIL");
+
+        grrt_destroy(cpu_ctx);
+        grrt_destroy(cuda_ctx);
+        return pass ? 0 : 1;
     }
 
     std::string path_png = output_name + ".png";

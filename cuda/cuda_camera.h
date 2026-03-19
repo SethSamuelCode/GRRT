@@ -126,35 +126,15 @@ __host__ __device__ inline void build_tetrad(RenderParams& params) {
 
     // ------------------------------------------------------------------
     // e0: observer 4-velocity (timelike, normalized to g(e0,e0) = -1)
+    // Must match CPU camera: static observer u^μ = (1/√(−g_tt), 0, 0, 0)
+    // for BOTH Schwarzschild and Kerr (CPU does not use ZAMO).
     // ------------------------------------------------------------------
     Vec4 e0{};
-    if (type == MetricType::Schwarzschild) {
-        // Static observer: u^μ = (1/√(−g_tt), 0, 0, 0)
-        double g_tt = g_low.m[0][0];  // negative
-        e0.data[0] = 1.0 / sqrt(-g_tt);
-        e0.data[1] = 0.0;
-        e0.data[2] = 0.0;
-        e0.data[3] = 0.0;
-    } else {
-        // ZAMO: zero angular momentum observer for Kerr spacetime.
-        // Frame-dragging angular velocity: ω = −g^{tφ} / g^{φφ}
-        // (using upper metric dispatched through our helper).
-        Matrix4 g_up = metric_upper(type, M, a, x);
-        double g_up_tphi = g_up.m[0][3];  // g^{tφ} (= g^{φt} by symmetry)
-        double g_up_pp   = g_up.m[3][3];  // g^{φφ}
-        double omega = -g_up_tphi / g_up_pp;
-
-        // u^μ = N (1, 0, 0, ω) where N = 1/√(−g_tt − 2ω g_tφ − ω² g_φφ)
-        double g_tt   = g_low.m[0][0];
-        double g_tphi = g_low.m[0][3];
-        double g_pp   = g_low.m[3][3];
-        double norm2_inv = -(g_tt + 2.0 * omega * g_tphi + omega * omega * g_pp);
-        double N = 1.0 / sqrt(fabs(norm2_inv));
-        e0.data[0] = N;
-        e0.data[1] = 0.0;
-        e0.data[2] = 0.0;
-        e0.data[3] = N * omega;
-    }
+    double g_tt = g_low.m[0][0];  // negative
+    e0.data[0] = 1.0 / sqrt(-g_tt);
+    e0.data[1] = 0.0;
+    e0.data[2] = 0.0;
+    e0.data[3] = 0.0;
 
     double e0_norm2 = metric_dot(type, M, a, x, e0, e0);
 

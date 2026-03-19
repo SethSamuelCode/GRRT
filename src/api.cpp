@@ -9,8 +9,14 @@
 #include "grrt/scene/celestial_sphere.h"
 #include "grrt/color/spectrum.h"
 #include "grrt/render/tonemapper.h"
+#ifdef GRRT_HAS_CUDA
+#include "cuda_backend.h"
+#endif
 #include <memory>
 #include <print>
+#include <string>
+
+static thread_local std::string g_last_error;
 
 struct GRRTContext {
     GRRTParams params;
@@ -23,6 +29,10 @@ struct GRRTContext {
     std::unique_ptr<grrt::SpectrumLUT> spectrum;
     std::unique_ptr<grrt::ToneMapper> tonemapper;
     std::unique_ptr<grrt::Renderer> renderer;
+#ifdef GRRT_HAS_CUDA
+    CudaRenderContext* cuda_ctx = nullptr;
+#endif
+    std::string error_msg;
 };
 
 GRRTContext* grrt_create(const GRRTParams* params) {
@@ -78,14 +88,40 @@ GRRTContext* grrt_create(const GRRTParams* params) {
         ctx->spectrum.get(), *ctx->tonemapper);
 
     const char* metric_name = params->metric_type == GRRT_METRIC_KERR ? "kerr" : "schwarzschild";
-    std::println("grrt: created context ({}x{}, {}, M={}, a={}, r_obs={}, disk={}, stars={})",
+    const char* backend_name = "cpu";
+
+#ifdef GRRT_HAS_CUDA
+    if (params->backend == GRRT_BACKEND_CUDA) {
+        if (!cuda_available()) {
+            g_last_error = "CUDA backend requested but no CUDA device available";
+            delete ctx;
+            return nullptr;
+        }
+        ctx->cuda_ctx = cuda_context_create(params);
+        if (!ctx->cuda_ctx) {
+            g_last_error = "Failed to create CUDA render context";
+            delete ctx;
+            return nullptr;
+        }
+        backend_name = "cuda";
+    }
+#endif
+
+    std::println("grrt: created context ({}x{}, {}, M={}, a={}, r_obs={}, disk={}, stars={}, backend={})",
                  params->width, params->height, metric_name, mass, spin_a, observer_r,
                  params->disk_enabled ? "on" : "off",
-                 params->background_type == GRRT_BG_STARS ? "on" : "off");
+                 params->background_type == GRRT_BG_STARS ? "on" : "off",
+                 backend_name);
     return ctx;
 }
 
 void grrt_destroy(GRRTContext* ctx) {
+#ifdef GRRT_HAS_CUDA
+    if (ctx && ctx->cuda_ctx) {
+        cuda_context_destroy(ctx->cuda_ctx);
+        ctx->cuda_ctx = nullptr;
+    }
+#endif
     delete ctx;
 }
 
@@ -94,8 +130,19 @@ void grrt_update_params(GRRTContext* ctx, const GRRTParams* params) {
 }
 
 int grrt_render(GRRTContext* ctx, float* framebuffer) {
+#ifdef GRRT_HAS_CUDA
+    if (ctx->cuda_ctx) {
+        int result = cuda_render(ctx->cuda_ctx, &ctx->params, framebuffer);
+        if (result != 0) {
+            ctx->error_msg = "CUDA render failed";
+            return result;
+        }
+        std::println("grrt: rendered {}x{} frame (cuda)", ctx->params.width, ctx->params.height);
+        return 0;
+    }
+#endif
     ctx->renderer->render(framebuffer, ctx->params.width, ctx->params.height);
-    std::println("grrt: rendered {}x{} frame", ctx->params.width, ctx->params.height);
+    std::println("grrt: rendered {}x{} frame (cpu)", ctx->params.width, ctx->params.height);
     return 0;
 }
 
@@ -104,18 +151,33 @@ int grrt_render_tile(GRRTContext* /*ctx*/, float* /*buffer*/,
     return 0;
 }
 
-void grrt_cancel(GRRTContext* /*ctx*/) {}
+void grrt_cancel(GRRTContext* ctx) {
+#ifdef GRRT_HAS_CUDA
+    if (ctx->cuda_ctx) {
+        cuda_cancel(ctx->cuda_ctx);
+        return;
+    }
+#endif
+}
 
 float grrt_progress(const GRRTContext* /*ctx*/) {
     return 1.0f;
 }
 
-const char* grrt_error(const GRRTContext* /*ctx*/) {
-    return nullptr;
+const char* grrt_error(const GRRTContext* ctx) {
+    return ctx->error_msg.empty() ? nullptr : ctx->error_msg.c_str();
 }
 
 int grrt_cuda_available(void) {
+#ifdef GRRT_HAS_CUDA
+    return cuda_available() ? 1 : 0;
+#else
     return 0;
+#endif
+}
+
+const char* grrt_last_error(void) {
+    return g_last_error.empty() ? nullptr : g_last_error.c_str();
 }
 
 void grrt_tonemap(float* framebuffer, int width, int height) {
