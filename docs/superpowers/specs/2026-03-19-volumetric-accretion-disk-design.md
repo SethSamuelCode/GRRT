@@ -70,15 +70,35 @@ The division by c^2 and c^3 converts the CGS sound speed to geometric units (v/c
 
 ## 1. Density Model
 
-### 1.1 Vertical Profile
+### 1.1 Vertical Profile — Numerical Hydrostatic Equilibrium
 
-Gaussian hydrostatic equilibrium:
+Instead of an analytical Gaussian (which assumes isothermal vertical structure), we solve the hydrostatic equilibrium ODE numerically to account for the non-isothermal Eddington temperature profile:
 
 ```
-rho(r, z, phi) = rho_mid(r) * exp(-z^2 / (2*H(r)^2)) * taper(r) * (1 + delta * noise3D(r/H, z/H, phi))
+dP/dz = -rho * Omega_K^2 * z
+P(z) = P_gas(z) + P_rad(z) = rho*k_B*T(z)/(mu*m_p) + (4*sigma_SB/3c)*T(z)^4
 ```
 
-where `z = r * cos(theta)`.
+**Procedure (computed once per radial bin during LUT construction):**
+
+1. Set midplane boundary conditions: `rho(0) = rho_mid(r)`, `T(0) = T_mid(r)` from Eddington at tau_abs = tau_mid
+2. Integrate outward from z = 0 using RK4 in z with step dz = H_gas/20:
+   - At each z, compute local tau_abs by integrating density inward from the current z: `tau_abs(z) = integral(kappa_abs * rho dz', z..z_surface)`
+   - Compute T(z) from Eddington: `T^4(z) = (3/4)*T_eff^4*(tau_abs(z) + 2/3)`
+   - Compute P(z) = P_gas + P_rad
+   - Apply the ODE to get drho/dz from dP/dz and the equation of state
+3. The integration is self-consistent: tau_abs depends on rho(z), which depends on T(z), which depends on tau_abs. Resolve by iterating the z-profile until the max relative change in rho(z) < 1e-3 (typically 3-5 iterations).
+4. Store the resulting rho(z) profile as a 1D lookup table per radial bin: 64 z-bins covering `0 to z_max = 3*H(r)`, one-sided (the profile is symmetric about the midplane, so `rho(r, -z) = rho(r, z)`).
+
+**Effect:** Compared to a Gaussian, the numerical profile is more centrally concentrated (radiation pressure support creates a flatter core with sharper wings). This is physically correct — the inner disk, where radiation pressure dominates, has a distinctly non-Gaussian profile.
+
+The full density including taper and turbulence:
+
+```
+rho(r, z, phi) = rho_numerical(r, z) * taper(r) * (1 + delta * noise3D(r/H, z/H, phi))
+```
+
+where `z = r * cos(theta)` and `rho_numerical(r, z)` is the tabulated numerical solution. H(r) is still computed as in Section 1.2 for the purpose of scale-height-based quantities (noise scaling, step sizing, volume bounds).
 
 ### 1.2 Scale Height with Radiation Pressure
 
@@ -227,25 +247,61 @@ Since rho is stored in geometric normalization and ds is in geometric units, the
 
 ## 4. Radiative Transfer
 
-### 4.1 Per-Step Update (Three Channels)
+### 4.1 Covariant Invariant Radiative Transfer (Three Channels)
 
-At each raymarch sample point, for each wavelength channel:
+We use the frame-independent formulation from RAPTOR (Bronzwaer+ 2018), BHOSS (Younsi+ 2020), and iPOLE (Mościbrodzka & Gammie 2018). The Lorentz invariant `J = I_nu / nu^3` satisfies:
 
 ```
-dtau_eff(lambda) = kappa_eff(lambda) * rho_CGS * ds_CGS
-dtau_abs         = kappa_abs(lambda_G) * rho_CGS * ds_CGS    (green channel drives Eddington T)
-
-tau_abs += dtau_abs
-T = ((3/4) * T_eff(r)^4 * (tau_abs + 2/3))^(1/4)
-Apply turbulent coupling: T_turb (Section 2.3)
-
-For each channel lambda in {B, G, R}:
-    lambda_emit = lambda / g                   (blueshift/redshift the wavelength)
-    I(lambda) = I(lambda) * exp(-dtau_eff(lambda))
-              + g^3 * B(lambda_emit, T_turb) * (1 - exp(-dtau_eff(lambda)))
+dJ/dtau = -J + S
 ```
 
-**Redshift convention:** This codebase defines `g = (p_mu u^mu)_emit / (p_mu u^mu)_obs`, where g > 1 means blueshift (approaching matter) and g < 1 means redshift. This is the inverse of the Lindquist (1966) convention (`g_L = 1/g`). The covariant radiative transfer invariant `I_nu / nu^3 = const` gives `I_obs = g^3 * B(lambda_emit, T)` with `lambda_emit = lambda_obs / g`. For blueshift (g > 1), the emitter was radiating at a shorter wavelength that was then redshifted to the observer wavelength — the Planck function is evaluated at the emitter-frame wavelength to determine what intensity was emitted at the frequency that arrives at the observer.
+where S is the invariant source function. This formulation is exact for any spacetime — all redshift, beaming, and aberration effects are automatically encoded in the nu^3 invariant. No ad-hoc g-factor powers are needed.
+
+**Per-step procedure at each raymarch sample point:**
+
+```
+1. Compute emitter-frame frequency for each channel:
+   nu_emit(lambda) = g * nu_obs(lambda)        where nu_obs = c / lambda
+   lambda_emit = lambda / g
+
+2. Evaluate opacity at emitter-frame frequency:
+   kappa_abs_emit(lambda) = kappa_abs_mass * (lambda_emit / lambda_G)^3
+   kappa_eff_emit(lambda) = sqrt(kappa_abs_emit * (kappa_abs_emit + kappa_es))
+
+3. Compute optical depth increments (in emitter frame):
+   dtau_eff(lambda) = kappa_eff_emit(lambda) * rho_CGS * ds_proper
+   dtau_abs         = kappa_abs_mass * ((lambda_G / g) / lambda_G)^3 * rho_CGS * ds_proper
+                    = kappa_abs_mass * g^(-3) * rho_CGS * ds_proper
+
+   where ds_proper is the proper distance along the ray in the emitter frame.
+   For a comoving emitter: ds_proper = |p_mu u^mu_emit| * ds_affine * (L_unit)
+   Here ds_affine is the geodesic affine parameter step (called `ds` in Section 5.2), not to be confused with optical wavelength lambda.
+
+4. Accumulate absorption optical depth for Eddington temperature:
+   tau_abs += dtau_abs(lambda_G)
+   T = ((3/4) * T_eff(r)^4 * (tau_abs + 2/3))^(1/4)
+   Apply turbulent coupling: T_turb (Section 2.3)
+
+5. Compute invariant source function:
+   For each channel lambda in {B, G, R}:
+       S(lambda) = B(lambda_emit, T_turb) / nu_emit^3
+
+6. Integrate the invariant transfer equation:
+   For each channel lambda in {B, G, R}:
+       J(lambda) = J(lambda) * exp(-dtau_eff(lambda))
+                 + S(lambda) * (1 - exp(-dtau_eff(lambda)))
+
+7. After raymarching is complete, recover observed intensity:
+   For each channel:
+       I_obs(lambda) = J(lambda) * nu_obs(lambda)^3
+```
+
+**Why this is more accurate than the g^3 formulation:**
+- The g^3 * B(lambda_emit, T) approach is a shortcut that works for single-emission-point sources (thin disk). For volumetric transfer with absorption and emission at varying redshifts along the ray, it incorrectly mixes observer-frame and emitter-frame quantities.
+- The invariant J formulation correctly handles varying g along the ray path — each emission/absorption event is computed in its local emitter frame, and the invariant J carries the accumulated result without frame confusion.
+- Opacity is correctly evaluated at the emitter-frame frequency (Correction 3: opacity frequency shift), which is automatic in this formulation since all emitter-frame quantities use nu_emit.
+
+**Redshift convention:** This codebase defines `g = nu_emit / nu_obs = (p_mu u^mu)_emit / (p_mu u^mu)_obs`, where g > 1 means blueshift (approaching matter) and g < 1 means redshift. This is the inverse of the Lindquist (1966) convention.
 
 ### 4.2 Planck Function
 
@@ -334,7 +390,7 @@ When the ray transitions from outside to inside, switch to raymarching mode.
 
 ### 5.4 Resume Normal Integration
 
-After exiting the disk, resume the standard adaptive RK4 geodesic integrator. The ray may re-enter the disk (e.g., gravitational lensing bends it back through), in which case raymarching resumes with fresh tau_abs accumulation. This is physically correct: the Eddington approximation measures optical depth from the nearest disk surface, and re-entry constitutes entering from a different surface.
+After exiting the disk, resume the standard adaptive RK4 geodesic integrator. The ray may re-enter the disk (e.g., gravitational lensing bends it back through), in which case raymarching resumes with fresh `tau_abs` accumulation but the invariant `J` is **not** reset — it carries the accumulated emission/absorption from all previous disk crossings. Only `tau_abs` resets because the Eddington approximation measures optical depth from the nearest disk surface, and re-entry constitutes entering from a different surface.
 
 ---
 
@@ -390,7 +446,15 @@ Thin disk remains the default. All existing CLI flags (`--disk-temperature`, `--
 | Midplane density LUT (500 doubles) | 4 KB |
 | Simplex permutation table (512 ints) | 2 KB |
 | New RenderParams fields | ~50 B |
-| **Total** | **~40 KB** (within 64 KB limit) |
+| **Total (constant memory)** | **~40 KB** (within 64 KB limit) |
+
+**Global memory (texture-cached):**
+
+| Data | Size |
+|---|---|
+| Vertical density profile 2D LUT (500 r-bins × 64 z-bins, doubles) | ~250 KB |
+
+The vertical profile LUT is too large for constant memory and is instead stored in global device memory with texture cache for 2D interpolation. Accessed via `tex2D` for hardware-accelerated bilinear interpolation on (r, z/H) coordinates.
 
 ### 6.5 Physical Constants
 
