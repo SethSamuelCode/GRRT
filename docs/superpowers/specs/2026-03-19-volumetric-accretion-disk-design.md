@@ -42,7 +42,7 @@ T_unit = G * M_BH / c^3          [seconds per unit of t]
   rho_CGS = rho_geometric * M_BH / L_unit^3
   ```
 - ds (affine parameter step) converts to cm via: `ds_CGS = ds * L_unit`
-- Omega_K is in 1/T_unit; c_s is in cm/s
+- Omega_orb is in 1/T_unit; c_s is in cm/s
 
 **Practical approach:** The midplane density rho_mid is not computed from first principles in absolute CGS. Instead, it is **normalized** so that the midplane vertical optical depth at the peak-flux radius equals a configurable tau_mid (default 100). This normalization absorbs M_BH and all CGS conversion factors into a single scale factor computed once during LUT construction:
 
@@ -50,7 +50,7 @@ T_unit = G * M_BH / c^3          [seconds per unit of t]
 rho_scale = tau_mid / (kappa_ref * integral(rho_profile(z) * dz, z=-3H..3H))
 ```
 
-where kappa_ref = kappa_abs(lambda_G, rho=1, T=T_peak) + kappa_es is the reference opacity at the peak-flux radius. All subsequent density evaluations multiply by rho_scale. This avoids carrying M_BH through the integrator and keeps the geometric coordinate system clean.
+where kappa_ref = kappa_abs(nu_G, rho_guess, T_peak) + kappa_es is the reference total extinction opacity at the peak-flux radius, with nu_G = c/lambda_G and rho_guess an initial density estimate (iterated to self-consistency). All subsequent density evaluations multiply by rho_scale. This avoids carrying M_BH through the integrator and keeps the geometric coordinate system clean.
 
 **Scale height** is computed in geometric units directly:
 
@@ -79,24 +79,27 @@ dP/dz = -rho * Omega_z(r)^2 * z
 P(z) = P_gas(z) + P_rad(z) = rho*k_B*T(z)/(mu*m_p) + (4*sigma_SB/3c)*T(z)^4
 ```
 
-where `Omega_z` is the **vertical epicyclic frequency**, which differs from the orbital frequency `Omega_K` in Kerr spacetime due to the oblate geometry:
+where `Omega_z` is the **vertical epicyclic frequency**, which differs from the orbital frequency in Kerr spacetime due to the oblate geometry:
 
 ```
-Omega_z^2(r) = Omega_K^2 * (1 - 4*a*sqrt(M/r^3) + 3*a^2/r^2)
+Omega_orb = sqrt(M) / (r^(3/2) + a*sqrt(M))       [Kerr prograde orbital frequency]
+Omega_z^2(r) = Omega_orb^2 * (1 - 4*a*sqrt(M/r^3) + 3*a^2/r^2)
 ```
 
-For Schwarzschild (a=0), Omega_z = Omega_K exactly (spherical symmetry). For Kerr, the prograde frame-dragging reduces the vertical restoring force, making the disk slightly thicker at given temperature. This correction is computed once per radial bin during LUT construction.
+Note: the base frequency is the **Kerr orbital frequency** Omega_orb, not the Newtonian Keplerian frequency sqrt(M/r^3). The ratio Omega_orb/sqrt(M/r^3) = r^{3/2}/(r^{3/2} + a*sqrt(M)), which is ~0.94 at r_isco for a=0.998 — using the Newtonian value would overestimate Omega_z^2 by ~12%.
+
+For Schwarzschild (a=0), Omega_orb = sqrt(M/r^3) and Omega_z = Omega_orb exactly (spherical symmetry). For Kerr, the prograde frame-dragging reduces the vertical restoring force, making the disk slightly thicker at given temperature. This correction is computed once per radial bin during LUT construction.
 
 **Procedure (computed once per radial bin during LUT construction):**
 
-1. Set midplane boundary conditions: `rho(0) = rho_mid(r)`, `T(0) = T_mid(r)` from Eddington at tau_abs = tau_mid
+1. Set midplane boundary conditions: `rho(0) = rho_mid(r)`, `T(0) = T_mid(r)` from Eddington at tau_total = tau_mid
 2. Integrate outward from z = 0 using RK4 in z with step dz = H_gas/20:
-   - At each z, compute local tau_abs by integrating density inward from the current z: `tau_abs(z) = integral(kappa_abs * rho dz', z..z_surface)`
-   - Compute T(z) from Eddington: `T^4(z) = (3/4)*T_eff^4*(tau_abs(z) + 2/3)`
+   - At each z, compute local tau_total by integrating total extinction inward from the current z: `tau_total(z) = integral((kappa_abs + kappa_es) * rho dz', z..z_surface)`
+   - Compute T(z) from Eddington: `T^4(z) = (3/4)*T_eff^4*(tau_total(z) + 2/3)`
    - Compute P(z) = P_gas + P_rad
    - Apply the ODE to get drho/dz from dP/dz and the equation of state
-3. The integration is self-consistent: tau_abs depends on rho(z), which depends on T(z), which depends on tau_abs. Resolve by iterating the z-profile until the max relative change in rho(z) < 1e-3 (typically 3-5 iterations).
-4. Store the resulting rho(z) profile as a 1D lookup table per radial bin: 64 z-bins covering `0 to z_max = 3*H(r)`, one-sided (the profile is symmetric about the midplane, so `rho(r, -z) = rho(r, z)`).
+3. The integration is self-consistent: tau_total depends on rho(z), which depends on T(z), which depends on tau_total. Resolve by iterating the z-profile until the max relative change in rho(z) < 1e-3 (typically 3-5 iterations).
+4. Store the resulting rho(z) and T(z) profiles as 1D lookup tables per radial bin: 64 z-bins covering `0 to z_max = 3*H(r)`, one-sided (both profiles are symmetric about the midplane). The T(r, z) LUT is used during raymarching (Section 4.1, step 4) to avoid the physically incorrect alternative of computing temperature from the ray's slant optical depth.
 
 **Effect:** Compared to a Gaussian, the numerical profile is more centrally concentrated (radiation pressure support creates a flatter core with sharper wings). This is physically correct — the inner disk, where radiation pressure dominates, has a distinctly non-Gaussian profile.
 
@@ -115,14 +118,15 @@ H(r) = c_eff(r) / Omega_z(r)
 
 c_eff^2 = k_B*T_eff(r) / (mu*m_p*c^2) + 4*sigma_SB*T_eff(r)^4 / (3*rho_mid_CGS(r)*c^3)
 
-Omega_z^2(r) = Omega_K^2 * (1 - 4*a*sqrt(M/r^3) + 3*a^2/r^2)     [Kerr vertical epicyclic frequency]
+Omega_orb = sqrt(M) / (r^(3/2) + a*sqrt(M))                         [Kerr prograde orbital frequency]
+Omega_z^2(r) = Omega_orb^2 * (1 - 4*a*sqrt(M/r^3) + 3*a^2/r^2)    [Kerr vertical epicyclic frequency]
 ```
 
 - First term in c_eff: gas pressure (dominates outer disk)
 - Second term in c_eff: radiation pressure (dominates inner disk, produces visible puffing)
 - mu = 0.6 (ionized H+He mean molecular weight)
 - Division by c^2 and c^3 converts CGS sound speed to geometric units
-- Omega_z < Omega_K for prograde Kerr, giving slightly thicker disks at high spin
+- Omega_z < Omega_orb for prograde Kerr, giving slightly thicker disks at high spin
 
 Note: H(r) and rho_mid(r) are mutually dependent (H depends on rho_mid via radiation pressure, rho_mid depends on H via Sigma/(sqrt(2pi)*H)). Resolve by iterating: compute H assuming gas pressure only, then compute rho_mid, then recompute H with radiation pressure, repeat until convergence (2-3 iterations suffice). This is done once during LUT construction, not per-ray.
 
@@ -131,10 +135,12 @@ Note: H(r) and rho_mid(r) are mutually dependent (H depends on rho_mid via radia
 From alpha-disk surface density:
 
 ```
-Sigma(r) proportional to F(r) / (nu * Omega_K)
+Sigma(r) proportional to F(r) / (nu * Omega_orb^2)
 nu = alpha * c_s * H                          (Shakura-Sunyaev viscosity)
 rho_mid(r) = Sigma(r) / (sqrt(2*pi) * H(r))
 ```
+
+Derivation: the viscous dissipation per unit area (both faces) is `2F = (9/4)*Sigma*nu*Omega_orb^2` (from the shear stress with approximately Keplerian shear). Inverting gives `Sigma ∝ F/(nu*Omega_orb^2)`. The Omega_orb^2 factor is critical for the radial density shape — using Omega_orb instead of Omega_orb^2 overweights the outer disk density by a factor of r^{3/2}. Note: the factor of 2 (two radiating faces) does not affect the proportionality and is absorbed by the normalization.
 
 Normalized so that the midplane vertical optical depth at peak-flux radius equals tau_mid (default 100). See Section 0 for the normalization procedure.
 
@@ -166,7 +172,7 @@ Ray is inside the disk when:
 |z| < 3*H(r)   AND   r_horizon < r <= r_outer
 ```
 
-The 3-sigma cutoff captures 99.7% of the Gaussian density. The inner bound extends to the horizon (not ISCO) because the plunging region has nonzero density.
+The 3H cutoff provides a conservative bound for the numerically computed vertical profile (which is more centrally concentrated than a Gaussian, so the density at 3H is negligible). The inner bound extends to the horizon (not ISCO) because the plunging region has nonzero density.
 
 ---
 
@@ -174,34 +180,51 @@ The 3-sigma cutoff captures 99.7% of the Gaussian density. The inner bound exten
 
 ### 2.1 Radial Effective Temperature
 
-Unchanged Novikov-Thorne profile:
+Novikov-Thorne profile for the orbiting region, with a frozen-temperature plunging extension:
 
 ```
-T_eff(r) = T_peak * (F(r) / F_max)^(1/4)
+T_eff(r) = T_peak * (F(r) / F_max)^(1/4)       for r >= r_isco
+T_eff(r) = T_plunge                              for r < r_isco
 ```
 
-### 2.2 Vertical Temperature — Eddington Approximation
+where `T_plunge = T_eff(r_isco + epsilon)` is the effective temperature just outside the ISCO (practically, evaluate at the first radial LUT bin outside r_isco).
+
+**Why this is needed:** The Novikov-Thorne flux vanishes exactly at r_isco by the zero-torque inner boundary condition: F(r_isco) = 0. Without the plunging extension, the entire plunging region would have T_eff = 0 — invisible despite having nonzero density (Section 1.4) and nonzero 4-velocity (Section 4.3).
+
+**Physical justification:** Gas spiraling inward through the disk is heated by viscous dissipation. Just outside the ISCO, F(r) is small but nonzero — the gas has a definite temperature. At the ISCO, it detaches from circular orbit and plunges inward. During the plunge, there is no viscous heating (no shear — the gas is in free-fall), but the plunge timescale (~few M in coordinate time) is much shorter than the radiative cooling timescale (t_cool >> M for optically thick gas). So the gas approximately retains the temperature it had when it left the orbiting region.
+
+T_plunge is modest compared to the disk peak (F drops steeply approaching ISCO), so the plunging region is dimmer than the main disk — consistent with the density taper (Section 1.4) producing a smooth, fading inner edge rather than a bright ring.
+
+### 2.2 Vertical Temperature — Eddington Approximation (Precomputed LUT)
+
+The Eddington T-tau relation determines the vertical temperature profile:
 
 ```
-T^4(r, tau_abs) = (3/4) * T_eff(r)^4 * (tau_abs + 2/3)
+T^4(r, tau_z) = (3/4) * T_eff(r)^4 * (tau_z + 2/3)
 ```
 
-- `tau_abs` is the absorption optical depth accumulated from the disk surface inward along the ray
-- Computed during raymarching — not a precomputed function of (r,z)
+where `tau_z` is the **vertical total extinction** optical depth (absorption + scattering) from the disk surface to height z — a property of the atmosphere at position (r, z), independent of viewing angle. The Eddington relation is derived from the radiative transfer moment equations using total extinction, not absorption alone — using absorption-only tau would underestimate the optical depth in scattering-dominated regions (inner disk) and produce an incorrectly steep temperature gradient. This is computed during LUT construction (Section 1.1) as part of the hydrostatic equilibrium solve and stored as a 2D lookup table `T_LUT(r, |z|)` alongside the density profile.
+
+**Critical:** T(r, z) must NOT be computed from the ray's accumulated optical depth during raymarching. The ray's slant optical depth depends on the viewing angle (edge-on rays accumulate far more tau than face-on rays through the same point), but the temperature at a physical point is a property of the atmosphere, not the observer. Using ray tau would make the disk appear hotter at high inclinations — an unphysical artifact.
+
 - Midplane temperature: `T_mid = ((3/4)*(tau_mid + 2/3))^(1/4) * T_eff`
 - Surface temperature: `T_surface ~ 0.84 * T_eff`
+- During raymarching: look up `T = T_LUT(r, |z|)` at each sample point
 
 ### 2.3 Turbulent Temperature Coupling
 
 Dense clumps and sparse pockets adjust temperature via interpolated isothermal-adiabatic relation:
 
 ```
-t_cool = (rho * c_s^2) / (sigma_SB * T^4) * tau_local
-t_turb = 1 / Omega_K(r)
+tau_local = (kappa_abs(nu_G, rho_smooth, T) + kappa_es) * rho_smooth_CGS * H(r)     [total extinction optical depth across one scale height]
+t_cool = (rho * c_s^2) / (sigma_SB * T^4) * tau_local                      [photon diffusion time]
+t_turb = 1 / Omega_orb(r)                                                    [turbulent turnover time]
 beta = (gamma - 1) * t_cool / (t_cool + t_turb)
 T_turb = T * (rho_turb / rho_smooth)^beta
 ```
 
+- `tau_local` is the total extinction optical depth across one scale height at the smooth (unperturbed) density — this sets the photon diffusion time out of a turbulent clump (scattering redirects photons, keeping them trapped just like absorption does)
+- `rho_smooth` is the density without turbulent noise; `rho_turb` includes noise
 - gamma = 5/3 (ideal gas)
 - beta -> 0 (isothermal) in hot inner disk where cooling is fast
 - beta -> 2/3 (adiabatic) in cool outer disk where cooling is slow
@@ -210,59 +233,65 @@ T_turb = T * (rho_turb / rho_smooth)^beta
 
 ## 3. Opacity Model
 
-### 3.1 Absorption Opacity (Frequency-Dependent)
+### 3.1 Absorption Opacity (Frequency-Dependent, Monochromatic)
 
-Total absorption includes both free-free (bremsstrahlung) and bound-free (photoionization) processes. Both are two-body processes with the same temperature and density scaling but different coefficients.
+We use the **monochromatic** free-free absorption coefficient (Rybicki & Lightman eq. 5.18a) as the foundation, enhanced by a temperature-dependent bound-free factor. This approach avoids two problems with the Rosseland mean coefficients (3.68e22, 4.34e25): (1) the Rosseland mean is frequency-integrated and does not equal the monochromatic opacity at any particular frequency, and (2) the monochromatic formula naturally includes the stimulated emission correction.
 
-**Free-free (bremsstrahlung) mass opacity:**
+**Why not separate monochromatic bound-free?** Bound-free (photoionization) opacity has a fundamentally different functional form from free-free — it involves step-function edges at ionization thresholds, depends on the population of bound states (Saha-Boltzmann equilibrium), and is NOT proportional to `n_e * n_i * T^{-1/2}`. It cannot be written as a single smooth coefficient times the free-free formula. Instead, we use the Rosseland mean ratio to determine an effective enhancement factor.
 
-```
-kappa_ff_mass = 3.68e22 * g_ff(nu, T) * (1 + X) * rho_CGS * T^(-7/2)     [cm^2/g]
-```
-
-where X = 0.7 (hydrogen mass fraction) and g_ff is the thermally-averaged Gaunt factor.
-
-**Bound-free (photoionization) mass opacity:**
+**Monochromatic free-free absorption coefficient:**
 
 ```
-kappa_bf_mass = 4.34e25 * g_bf * Z * (1 + X) * rho_CGS * T^(-7/2)     [cm^2/g]
+alpha_ff(nu, rho, T) = (C_ff / nu^3) * n_e * n_i * g_ff(nu, T) * T^(-1/2) * (1 - exp(-h*nu/(k_B*T)))     [cm^{-1}]
 ```
 
-where Z = 0.02 (metal mass fraction, solar) and g_bf ≈ 1 (bound-free Gaunt factor, order unity). Bound-free dominates free-free by a factor of ~100 * Z ≈ 2 at the same conditions, but becomes negligible when the gas is fully ionized (T >> 10^5 K). We include it because the outer disk can be cool enough for partial ionization.
+where:
+- `C_ff = 3.69e8` CGS = (4*e^6)/(3*m_e*h*c) * sqrt(2*pi/(3*m_e*k_B)) (Rybicki & Lightman eq. 5.18a)
+- `n_e = rho_CGS * (1 + X) / (2 * m_p)` is the electron number density [cm^{-3}] (H gives 1e⁻, He gives 2e⁻ per nucleus)
+- `n_i = rho_CGS * (3*X + 1) / (4 * m_p)` is the ion number density [cm^{-3}] (H gives 1 ion, He gives 1 ion per nucleus)
+- The `(1 - exp(-h*nu/(k_B*T)))` factor is the **stimulated emission correction**
+
+**Stimulated emission effect on frequency scaling:** In the Wien limit (hν >> k_BT), the correction → 1 and opacity scales as ν⁻³. In the Rayleigh-Jeans limit (hν << k_BT, typical for optical wavelengths in the hot inner disk where T ~ 10^7 K), the correction → hν/(k_BT) and opacity scales as ν⁻². This reduces the color difference between channels in the hot inner disk.
+
+**Bound-free enhancement factor:**
+
+From the Rosseland mean opacities, bound-free dominates free-free by a factor of ~24 at solar metallicity:
+
+```
+kappa_bf_Ross / kappa_ff_Ross = (4.34e25 * Z * (1+X)) / (3.68e22 * (X+Y) * (1+X))
+                               = (4.34e25 * 0.02) / (3.68e22 * 0.98) ≈ 24
+```
+
+This enhancement only applies when bound electrons exist. At T >> 1.5×10⁵ K, metals are fully stripped and bound-free vanishes. We model this with a smooth ionization suppression:
+
+```
+f_bf(T) = exp(-T / T_ionize)          where T_ionize = 1.5e5 K
+bf_enhancement = 1.0 + 24.0 * (Z / Z_sun) * f_bf(T)
+```
+
+- Cool outer disk (T ~ 10⁴ K): bf_enhancement ≈ 25, total absorption ~25× free-free alone
+- Hot inner disk (T ~ 10⁶-10⁷ K): bf_enhancement ≈ 1, pure free-free (fully ionized)
+- Smooth transition through partial ionization zone
+
+**Combined monochromatic absorption coefficient:**
+
+```
+alpha_abs(nu, rho, T) = bf_enhancement(T) * alpha_ff(nu, rho, T)     [cm^{-1}]
+```
+
+Converting to mass absorption coefficient: `kappa_abs(nu) = alpha_abs / rho_CGS` [cm^2/g]
+
+The volumetric absorption coefficient `alpha_abs` has the expected rho^2 dependence for collisional processes (n_e * n_i ∝ rho^2).
 
 **Gaunt factor approximation:**
-
-The free-free Gaunt factor provides a frequency and temperature-dependent correction:
 
 ```
 g_ff(nu, T) = max(1.0, (sqrt(3)/pi) * ln(k_B * T / (h * nu)))
 ```
 
-This is the Elwert (1954) / Karzas-Latter (1961) asymptotic form. For optical frequencies and typical disk temperatures: g_ff ≈ 1-5 (blue channel has lower g_ff than red, partially counteracting the nu^-3 frequency dependence).
+Elwert (1954) / Karzas-Latter (1961) asymptotic form. For optical frequencies and typical disk temperatures: g_ff ≈ 1-5.
 
-**Combined absorption mass opacity:**
-
-```
-kappa_abs_mass(nu, rho, T) = (kappa_ff_mass + kappa_bf_mass) * g_ff(nu, T)
-```
-
-Note: g_ff is already included in kappa_ff_mass above; for kappa_bf_mass we use g_bf ≈ 1. To avoid double-counting, the combined formula is:
-
-```
-kappa_abs_mass = (3.68e22 * (1+X) * g_ff + 4.34e25 * Z * (1+X) * g_bf) * rho_CGS * T^(-7/2)
-```
-
-The volumetric absorption coefficient is then kappa_abs_mass * rho_CGS, giving rho^2 dependence as expected for collisional processes.
-
-**Frequency dependence** (Kramers' processes scale as nu^-3):
-
-```
-kappa_abs(lambda) = kappa_abs_mass * (lambda / lambda_ref)^3     [cm^2/g]
-```
-
-where lambda_ref = 550nm (green reference). Longer wavelengths (red) have higher absorption; shorter (blue) have lower. During raymarching, opacity is evaluated at the emitter-frame wavelength lambda_emit = lambda_obs / g (Section 4.1).
-
-Evaluated at three observer wavelengths: lambda_B = 450nm, lambda_G = 550nm, lambda_R = 650nm.
+During raymarching, opacity is evaluated at the emitter-frame frequency `nu_emit = g * nu_obs` (Section 4.1) for each of the three observer wavelengths: lambda_B = 450nm, lambda_G = 550nm, lambda_R = 650nm.
 
 ### 3.2 Thomson Electron Scattering (Frequency-Independent)
 
@@ -287,10 +316,11 @@ Mass opacities (cm^2/g) are multiplied by rho_CGS * ds_proper to get optical dep
 
 ```
 dtau_total = kappa_total * rho_CGS * ds_proper     [extinction optical depth, for transfer equation]
-dtau_abs   = kappa_abs   * rho_CGS * ds_proper     [absorption optical depth, for Eddington temperature]
 ```
 
 Since rho is stored in geometric normalization and ds is in geometric units, the product `rho * ds` is converted via the rho_scale factor established in Section 0.
+
+Note: the vertical total extinction optical depth used in the Eddington T-tau relation (Section 2.2) is computed only during **LUT construction** (Section 1.1). It is NOT accumulated during raymarching — temperature is looked up from the precomputed LUT.
 
 ---
 
@@ -309,28 +339,28 @@ where S is the invariant source function. This formulation is exact for any spac
 **Per-step procedure at each raymarch sample point:**
 
 ```
-1. Compute emitter-frame frequency for each channel:
+1. Look up local thermodynamic state from precomputed LUTs:
+   z = r * cos(theta)
+   rho = rho_LUT(r, |z|) * taper(r) * (1 + delta * noise3D(r/H, z/H, phi))
+   T   = T_LUT(r, |z|)
+   Apply turbulent coupling: T_turb (Section 2.3)
+
+2. Compute emitter-frame frequency for each channel:
    nu_emit(lambda) = g * nu_obs(lambda)        where nu_obs = c / lambda
    lambda_emit = lambda / g
 
-2. Evaluate opacity at emitter-frame frequency (see Section 3 for full formulas):
-   kappa_abs_emit(lambda) = kappa_abs(lambda_emit, rho, T)     [Section 3.1, frequency-scaled]
+3. Evaluate opacity at emitter-frame frequency (see Section 3 for full formulas):
+   kappa_abs_emit(lambda) = kappa_abs(lambda_emit, rho, T_turb)     [Section 3.1, frequency-scaled]
    kappa_total_emit(lambda) = kappa_abs_emit(lambda) + kappa_es
    epsilon(lambda) = kappa_abs_emit(lambda) / kappa_total_emit(lambda)   [photon destruction probability]
 
-3. Compute optical depth increments (in emitter frame):
+4. Compute optical depth increments (in emitter frame):
    dtau_total(lambda) = kappa_total_emit(lambda) * rho_CGS * ds_proper
-   dtau_abs(lambda)   = kappa_abs_emit(lambda) * rho_CGS * ds_proper
 
    where ds_proper is the proper distance along the ray in the emitter frame.
    For a comoving emitter: ds_proper = |p_mu u^mu_emit| * ds_affine * (L_unit)
    Here ds_affine is the geodesic affine parameter step (called `ds` in Section 5.2),
    not to be confused with optical wavelength lambda.
-
-4. Accumulate absorption optical depth for Eddington temperature:
-   tau_abs += dtau_abs(lambda_G)
-   T = ((3/4) * T_eff(r)^4 * (tau_abs + 2/3))^(1/4)
-   Apply turbulent coupling: T_turb (Section 2.3)
 
 5. Compute invariant source function (absorption-only emission, scattering is conservative):
    For each channel lambda in {B, G, R}:
@@ -389,17 +419,17 @@ Delta = r^2 - 2*M*r + a^2
 
 **Emitter 4-velocity — circular orbit (r >= r_isco):**
 
-Derived from the metric normalization condition `g_μν u^μ u^ν = -1` with `u^μ = u^t(1, 0, 0, Ω_K)`:
+Derived from the metric normalization condition `g_μν u^μ u^ν = -1` with `u^μ = u^t(1, 0, 0, Ω_orb)`:
 
 ```
-Omega_K = sqrt(M) / (r^(3/2) + a*sqrt(M))       [Kerr prograde orbital frequency]
+Omega_orb = sqrt(M) / (r^(3/2) + a*sqrt(M))       [Kerr prograde orbital frequency]
 
 g_tt_eq   = -(1 - 2*M/r)                          [equatorial Kerr metric components]
 g_tphi_eq = -2*M*a/r
 g_phph_eq = r^2 + a^2 + 2*M*a^2/r
 
-u^t_emit   = 1 / sqrt(-(g_tt_eq + 2*g_tphi_eq*Omega_K + g_phph_eq*Omega_K^2))
-u^phi_emit = Omega_K * u^t_emit
+u^t_emit   = 1 / sqrt(-(g_tt_eq + 2*g_tphi_eq*Omega_orb + g_phph_eq*Omega_orb^2))
+u^phi_emit = Omega_orb * u^t_emit
 u^r_emit   = 0
 u^theta_emit = 0
 ```
@@ -407,18 +437,41 @@ u^theta_emit = 0
 Note: The sometimes-seen shortcut `u^t = 1/sqrt(1 - 3M/r + 2a*sqrt(M/r^3))` is the BPT72 energy normalization factor, NOT u^t. Using it for u^t introduces ~3% error at moderate spin, growing larger near ISCO.
 
 **Emitter 4-velocity — plunging geodesic (r < r_isco):**
-```
-E = E_isco,  L = L_isco     (conserved from last stable orbit)
 
-u^t = (E*(r^2 + a^2) + 2*M*a*r*L/Sigma) / Delta
-u^phi = (L/sin^2(theta) + 2*M*a*r*E/Sigma) / Delta
-u^r = -sqrt(max(0, R(r))) / Sigma
+Gas inside the ISCO follows timelike geodesics with conserved energy and angular momentum from the last stable orbit:
+
+```
+v_isco = sqrt(M / r_isco),  a_star = a / M
+
+E_isco = (1 - 2*v_isco^2 + a_star*v_isco^3) / sqrt(1 - 3*v_isco^2 + 2*a_star*v_isco^3)
+L_isco = sqrt(M*r_isco) * (1 - 2*a_star*v_isco^3 + a_star^2*v_isco^4) / sqrt(1 - 3*v_isco^2 + 2*a_star*v_isco^3)
+```
+
+These are the Bardeen-Press-Teukolsky (1972) specific energy and angular momentum for circular prograde orbits, evaluated at r_isco.
+
+The contravariant 4-velocity is obtained by raising indices with the inverse Kerr metric. At the equatorial plane (using equatorial inverse metric components):
+
+```
+E = E_isco,  L = L_isco
+
+u^t     = [E*(r^2 + a^2 + 2*M*a^2/r) - 2*M*a*L/r] / Delta
+u^phi   = [L*(1 - 2*M/r) + 2*M*a*E/r] / Delta
+u^r     = -sqrt(max(0, R(r))) / Sigma
 u^theta = 0
+```
+
+where `Sigma = r^2 + a^2*cos^2(theta)` uses the actual theta of the sample point (not equatorial).
+
+Derivation: `u^t = g^{tt}*(-E) + g^{t phi}*L` and `u^phi = g^{phi t}*(-E) + g^{phi phi}*L`, with equatorial inverse metric:
+```
+g^{tt}    = -(r^2 + a^2 + 2*M*a^2/r) / Delta
+g^{t phi} = -2*M*a / (r * Delta)
+g^{phi phi} = (1 - 2*M/r) / Delta
 ```
 
 where `R(r) = (E*(r^2+a^2) - a*L)^2 - Delta*(r^2 + (L - a*E)^2)` is the Kerr radial potential.
 
-**Off-midplane approximation:** Both the circular and plunging 4-velocities are derived for equatorial orbits (theta = pi/2). For volumetric disk samples at z != 0, we use the equatorial velocity at the same r. This is standard practice in GRMHD post-processing — the gas velocity is dominated by the orbital motion, and vertical velocities (thermal, turbulent) are subsonic and contribute negligibly to the Doppler shift. The Sigma factor in the plunging formulas does use the actual theta of the sample point, providing the leading-order GR correction.
+**Off-midplane approximation:** The u^t and u^phi formulas use equatorial inverse metric components (derived for theta = pi/2). For volumetric disk samples at z != 0, we evaluate these at the same r, which is standard practice in GRMHD post-processing — the gas velocity is dominated by the orbital motion, and vertical velocities (thermal, turbulent) are subsonic and contribute negligibly to the Doppler shift. The u^r formula uses the full Sigma (with actual theta) rather than r^2, providing the leading-order GR correction for off-midplane points. The same off-midplane approximation applies to circular orbit u^t and u^phi above.
 
 ---
 
@@ -440,9 +493,9 @@ When the ray transitions from outside to inside, switch to raymarching mode.
 1. Set initial step size: `ds = H(r) / 8`
 2. At each sample:
    - Advance geodesic state by RK4 step of size ds (light follows curved path through disk)
-   - Evaluate density, temperature, opacity, redshift at new position
+   - Look up density and temperature from LUT at current (r, |z|)
+   - Evaluate opacity and redshift at new position
    - Update three-channel radiative transfer
-   - Accumulate tau_abs for Eddington temperature
 3. Adaptive step control based on green-channel total optical depth per step:
    ```
    dtau_ref = (kappa_abs(lambda_G) + kappa_es) * rho_CGS * ds_proper
@@ -460,7 +513,7 @@ When the ray transitions from outside to inside, switch to raymarching mode.
 
 ### 5.4 Resume Normal Integration
 
-After exiting the disk, resume the standard adaptive RK4 geodesic integrator. The ray may re-enter the disk (e.g., gravitational lensing bends it back through), in which case raymarching resumes with fresh `tau_abs` accumulation but the invariant `J` is **not** reset — it carries the accumulated emission/absorption from all previous disk crossings. Only `tau_abs` resets because the Eddington approximation measures optical depth from the nearest disk surface, and re-entry constitutes entering from a different surface.
+After exiting the disk, resume the standard adaptive RK4 geodesic integrator. The ray may re-enter the disk (e.g., gravitational lensing bends it back through), in which case raymarching resumes. The invariant `J` is **not** reset on re-entry — it carries the accumulated emission/absorption from all previous disk crossings. Temperature and density are always looked up from the precomputed (r, z) LUT, so no per-ray state needs resetting between crossings.
 
 ---
 
@@ -523,8 +576,9 @@ Thin disk remains the default. All existing CLI flags (`--disk-temperature`, `--
 | Data | Size |
 |---|---|
 | Vertical density profile 2D LUT (500 r-bins × 64 z-bins, doubles) | ~250 KB |
+| Vertical temperature profile 2D LUT (500 r-bins × 64 z-bins, doubles) | ~250 KB |
 
-The vertical profile LUT is too large for constant memory and is instead stored in global device memory with texture cache for 2D interpolation. Accessed via `tex2D` for hardware-accelerated bilinear interpolation on (r, z/H) coordinates.
+Both vertical profile LUTs are too large for constant memory and are stored in global device memory with texture cache for 2D interpolation. Accessed via `tex2D` for hardware-accelerated bilinear interpolation on (r, z/H) coordinates.
 
 ### 6.5 Physical Constants
 
@@ -543,6 +597,8 @@ Needed in both CPU and CUDA code (shared header `include/grrt/math/constants.h`)
 | gamma_gas | 5.0/3.0 | dimensionless | Adiabatic index (ideal gas) |
 | X_hydrogen | 0.7 | dimensionless | Hydrogen mass fraction |
 | Z_metal | 0.02 | dimensionless | Metal mass fraction (solar) |
+| alpha_ff_coeff | 3.69e8 | CGS | Free-free monochromatic coefficient = 4e^6/(3 m_e h c) * sqrt(2pi/(3 m_e k_B)) |
+| alpha_bf_coeff | 1.31e23 | CGS | Bound-free monochromatic coefficient (≈ 355 * alpha_ff_coeff) |
 
 These are used only in the volumetric disk LUT construction and per-sample opacity evaluation. The geodesic integrator remains in pure geometric units.
 
