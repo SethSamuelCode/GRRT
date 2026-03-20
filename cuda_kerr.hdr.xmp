@@ -12,7 +12,7 @@
    xmpMM:DerivedFrom="cuda_kerr.hdr"
    xmp:Rating="1"
    darktable:import_timestamp="63909508493104719"
-   darktable:change_timestamp="63909508935853420"
+   darktable:change_timestamp="63909508936961205"
    darktable:export_timestamp="-1"
    darktable:print_timestamp="-1"
    darktable:xmp_version="5"
@@ -21,7 +21,7 @@
    darktable:history_end="8"
    darktable:iop_order_version="5"
    darktable:history_basic_hash="81966402ceba6321bda67c3cacb1eb6a"
-   darktable:history_current_hash="fe47090e167928a958cc25283ffce668">
+   darktable:history_current_hash="8d791fa5c4b93de024528a6c262d28b0">
    <darktable:masks_history>
     <rdf:Seq/>
    </darktable:masks_history>
@@ -109,7 +109,7 @@
       darktable:operation="colorzones"
       darktable:enabled="1"
       darktable:modversion="5"
-      darktable:params="gz10eJxjYmBg2C4sbb9ua5j95c5UexEdAzuGQQcaQG6yZ2BwsIfQgw0MbvcxIWFGJAwDIDYALyUJTQ=="
+      darktable:params="gz10eJxjYmBguNnJan+M19z+cmeqvYiOgR3DoAMNIDfZMzA42EPowQYGt/uYkDAjEoYBEBsA17oJIA=="
       darktable:multi_name=""
       darktable:multi_name_hand_edited="0"
       darktable:multi_priority="0"
