@@ -50,7 +50,7 @@ T_unit = G * M_BH / c^3          [seconds per unit of t]
 rho_scale = tau_mid / (kappa_ref * integral(rho_profile(z) * dz, z=-3H..3H))
 ```
 
-where kappa_ref = kappa_abs(nu_G, rho_guess, T_peak) + kappa_es is the reference total extinction opacity at the peak-flux radius, with nu_G = c/lambda_G and rho_guess an initial density estimate (iterated to self-consistency). All subsequent density evaluations multiply by rho_scale. This avoids carrying M_BH through the integrator and keeps the geometric coordinate system clean.
+where kappa_ref = kappa_R_LUT(rho_guess, T_peak) + kappa_es_LUT(rho_guess, T_peak) is the reference total extinction opacity at the peak-flux radius (using the Rosseland mean absorption opacity for consistency with the Eddington T-τ relation), and rho_guess is an initial density estimate (iterated to self-consistency). The opacity LUTs (Sections 3.1.5, 3.2, and the Rosseland mean LUT described in Section 1.1) must be constructed before the density normalization. All subsequent density evaluations multiply by rho_scale. This avoids carrying M_BH through the integrator and keeps the geometric coordinate system clean.
 
 **Scale height** is computed in geometric units directly:
 
@@ -61,7 +61,7 @@ H(r) = c_eff(r) / Omega_z(r)     [geometric units, same as r]
 where Omega_z is the Kerr vertical epicyclic frequency (see Section 1.2) and c_eff is the effective sound speed in geometric units (c=1):
 
 ```
-c_eff^2 = k_B*T_eff(r) / (mu*m_p*c^2) + 4*sigma_SB*T_eff(r)^4 / (3*rho_CGS*c^3)
+c_eff^2 = k_B*T_eff(r) / (mu(rho_mid,T_eff)*m_p*c^2) + 4*sigma_SB*T_eff(r)^4 / (3*rho_CGS*c^3)
 ```
 
 The division by c^2 and c^3 converts the CGS sound speed to geometric units (v/c).
@@ -76,7 +76,7 @@ Instead of an analytical Gaussian (which assumes isothermal vertical structure),
 
 ```
 dP/dz = -rho * Omega_z(r)^2 * z
-P(z) = P_gas(z) + P_rad(z) = rho*k_B*T(z)/(mu*m_p) + (4*sigma_SB/3c)*T(z)^4
+P(z) = P_gas(z) + P_rad(z) = rho*k_B*T(z)/(mu(rho,T)*m_p) + (4*sigma_SB/3c)*T(z)^4
 ```
 
 where `Omega_z` is the **vertical epicyclic frequency**, which differs from the orbital frequency in Kerr spacetime due to the oblate geometry:
@@ -94,7 +94,12 @@ For Schwarzschild (a=0), Omega_orb = sqrt(M/r^3) and Omega_z = Omega_orb exactly
 
 1. Set midplane boundary conditions: `rho(0) = rho_mid(r)`, `T(0) = T_mid(r)` from Eddington at tau_total = tau_mid
 2. Integrate outward from z = 0 using RK4 in z with step dz = H_gas/20:
-   - At each z, compute local tau_total by integrating total extinction inward from the current z: `tau_total(z) = integral((kappa_abs + kappa_es) * rho dz', z..z_surface)`
+   - At each z, compute local tau_total by integrating total extinction inward from the current z: `tau_total(z) = integral((kappa_R(rho, T) + kappa_es_LUT(rho, T)) * rho dz', z..z_surface)`
+     where kappa_R is the **Rosseland mean absorption opacity** (see below), NOT a monochromatic opacity at a single frequency. The Eddington T-τ relation is derived from frequency-integrated radiative transfer moment equations — using a monochromatic opacity (e.g., at ν_G) gives a temperature profile that depends on the arbitrary choice of reference frequency. The Rosseland mean properly weights by the temperature derivative of the Planck function:
+     ```
+     1/kappa_R(rho, T) = integral( (1/kappa_abs(nu, rho, T)) * dB_nu/dT dnu ) / integral( dB_nu/dT dnu )
+     ```
+     This is precomputed as a 2D LUT `kappa_R_LUT(rho, T)` on the same 100×100 grid as kappa_es_LUT, using the existing 3D absorption opacity LUT (Section 3.1.5) to evaluate kappa_abs at each frequency bin. The 20-bin frequency grid is coarse for a Rosseland integral; extend to 50 log-spaced bins from 10^{13} to 10^{16} Hz for the Rosseland computation only (the raymarching LUT retains 20 bins). Total additional size: 80 KB.
    - Compute T(z) from Eddington: `T^4(z) = (3/4)*T_eff^4*(tau_total(z) + 2/3)`
    - Compute P(z) = P_gas + P_rad
    - Apply the ODE to get drho/dz from dP/dz and the equation of state
@@ -116,7 +121,7 @@ where `z = r * cos(theta)` and `rho_numerical(r, z)` is the tabulated numerical 
 ```
 H(r) = c_eff(r) / Omega_z(r)
 
-c_eff^2 = k_B*T_eff(r) / (mu*m_p*c^2) + 4*sigma_SB*T_eff(r)^4 / (3*rho_mid_CGS(r)*c^3)
+c_eff^2 = k_B*T_eff(r) / (mu(rho_mid,T_eff)*m_p*c^2) + 4*sigma_SB*T_eff(r)^4 / (3*rho_mid_CGS(r)*c^3)
 
 Omega_orb = sqrt(M) / (r^(3/2) + a*sqrt(M))                         [Kerr prograde orbital frequency]
 Omega_z^2(r) = Omega_orb^2 * (1 - 4*a*sqrt(M/r^3) + 3*a^2/r^2)    [Kerr vertical epicyclic frequency]
@@ -124,9 +129,18 @@ Omega_z^2(r) = Omega_orb^2 * (1 - 4*a*sqrt(M/r^3) + 3*a^2/r^2)    [Kerr vertical
 
 - First term in c_eff: gas pressure (dominates outer disk)
 - Second term in c_eff: radiation pressure (dominates inner disk, produces visible puffing)
-- mu = 0.6 (ionized H+He mean molecular weight)
+- mu = mu_LUT(rho, T) is the **Saha-derived mean molecular weight** (see below), NOT the hardcoded 0.6 commonly used for fully ionized gas. The mean molecular weight is mu = rho / (n_total * m_p), where n_total = n_ions + n_atoms + n_e is the total particle number density from the Saha solver (Section 3.1.1). For fully ionized solar composition, mu ≈ 0.6. For neutral gas (T < 5000 K in the outer disk), mu ≈ 1.3. Hardcoding mu = 0.6 overestimates the particle density in cool gas by ~2×, which overestimates the gas pressure and inflates the scale height by ~45% in the outer disk.
+- mu_LUT(rho, T) is stored as a 2D lookup table (same 100×100 grid as kappa_es_LUT), computed once during initialization alongside the ionization equilibrium solver. Total size: 80 KB.
 - Division by c^2 and c^3 converts CGS sound speed to geometric units
 - Omega_z < Omega_orb for prograde Kerr, giving slightly thicker disks at high spin
+
+**Inside the ISCO (r < r_isco):** The vertical epicyclic frequency Omega_z^2 goes to zero (and negative) inside the ISCO — there is no restoring force for circular orbits. This causes H = c_eff/Omega_z to diverge, which is unphysical. The plunging gas retains approximately the vertical structure it had at the ISCO because the plunge time is much shorter than the vertical relaxation time. Therefore:
+
+```
+H(r < r_isco) = H(r_isco)       [frozen at ISCO value]
+```
+
+This is applied after computing H(r_isco) during LUT construction. The density profile inside the ISCO uses this frozen H together with the ISCO taper (Section 1.4).
 
 Note: H(r) and rho_mid(r) are mutually dependent (H depends on rho_mid via radiation pressure, rho_mid depends on H via Sigma/(sqrt(2pi)*H)). Resolve by iterating: compute H assuming gas pressure only, then compute rho_mid, then recompute H with radiation pressure, repeat until convergence (2-3 iterations suffice). This is done once during LUT construction, not per-ray.
 
@@ -140,18 +154,26 @@ nu = alpha * c_s * H                          (Shakura-Sunyaev viscosity)
 rho_mid(r) = Sigma(r) / (sqrt(2*pi) * H(r))
 ```
 
-Derivation: the viscous dissipation per unit area (both faces) is `2F = (9/4)*Sigma*nu*Omega_orb^2` (from the shear stress with approximately Keplerian shear). Inverting gives `Sigma ∝ F/(nu*Omega_orb^2)`. The Omega_orb^2 factor is critical for the radial density shape — using Omega_orb instead of Omega_orb^2 overweights the outer disk density by a factor of r^{3/2}. Note: the factor of 2 (two radiating faces) does not affect the proportionality and is absorbed by the normalization.
+Derivation: the viscous dissipation per unit area (both faces) is `2F = Sigma*nu*(r*dOmega/dr)^2` (from the shear stress). For the exact Kerr orbital frequency:
+
+```
+dOmega_orb/dr = -(3/2) * sqrt(M) * r^(1/2) / (r^(3/2) + a*sqrt(M))^2
+```
+
+So `(r*dOmega/dr)^2 = (9/4)*M*r^3 / (r^(3/2) + a*sqrt(M))^4`. This differs from the Keplerian approximation `(r*dOmega/dr)^2 ≈ (9/4)*Omega_K^2` by a factor of `[r^{3/2}/(r^{3/2}+a√M)]^4`, which is ~0.78 at r_isco for a=0.998 — a ~22% error in the shear rate and hence in the inferred surface density. Inverting gives `Sigma ∝ F/(nu*(r*dOmega/dr)^2)`. Note: the factor of 2 (two radiating faces) does not affect the proportionality and is absorbed by the normalization.
 
 Normalized so that the midplane vertical optical depth at peak-flux radius equals tau_mid (default 100). See Section 0 for the normalization procedure.
 
 ### 1.4 ISCO Taper
 
 ```
-taper(r) = 1                                      for r >= r_isco
-taper(r) = exp(-(r_isco - r)^2 / (0.5*M)^2)       for r < r_isco
+taper(r) = 1                                              for r >= r_isco
+taper(r) = exp(-(r_isco - r)^2 / w_taper^2)               for r < r_isco
+
+w_taper = (r_isco - r_horizon) / 3
 ```
 
-Smooth Gaussian falloff inside ISCO where gas is plunging, not orbiting.
+Smooth Gaussian falloff inside ISCO where gas is plunging, not orbiting. The taper width `w_taper` is scaled to one-third of the coordinate gap between ISCO and horizon. This is necessary because for high spin (a → M), the ISCO approaches the horizon: at a=0.998, r_isco ≈ 1.237M and r_horizon ≈ 1.063M, giving a gap of only 0.174M. A fixed width of 0.5M would extend far beyond the horizon and be nearly flat across the entire plunging region, defeating the purpose of the taper. Scaling to (r_isco - r_+)/3 ensures the taper is always resolved with ~3 e-folding lengths across the plunging region regardless of spin.
 
 ### 1.5 Turbulent Noise
 
@@ -216,7 +238,7 @@ where `tau_z` is the **vertical total extinction** optical depth (absorption + s
 Dense clumps and sparse pockets adjust temperature via interpolated isothermal-adiabatic relation:
 
 ```
-tau_local = (kappa_abs(nu_G, rho_smooth, T) + kappa_es) * rho_smooth_CGS * H(r)     [total extinction optical depth across one scale height]
+tau_local = (kappa_R_LUT(rho_smooth, T) + kappa_es_LUT(rho_smooth, T)) * rho_smooth_CGS * H(r)     [total extinction optical depth across one scale height]
 t_cool = (rho * c_s^2) / (sigma_SB * T^4) * tau_local                      [photon diffusion time]
 t_turb = 1 / Omega_orb(r)                                                    [turbulent turnover time]
 beta = (gamma - 1) * t_cool / (t_cool + t_turb)
@@ -235,68 +257,199 @@ T_turb = T * (rho_turb / rho_smooth)^beta
 
 ### 3.1 Absorption Opacity (Frequency-Dependent, Monochromatic)
 
-We use the **monochromatic** free-free absorption coefficient (Rybicki & Lightman eq. 5.18a) as the foundation, enhanced by a temperature-dependent bound-free factor. This approach avoids two problems with the Rosseland mean coefficients (3.68e22, 4.34e25): (1) the Rosseland mean is frequency-integrated and does not equal the monochromatic opacity at any particular frequency, and (2) the monochromatic formula naturally includes the stimulated emission correction.
+All absorption opacities are evaluated monochromatically at each channel's frequency, not via Rosseland mean coefficients. Three physical processes contribute at optical wavelengths, each dominant in a different temperature regime:
 
-**Why not separate monochromatic bound-free?** Bound-free (photoionization) opacity has a fundamentally different functional form from free-free — it involves step-function edges at ionization thresholds, depends on the population of bound states (Saha-Boltzmann equilibrium), and is NOT proportional to `n_e * n_i * T^{-1/2}`. It cannot be written as a single smooth coefficient times the free-free formula. Instead, we use the Rosseland mean ratio to determine an effective enhancement factor.
+| Process | Dominant regime | Key dependence |
+|---|---|---|
+| H⁻ (negative hydrogen ion) | 3,000 – 10,000 K | n(H I) · n_e · T |
+| Bound-free from ions | 10,000 – 200,000 K | n(ion in bound state) · ν⁻³ |
+| Free-free (bremsstrahlung) | > 200,000 K (fully ionized) | n_e · n_i · ν⁻³ · T⁻¹/² |
 
-**Monochromatic free-free absorption coefficient:**
+All three are computed from first principles and summed. To avoid solving Saha equilibrium per ray sample, the combined monochromatic opacity is precomputed as a **3D lookup table** `kappa_abs_LUT(nu, rho, T)` during initialization (see Section 3.1.5).
+
+#### 3.1.1 Ionization Equilibrium (Saha Equation)
+
+The number density of each ion in each ionization state is determined by the Saha equation. For element `s` transitioning from ionization stage `i` to `i+1`:
 
 ```
-alpha_ff(nu, rho, T) = (C_ff / nu^3) * n_e * n_i * g_ff(nu, T) * T^(-1/2) * (1 - exp(-h*nu/(k_B*T)))     [cm^{-1}]
+n_{s,i+1} * n_e / n_{s,i} = (2 / Lambda_dB^3) * (U_{s,i+1}(T) / U_{s,i}(T)) * exp(-chi_{s,i} / (k_B * T))
 ```
 
 where:
-- `C_ff = 3.69e8` CGS = (4*e^6)/(3*m_e*h*c) * sqrt(2*pi/(3*m_e*k_B)) (Rybicki & Lightman eq. 5.18a)
-- `n_e = rho_CGS * (1 + X) / (2 * m_p)` is the electron number density [cm^{-3}] (H gives 1e⁻, He gives 2e⁻ per nucleus)
-- `n_i = rho_CGS * (3*X + 1) / (4 * m_p)` is the ion number density [cm^{-3}] (H gives 1 ion, He gives 1 ion per nucleus)
+- `Lambda_dB = h / sqrt(2 * pi * m_e * k_B * T)` is the thermal de Broglie wavelength [cm]
+- `U_{s,i}(T)` is the partition function of species s in ionization stage i (ground-state dominated: U ≈ g_0, the ground-state statistical weight)
+- `chi_{s,i}` is the ionization potential from stage i to i+1 [erg]
+
+**Species included:**
+
+| Element | Mass fraction | Ionization stages | chi (eV) | U (ground state) |
+|---|---|---|---|---|
+| H | X = 0.70 | H I → H II | 13.60 | U(I)=2, U(II)=1 |
+| He | Y = 0.28 | He I → He II → He III | 24.59, 54.42 | U(I)=1, U(II)=2, U(III)=1 |
+| C | 3.0e-3 | C I–V | 11.26, 24.38, 47.89, 64.49 | tabulated |
+| O | 6.6e-3 | O I–V | 13.62, 35.12, 54.93, 77.41 | tabulated |
+| Fe | 1.2e-3 | Fe I–V | 7.90, 16.19, 30.65, 54.80 | tabulated |
+
+Higher ionization stages (VI+) have chi > 100 eV and are only populated at T >> 10^6 K where free-free dominates anyway. Partition function values are tabulated at initialization from standard atomic data (NIST ASD); ground-state-only approximation (U ≈ g_0) is acceptable since excited states are sparsely populated at disk temperatures.
+
+**Procedure:** Given (rho, T), solve iteratively for n_e:
+1. Initial guess: n_e = n_e,fully_ionized = rho * (1+X) / (2*m_p)
+2. For each element, solve the Saha chain to get ionization fractions
+3. Compute n_e from charge conservation: n_e = sum over all species of (ionization stage * number density)
+4. Iterate until n_e converges to relative tolerance 1e-6 (typically 3-5 iterations)
+
+#### 3.1.2 Free-Free Absorption (Bremsstrahlung)
+
+```
+alpha_ff(nu, rho, T) = C_ff * (n_e * n_ion_eff / nu^3) * g_ff(nu, T) * T^(-1/2) * (1 - exp(-h*nu/(k_B*T)))     [cm^{-1}]
+```
+
+where:
+- `C_ff = 3.69e8` CGS (Rybicki & Lightman eq. 5.18a)
+- `n_ion_eff = sum_s sum_i Z_i^2 * n_{s,i}` is the effective ion density weighted by charge squared (free-free scales as Z²)
+- `n_e` is the electron density from Saha (Section 3.1.1), NOT the fully-ionized approximation
 - The `(1 - exp(-h*nu/(k_B*T)))` factor is the **stimulated emission correction**
 
-**Stimulated emission effect on frequency scaling:** In the Wien limit (hν >> k_BT), the correction → 1 and opacity scales as ν⁻³. In the Rayleigh-Jeans limit (hν << k_BT, typical for optical wavelengths in the hot inner disk where T ~ 10^7 K), the correction → hν/(k_BT) and opacity scales as ν⁻². This reduces the color difference between channels in the hot inner disk.
-
-**Bound-free enhancement factor:**
-
-From the Rosseland mean opacities, bound-free dominates free-free by a factor of ~24 at solar metallicity:
+**Gaunt factor:**
 
 ```
-kappa_bf_Ross / kappa_ff_Ross = (4.34e25 * Z * (1+X)) / (3.68e22 * (X+Y) * (1+X))
-                               = (4.34e25 * 0.02) / (3.68e22 * 0.98) ≈ 24
+g_ff(nu, T) = max(1.0, (sqrt(3)/pi) * ln(4 * k_B * T / (gamma_E * h * nu)))
 ```
 
-This enhancement only applies when bound electrons exist. At T >> 1.5×10⁵ K, metals are fully stripped and bound-free vanishes. We model this with a smooth ionization suppression:
+where gamma_E = exp(0.5772) = 1.7811 (exponential of the Euler-Mascheroni constant). This is the classical asymptotic form (Rybicki & Lightman eq. 5.19b, Karzas & Latter 1961). The factor `4/gamma_E ≈ 2.25` in the logarithm argument is important — omitting it underestimates g_ff by ~15-40%. For optical frequencies and typical disk temperatures: g_ff ≈ 1-5.
+
+**Stimulated emission effect:** In the Wien limit (hν >> k_BT), the correction → 1 and opacity scales as ν⁻³. In the Rayleigh-Jeans limit (hν << k_BT, typical for optical wavelengths in the hot inner disk where T ~ 10^7 K), the correction → hν/(k_BT) and opacity scales as ν⁻². This reduces the color difference between channels in the hot inner disk.
+
+Note: n_e and n_ion_eff change with ionization state (from Saha), so the free-free opacity has a non-trivial temperature dependence beyond the explicit T^{-1/2} — partial ionization reduces n_e and n_ion_eff, reducing free-free opacity in the cool outer disk. This is automatically captured by using the Saha-derived densities.
+
+#### 3.1.3 H⁻ Opacity (Negative Hydrogen Ion)
+
+H⁻ is the **dominant opacity source at optical wavelengths** for 3,000 < T < 10,000 K — the regime relevant for cool outer disk regions, especially around supermassive black holes. H⁻ has a bound electron with binding energy 0.754 eV (threshold at 1.64 μm), so it absorbs all visible light.
+
+**H⁻ number density** from Saha equilibrium (H I + e⁻ ↔ H⁻):
+
+The standard Saha equation for ionization (H⁻ → H I + e⁻) is:
 
 ```
-f_bf(T) = exp(-T / T_ionize)          where T_ionize = 1.5e5 K
-bf_enhancement = 1.0 + 24.0 * (Z / Z_sun) * f_bf(T)
+n(H I) * n_e / n(H⁻) = (2 / Lambda_dB^3) * (U(H I) / U(H⁻)) * exp(-chi_H⁻ / (k_B*T))
 ```
 
-- Cool outer disk (T ~ 10⁴ K): bf_enhancement ≈ 25, total absorption ~25× free-free alone
-- Hot inner disk (T ~ 10⁶-10⁷ K): bf_enhancement ≈ 1, pure free-free (fully ionized)
-- Smooth transition through partial ionization zone
-
-**Combined monochromatic absorption coefficient:**
+where the factor of 2 accounts for the two spin states of the free electron (g_e = 2). Inverting:
 
 ```
-alpha_abs(nu, rho, T) = bf_enhancement(T) * alpha_ff(nu, rho, T)     [cm^{-1}]
+n(H⁻) / n(H I) = n_e * Lambda_dB^3 * U(H⁻) / (2 * U(H I)) * exp(chi_H⁻ / (k_B*T))
+                = (n_e / T^(3/2)) * (h^3 / (2*pi*m_e*k_B)^(3/2)) * (1/2) * (g(H⁻)/g(H I)) * exp(chi_H⁻ / (k_B*T))
 ```
 
-Converting to mass absorption coefficient: `kappa_abs(nu) = alpha_abs / rho_CGS` [cm^2/g]
+where chi_H⁻ = 0.754 eV = 1.208e-12 erg (electron affinity), g(H⁻) = 1, g(H I) = 2. The effective statistical weight ratio is g(H⁻)/(2·g(H I)) = 1/4 (the factor of 2 in the denominator is the electron spin degeneracy from inverting the Saha equation, distinct from g(H I) = 2).
 
-The volumetric absorption coefficient `alpha_abs` has the expected rho^2 dependence for collisional processes (n_e * n_i ∝ rho^2).
+**H⁻ bound-free cross-section** (Wishart 1979, refined by John 1988):
 
-**Gaunt factor approximation:**
+The H⁻ photodetachment cross-section is a smooth function of wavelength with threshold at lambda_0 = 1.6419 μm, peaking at ~4.0×10⁻¹⁷ cm² near 850 nm. Rather than use a polynomial fit (which varies between references and is easy to get wrong), we use the **tabulated cross-sections from Wishart (1979) Table 2**, linearly interpolated in lambda:
 
 ```
-g_ff(nu, T) = max(1.0, (sqrt(3)/pi) * ln(k_B * T / (h * nu)))
+sigma_bf_Hminus(lambda):     [cm^2 per H⁻ ion]
+  lambda_0 = 1.6419 μm      (threshold, sigma = 0)
+  Key values at optical wavelengths:
+    400 nm: 1.63e-17 cm^2
+    450 nm: 2.33e-17
+    500 nm: 3.02e-17
+    550 nm: 3.58e-17
+    600 nm: 3.96e-17
+    650 nm: 4.14e-17
+    700 nm: 4.09e-17
+    850 nm: 3.98e-17     (peak)
 ```
 
-Elwert (1954) / Karzas-Latter (1961) asymptotic form. For optical frequencies and typical disk temperatures: g_ff ≈ 1-5.
+Store as a 1D lookup table (50 wavelength bins from 200 nm to 1642 nm), interpolated during opacity LUT construction. Total size: negligible (400 bytes).
 
-During raymarching, opacity is evaluated at the emitter-frame frequency `nu_emit = g * nu_obs` (Section 4.1) for each of the three observer wavelengths: lambda_B = 450nm, lambda_G = 550nm, lambda_R = 650nm.
+**H⁻ free-free absorption** (Bell & Berrington 1987):
+
+```
+alpha_ff_Hminus(nu, T) = n(H I) * n_e * sigma_ff_Hminus(lambda, T)     [cm^{-1}]
+```
+
+The H⁻ free-free cross-section sigma_ff_Hminus(lambda, T) [cm⁵] is tabulated from Bell & Berrington (1987) Table 1 on a (lambda, T) grid: 10 wavelength points × 12 temperature points from 1,000 to 10,080 K. Stored as a 2D lookup table and bilinearly interpolated during opacity LUT construction. Total size: negligible (~1 KB).
+
+**Total H⁻ absorption coefficient:**
+
+```
+alpha_Hminus(nu, rho, T) = n(H⁻) * sigma_bf_Hminus(lambda) * (1 - exp(-h*nu/(k_B*T)))
+                         + n(H I) * n_e * sigma_ff_Hminus(lambda, T)     [cm^{-1}]
+```
+
+The stimulated emission correction applies to bound-free but is already included in the free-free tabulation.
+
+#### 3.1.4 Ion Bound-Free Absorption (Photoionization)
+
+For each ion species `(s, i)` with at least one bound electron, the monochromatic bound-free cross-section above the ionization threshold is:
+
+```
+sigma_bf(nu, s, i) = sigma_0(s, i) * (nu_threshold / nu)^3 * g_bf     [cm^2 per ion]
+```
+
+where:
+- `nu_threshold = chi_{s,i} / h` is the threshold frequency for ionization from the ground state
+- `sigma_0` is the threshold cross-section. For hydrogenic ions (Kramers formula, R&L eq. 10.39):
+  ```
+  sigma_0(n, Z_eff) = 7.91e-18 * n / Z_eff^2     [cm^2]
+  ```
+  where n is the principal quantum number of the outermost electron and Z_eff is the effective nuclear charge seen by that electron. The full frequency-dependent Kramers cross-section scales as Z_eff^4 / (n^5 * nu^3), which gives sigma_0 = 7.91e-18 * n/Z_eff^2 at threshold where nu = Z_eff^2 * Ry / (h * n^2). For non-hydrogenic ions (Fe, etc.), use tabulated threshold cross-sections from TOPbase/Opacity Project.
+- `g_bf ≈ 1` (bound-free Gaunt factor, weakly frequency-dependent)
+- `sigma_bf = 0` for `nu < nu_threshold`
+
+**Total ion bound-free:**
+
+```
+alpha_bf_ion(nu, rho, T) = sum_s sum_i n_{s,i}(rho, T) * sigma_bf(nu, s, i) * (1 - exp(-h*nu/(k_B*T)))     [cm^{-1}]
+```
+
+where `n_{s,i}` is the number density of species s in ionization stage i from Saha (Section 3.1.1). The sum runs over all species and ionization stages with `nu > nu_threshold` (i.e., the photon has enough energy to ionize from the ground state).
+
+**Which edges matter at optical wavelengths (1.9 – 2.75 eV)?** Most ionization thresholds for the included species are in the UV/EUV (> 7 eV). At optical wavelengths, only the ν⁻³ tails of these edges contribute. The dominant contributors are:
+- Fe I (chi = 7.90 eV, threshold at 157 nm): ν⁻³ tail reaches optical as (157/550)³ ~ 0.023 of threshold value
+- C I (chi = 11.26 eV): weaker tail
+- O I (chi = 13.62 eV): weaker tail
+- H I (chi = 13.60 eV): similar to O I
+
+These tails are individually small but collectively significant in the partial-ionization zone (10⁴ – 10⁵ K) where n_{s,i} is large for neutral/singly-ionized species.
+
+#### 3.1.5 Combined Absorption and Opacity LUT
+
+**Total monochromatic absorption coefficient:**
+
+```
+alpha_abs(nu, rho, T) = alpha_ff(nu, rho, T) + alpha_Hminus(nu, rho, T) + alpha_bf_ion(nu, rho, T)     [cm^{-1}]
+kappa_abs(nu, rho, T) = alpha_abs / rho_CGS     [cm^2/g]
+```
+
+**Precomputed opacity LUT:** Evaluating Saha equilibrium per ray sample is too expensive for raymarching. Instead, precompute a 3D lookup table during initialization:
+
+```
+kappa_abs_LUT(nu_index, rho_index, T_index)     [cm^2/g]
+```
+
+- **20 frequency bins**: log-spaced from 10¹⁴ to 10¹⁶ Hz. This covers the optical range (4.6–6.7×10¹⁴ Hz for 450–650 nm) plus sufficient margin for Doppler-shifted emitter-frame frequencies (blueshifts up to g ≈ 2–3 near the inner disk push optical frequencies to ~2×10¹⁵ Hz)
+- **100 density bins**: log-spaced from rho_min to rho_max (covering the full disk density range)
+- **100 temperature bins**: log-spaced from T_min = 3,000 K to T_max = 10⁸ K
+- **Total size**: 20 × 100 × 100 × 8 bytes = **1.6 MB** (global memory, texture-cached on GPU)
+
+During raymarching, opacity is looked up via trilinear interpolation in (log nu_emit, log rho, log T). The emitter-frame frequency `nu_emit = g * nu_obs` is computed per sample point (Section 4.1), and the dense frequency grid allows direct interpolation without approximate ν⁻³ scaling corrections.
 
 ### 3.2 Thomson Electron Scattering (Frequency-Independent)
 
 ```
-kappa_es = 0.34 cm^2/g
+kappa_es(rho, T) = sigma_T * n_e(rho, T) / rho_CGS     [cm^2/g]
+```
+
+where sigma_T = 6.652e-25 cm² is the Thomson cross-section and n_e is the Saha-derived electron density (Section 3.1.1). For fully ionized solar composition, this gives the familiar kappa_es = 0.34 cm²/g. In the partially ionized outer disk (T < 10,000 K), n_e drops significantly, reducing scattering opacity — this is physically important because it changes the scattering-to-absorption ratio (epsilon) and the Eddington temperature profile.
+
+**Precomputed:** kappa_es depends only on (rho, T) through the Saha electron density. Store as a 2D lookup table `kappa_es_LUT(rho, T)` alongside the 3D absorption opacity LUT, sharing the same density and temperature grids:
+
+```
+kappa_es_LUT(rho_index, T_index)     [cm^2/g]
+- 100 density bins × 100 temperature bins (same grid as kappa_abs_LUT)
+- Total size: 100 × 100 × 8 bytes = 80 KB
 ```
 
 ### 3.3 Total Extinction and Photon Destruction Probability
@@ -304,11 +457,13 @@ kappa_es = 0.34 cm^2/g
 The radiative transfer (Section 4.1) uses total extinction (absorption + scattering) with an epsilon-weighted source function:
 
 ```
-kappa_total(lambda) = kappa_abs(lambda) + kappa_es           [total extinction, cm^2/g]
-epsilon(lambda)     = kappa_abs(lambda) / kappa_total(lambda) [photon destruction probability]
+kappa_total(nu, rho, T) = kappa_abs(nu, rho, T) + kappa_es(rho, T)           [total extinction, cm^2/g]
+epsilon(nu, rho, T)     = kappa_abs(nu, rho, T) / kappa_total(nu, rho, T)    [photon destruction probability]
 ```
 
-epsilon → 1 in absorption-dominated regions (outer disk, red channel) — the source function approaches pure Planck. epsilon → 0 in scattering-dominated regions (inner disk, blue channel) — emission is suppressed relative to extinction.
+Both kappa_abs and kappa_es are looked up from their respective precomputed LUTs (Sections 3.1.5 and 3.2).
+
+epsilon → 1 in absorption-dominated regions (outer disk, red channel) — the source function approaches pure Planck. epsilon → 0 in scattering-dominated regions (inner disk, blue channel) — emission is suppressed relative to extinction. In the partially ionized outer disk, the drop in n_e reduces kappa_es faster than kappa_abs (which is dominated by H⁻), pushing epsilon toward 1 — the cool outer disk is absorption-dominated at all wavelengths.
 
 ### 3.4 Optical Depth Accumulation
 
@@ -349,9 +504,10 @@ where S is the invariant source function. This formulation is exact for any spac
    nu_emit(lambda) = g * nu_obs(lambda)        where nu_obs = c / lambda
    lambda_emit = lambda / g
 
-3. Evaluate opacity at emitter-frame frequency (see Section 3 for full formulas):
-   kappa_abs_emit(lambda) = kappa_abs(lambda_emit, rho, T_turb)     [Section 3.1, frequency-scaled]
-   kappa_total_emit(lambda) = kappa_abs_emit(lambda) + kappa_es
+3. Evaluate opacity at emitter-frame frequency via LUTs (Sections 3.1.5, 3.2):
+   kappa_abs_emit(lambda) = kappa_abs_LUT(nu_emit, rho_CGS, T_turb)    [trilinear interpolation in log space]
+   kappa_es_local          = kappa_es_LUT(rho_CGS, T_turb)              [bilinear interpolation in log space]
+   kappa_total_emit(lambda) = kappa_abs_emit(lambda) + kappa_es_local
    epsilon(lambda) = kappa_abs_emit(lambda) / kappa_total_emit(lambda)   [photon destruction probability]
 
 4. Compute optical depth increments (in emitter frame):
@@ -364,10 +520,14 @@ where S is the invariant source function. This formulation is exact for any spac
 
 5. Compute invariant source function (absorption-only emission, scattering is conservative):
    For each channel lambda in {B, G, R}:
-       S(lambda) = epsilon(lambda) * B(lambda_emit, T_turb) / nu_emit^3
+       S(lambda) = epsilon(lambda) * B_nu(nu_emit, T_turb) / nu_emit^3
+
+   where B_nu is the **frequency-form** Planck function (Section 4.2). This is critical:
+   the invariant J = I_nu/nu^3, so S must use B_nu (per steradian per Hz), NOT B_lambda
+   (per steradian per cm). Using B_lambda would introduce an error of order nu^2/c ~ 10^19.
 
    The epsilon factor is critical: only absorbed photons are thermally re-emitted. Scattered
-   photons are redirected but not thermalized. Using S = B/nu^3 without epsilon would
+   photons are redirected but not thermalized. Using S = B_nu/nu^3 without epsilon would
    overestimate thermal emission in scattering-dominated regions (inner disk where kappa_es
    >> kappa_abs at short wavelengths).
 
@@ -392,13 +552,17 @@ where S is the invariant source function. This formulation is exact for any spac
 
 **Redshift convention:** This codebase defines `g = nu_emit / nu_obs = (p_mu u^mu)_emit / (p_mu u^mu)_obs`, where g > 1 means blueshift (approaching matter) and g < 1 means redshift. This is the inverse of the Lindquist (1966) convention.
 
-### 4.2 Planck Function
+### 4.2 Planck Function (Frequency Form)
+
+The invariant source function `S = ε · B_ν / ν³` requires the **frequency-form** Planck function B_ν, not the wavelength-form B_λ. Using B_λ instead of B_ν introduces an error factor of ν²/c (roughly 10¹⁹ at optical frequencies), which would make renders completely wrong.
 
 ```
-B(lambda, T) = (2*h*c^2 / lambda^5) / (exp(h*c / (lambda*k_B*T)) - 1)
+B_nu(nu, T) = (2*h*nu^3 / c^2) / (exp(h*nu / (k_B*T)) - 1)     [erg / (cm^2 s Hz sr)]
 ```
 
-Evaluated at the three representative wavelengths. The three intensities (B, G, R) are normalized and mapped to sRGB at the end of the ray.
+This is evaluated at the emitter-frame frequency `nu_emit` for each channel. The relationship to the wavelength form is `B_nu = B_lambda * lambda^2 / c`, but since the invariant RT equation is formulated entirely in frequency space, B_nu is used directly — no conversion needed.
+
+The three channel intensities (B, G, R) are normalized and mapped to sRGB at the end of the ray.
 
 ### 4.3 Redshift
 
@@ -496,20 +660,32 @@ When the ray transitions from outside to inside, switch to raymarching mode.
    - Look up density and temperature from LUT at current (r, |z|)
    - Evaluate opacity and redshift at new position
    - Update three-channel radiative transfer
-3. Adaptive step control based on green-channel total optical depth per step:
+3. Adaptive step control based on **two constraints** — optical depth resolution AND geodesic accuracy:
    ```
-   dtau_ref = (kappa_abs(lambda_G) + kappa_es) * rho_CGS * ds_proper
-   if dtau_ref > 0.1:  ds *= 0.5
-   if dtau_ref < 0.01: ds *= 2.0
-   ds = clamp(ds, H(r)/32, H(r))
+   dtau_ref = (kappa_abs_LUT(nu_G_emit, rho_CGS, T_turb) + kappa_es_LUT(rho_CGS, T_turb)) * rho_CGS * ds_proper
+
+   # Optical depth constraint (same as before):
+   ds_tau = ds
+   if dtau_ref > 0.1:  ds_tau = ds * 0.5
+   if dtau_ref < 0.01: ds_tau = ds * 2.0
+
+   # Geodesic accuracy constraint: near the horizon, spacetime curvature is strong
+   # and large steps cause the RK4 geodesic to drift off the true null path.
+   # Scale step with distance to horizon (where curvature ~ 1/r^2):
+   ds_geo = 0.1 * max(r - r_horizon, 0.5*M)
+
+   ds = min(ds_tau, ds_geo)
+   ds = clamp(ds, H(r)/64, H(r))
    ```
+
+   The geodesic accuracy constraint is critical near the horizon where curvature is strongest. Without it, the RK4 integrator accumulates significant position error during raymarching (the fixed H/8 default step is far too large at r ~ r_horizon), causing rays to miss or double-count emission. The H/64 minimum (reduced from H/32) allows adequate resolution in the high-curvature inner region.
 4. Continue until exit condition.
 
 ### 5.3 Exit Conditions
 
 - Ray leaves disk volume: `|z| > 3*H(r)` or `r > r_outer` or `r < r_horizon`
 - Fully opaque: all three channels have `tau_total > 10`
-- Step cap: 512 steps reached (sufficient for edge-on views through the full disk chord)
+- Step cap: 4096 steps reached (edge-on views through the full disk chord at high inclination can require thousands of steps, especially for thick inner disks with small adaptive step sizes near the horizon; 512 is insufficient and causes premature termination with visible banding artifacts)
 
 ### 5.4 Resume Normal Integration
 
@@ -536,6 +712,9 @@ Thin disk remains the default. All existing CLI flags (`--disk-temperature`, `--
 |---|---|
 | `include/grrt/scene/volumetric_disk.h` | CPU volumetric disk class declaration |
 | `src/volumetric_disk.cpp` | CPU density, scale height, temperature, plunging velocity |
+| `include/grrt/color/opacity.h` | Opacity model: Saha solver, ff/bf/H⁻ cross-sections, LUT builder |
+| `src/opacity.cpp` | CPU opacity implementation and LUT construction |
+| `include/grrt/color/atomic_data.h` | Ionization potentials, partition functions, threshold cross-sections |
 | `cuda/cuda_volumetric_disk.h` | CUDA device functions for volumetric disk |
 | `cuda/cuda_noise.h` | CUDA 3D simplex noise implementation |
 | `include/grrt/math/noise.h` | CPU 3D simplex noise (matching CUDA version) |
@@ -577,8 +756,12 @@ Thin disk remains the default. All existing CLI flags (`--disk-temperature`, `--
 |---|---|
 | Vertical density profile 2D LUT (500 r-bins × 64 z-bins, doubles) | ~250 KB |
 | Vertical temperature profile 2D LUT (500 r-bins × 64 z-bins, doubles) | ~250 KB |
+| Absorption opacity 3D LUT (20 freq × 100 rho × 100 T, doubles) | ~1.6 MB |
+| Scattering opacity 2D LUT (100 rho × 100 T, doubles) | ~80 KB |
+| Rosseland mean absorption opacity 2D LUT (100 rho × 100 T, doubles) | ~80 KB |
+| Mean molecular weight 2D LUT (100 rho × 100 T, doubles) | ~80 KB |
 
-Both vertical profile LUTs are too large for constant memory and are stored in global device memory with texture cache for 2D interpolation. Accessed via `tex2D` for hardware-accelerated bilinear interpolation on (r, z/H) coordinates.
+All LUTs are too large for constant memory and are stored in global device memory with texture cache for interpolation. Vertical profile LUTs accessed via `tex2D` for hardware-accelerated bilinear interpolation on (r, z/H) coordinates. Opacity LUT accessed via `tex3D` for trilinear interpolation on (log nu, log rho, log T).
 
 ### 6.5 Physical Constants
 
@@ -593,12 +776,19 @@ Needed in both CPU and CUDA code (shared header `include/grrt/math/constants.h`)
 | h_planck | 6.626070e-27 | erg*s | Planck constant |
 | G_cgs | 6.674e-8 | cm^3/(g s^2) | Gravitational constant in CGS |
 | M_sun | 1.989e33 | g | Solar mass |
-| mu | 0.6 | dimensionless | Mean molecular weight (ionized H+He) |
+| mu_fully_ionized | 0.6 | dimensionless | Mean molecular weight reference (fully ionized H+He); actual mu from mu_LUT(rho,T) |
 | gamma_gas | 5.0/3.0 | dimensionless | Adiabatic index (ideal gas) |
 | X_hydrogen | 0.7 | dimensionless | Hydrogen mass fraction |
 | Z_metal | 0.02 | dimensionless | Metal mass fraction (solar) |
-| alpha_ff_coeff | 3.69e8 | CGS | Free-free monochromatic coefficient = 4e^6/(3 m_e h c) * sqrt(2pi/(3 m_e k_B)) |
-| alpha_bf_coeff | 1.31e23 | CGS | Bound-free monochromatic coefficient (≈ 355 * alpha_ff_coeff) |
+| C_ff | 3.69e8 | CGS | Free-free monochromatic coefficient (R&L eq. 5.18a) |
+| m_e | 9.10938e-28 | g | Electron mass (for de Broglie wavelength in Saha) |
+| e_charge | 4.80326e-10 | esu | Elementary charge (CGS Gaussian) |
+| chi_H | 2.179e-11 | erg | H I ionization potential (13.60 eV) |
+| chi_Hminus | 1.208e-12 | erg | H⁻ electron affinity (0.754 eV) |
+| eV_to_erg | 1.602e-12 | erg/eV | Unit conversion for ionization potentials |
+| sigma_T | 6.652e-25 | cm^2 | Thomson scattering cross-section |
+| gamma_E | 1.7811 | dimensionless | exp(Euler-Mascheroni), for Gaunt factor |
+| Ry | 2.180e-11 | erg | Rydberg energy (13.6 eV) |
 
 These are used only in the volumetric disk LUT construction and per-sample opacity evaluation. The geodesic integrator remains in pure geometric units.
 
