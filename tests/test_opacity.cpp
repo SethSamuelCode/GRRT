@@ -19,7 +19,15 @@ void test_saha_fully_ionized() {
     double n_e_expected = 1e-8 * (1.0 + 0.70) / (2.0 * 1.672622e-24);
     check("n_e", ion.n_e, n_e_expected, 0.05);
     check("mu", ion.mu, 0.6, 0.05);
-    check("n_Hminus ~0", ion.n_Hminus, 0.0, 1.0);
+    // At T=1e7K, H- should be negligible compared to n_e
+    if (ion.n_Hminus / ion.n_e < 1e-10) {
+        std::printf("  n_Hminus ~0: got=%.4e (ratio to n_e=%.2e) PASS\n",
+                    ion.n_Hminus, ion.n_Hminus / ion.n_e);
+    } else {
+        std::printf("  n_Hminus ~0: FAIL (n_Hminus=%.4e too large vs n_e=%.4e)\n",
+                    ion.n_Hminus, ion.n_e);
+        failures++;
+    }
 }
 
 void test_saha_partially_ionized() {

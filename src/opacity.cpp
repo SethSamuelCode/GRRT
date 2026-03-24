@@ -102,4 +102,19 @@ IonizationState solve_saha(double rho_cgs, double T) {
     return result;
 }
 
+// Stubs for Task 3 — return 0 so the library links
+double alpha_ff(double, double, const IonizationState&) { return 0.0; }
+double alpha_hminus(double, double, const IonizationState&) { return 0.0; }
+double alpha_bf_ion(double, double, const IonizationState&) { return 0.0; }
+double kappa_es(double, const IonizationState&) { return 0.0; }
+double kappa_abs(double, double, double, const IonizationState&) { return 0.0; }
+double planck_nu(double, double) { return 0.0; }
+
+// Stubs for Task 4
+double OpacityLUTs::lookup_kappa_abs(double, double, double) const { return 0.0; }
+double OpacityLUTs::lookup_kappa_es(double, double) const { return 0.0; }
+double OpacityLUTs::lookup_kappa_ross(double, double) const { return 0.0; }
+double OpacityLUTs::lookup_mu(double, double) const { return 0.0; }
+OpacityLUTs build_opacity_luts(double, double, double, double) { return {}; }
+
 } // namespace grrt

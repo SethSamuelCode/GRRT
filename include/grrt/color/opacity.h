@@ -19,14 +19,14 @@ struct IonizationState {
     std::array<std::array<double, atomic::MAX_ION_STAGES>, atomic::NUM_ELEMENTS> n_pop;
 };
 
-IonizationState solve_saha(double rho_cgs, double T);
+GRRT_EXPORT IonizationState solve_saha(double rho_cgs, double T);
 
-double alpha_ff(double nu, double T, const IonizationState& ion);
-double alpha_hminus(double nu, double T, const IonizationState& ion);
-double alpha_bf_ion(double nu, double T, const IonizationState& ion);
-double kappa_es(double rho_cgs, const IonizationState& ion);
-double kappa_abs(double nu, double rho_cgs, double T, const IonizationState& ion);
-double planck_nu(double nu, double T);
+GRRT_EXPORT double alpha_ff(double nu, double T, const IonizationState& ion);
+GRRT_EXPORT double alpha_hminus(double nu, double T, const IonizationState& ion);
+GRRT_EXPORT double alpha_bf_ion(double nu, double T, const IonizationState& ion);
+GRRT_EXPORT double kappa_es(double rho_cgs, const IonizationState& ion);
+GRRT_EXPORT double kappa_abs(double nu, double rho_cgs, double T, const IonizationState& ion);
+GRRT_EXPORT double planck_nu(double nu, double T);
 
 struct OpacityLUTs {
     std::vector<double> kappa_abs_lut;
@@ -39,13 +39,13 @@ struct OpacityLUTs {
     std::vector<double> kappa_ross_lut;
     std::vector<double> mu_lut;
 
-    double lookup_kappa_abs(double nu, double rho_cgs, double T) const;
-    double lookup_kappa_es(double rho_cgs, double T) const;
-    double lookup_kappa_ross(double rho_cgs, double T) const;
-    double lookup_mu(double rho_cgs, double T) const;
+    GRRT_EXPORT double lookup_kappa_abs(double nu, double rho_cgs, double T) const;
+    GRRT_EXPORT double lookup_kappa_es(double rho_cgs, double T) const;
+    GRRT_EXPORT double lookup_kappa_ross(double rho_cgs, double T) const;
+    GRRT_EXPORT double lookup_mu(double rho_cgs, double T) const;
 };
 
-OpacityLUTs build_opacity_luts(double rho_min, double rho_max,
+GRRT_EXPORT OpacityLUTs build_opacity_luts(double rho_min, double rho_max,
                                 double T_min, double T_max);
 
 } // namespace grrt
