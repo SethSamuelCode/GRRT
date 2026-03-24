@@ -27,6 +27,7 @@ add_library(grrt SHARED
     src/kerr.cpp
     src/metric.cpp
     src/opacity.cpp
+    src/noise.cpp
 )
 target_include_directories(grrt PUBLIC include/ ${CMAKE_BINARY_DIR}/include PRIVATE third_party/)
 target_compile_definitions(grrt PRIVATE GRRT_BUILDING_DLL)

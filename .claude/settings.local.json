@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake -B build -G \"Visual Studio 17 2022\")",
+      "Bash(cmake --build build --config Release)"
+    ]
+  }
+}
