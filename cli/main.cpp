@@ -23,6 +23,10 @@ static void print_usage() {
     std::println("  --disk on|off         Accretion disk (default: on)");
     std::println("  --disk-outer R        Disk outer radius (default: 20)");
     std::println("  --disk-temp T         Peak disk temperature in K (default: 1e7)");
+    std::println("  --disk-volumetric     Enable volumetric disk model");
+    std::println("  --disk-alpha A        Shakura-Sunyaev viscosity (default: 0.1)");
+    std::println("  --disk-turbulence T   Noise amplitude (default: 0.4)");
+    std::println("  --disk-seed N         Noise seed (default: 42)");
     std::println("  --background TYPE     black | stars (default: stars)");
     std::println("  --max-steps N         Max integration steps (default: 10000)");
     std::println("  --tolerance T         Integrator tolerance (default: 1e-8)");
@@ -56,6 +60,10 @@ int main(int argc, char* argv[]) {
     params.disk_temperature = 1e7;
     params.background_type = GRRT_BG_STARS;
     params.thread_count = 0;
+    params.disk_volumetric = 0;
+    params.disk_alpha = 0.1;
+    params.disk_turbulence = 0.4;
+    params.disk_seed = 42;
 
     std::string output_name = "output";
     std::string backend_str = "cpu";
@@ -101,6 +109,14 @@ int main(int argc, char* argv[]) {
             if (auto v = next()) params.disk_outer = std::atof(v);
         } else if (arg("--disk-temp")) {
             if (auto v = next()) params.disk_temperature = std::atof(v);
+        } else if (arg("--disk-volumetric")) {
+            params.disk_volumetric = 1;
+        } else if (arg("--disk-alpha")) {
+            if (auto v = next()) params.disk_alpha = std::atof(v);
+        } else if (arg("--disk-turbulence")) {
+            if (auto v = next()) params.disk_turbulence = std::atof(v);
+        } else if (arg("--disk-seed")) {
+            if (auto v = next()) params.disk_seed = std::atoi(v);
         } else if (arg("--background")) {
             if (auto v = next()) {
                 if (std::strcmp(v, "black") == 0) params.background_type = GRRT_BG_BLACK;

@@ -39,6 +39,11 @@ typedef struct {
     double disk_outer;
     double disk_temperature;
 
+    int disk_volumetric;        /* 0 = thin disk (default), 1 = volumetric */
+    double disk_alpha;          /* Shakura-Sunyaev viscosity (default 0.1) */
+    double disk_turbulence;     /* Noise amplitude (default 0.4) */
+    int disk_seed;              /* Noise seed (default 42) */
+
     GRRTBackgroundType background_type;
     const char* background_texture_path;
 

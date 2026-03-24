@@ -6,6 +6,7 @@
 #include "grrt/camera/camera.h"
 #include "grrt/render/renderer.h"
 #include "grrt/scene/accretion_disk.h"
+#include "grrt/scene/volumetric_disk.h"
 #include "grrt/scene/celestial_sphere.h"
 #include "grrt/color/spectrum.h"
 #include "grrt/render/tonemapper.h"
@@ -25,6 +26,7 @@ struct GRRTContext {
     std::unique_ptr<grrt::GeodesicTracer> tracer;
     std::unique_ptr<grrt::Camera> camera;
     std::unique_ptr<grrt::AccretionDisk> disk;
+    std::unique_ptr<grrt::VolumetricDisk> vol_disk;
     std::unique_ptr<grrt::CelestialSphere> sphere;
     std::unique_ptr<grrt::SpectrumLUT> spectrum;
     std::unique_ptr<grrt::ToneMapper> tonemapper;
@@ -56,8 +58,6 @@ GRRTContext* grrt_create(const GRRTParams* params) {
         ctx->metric = std::make_unique<grrt::Schwarzschild>(mass);
     }
     ctx->integrator = std::make_unique<grrt::RK4>();
-    ctx->tracer = std::make_unique<grrt::GeodesicTracer>(
-        *ctx->metric, *ctx->integrator, observer_r, max_steps, 1000.0, tolerance);
     ctx->camera = std::make_unique<grrt::Camera>(
         *ctx->metric, observer_r, observer_theta, params->observer_phi,
         fov, params->width, params->height);
@@ -74,7 +74,24 @@ GRRTContext* grrt_create(const GRRTParams* params) {
         double r_inner = params->disk_inner > 0.0 ? params->disk_inner : isco;
         ctx->disk = std::make_unique<grrt::AccretionDisk>(
             mass, spin_a, r_inner, disk_outer, disk_temp);
+
+        if (params->disk_volumetric) {
+            grrt::VolumetricParams vp;
+            vp.alpha = params->disk_alpha;
+            vp.turbulence = params->disk_turbulence;
+            vp.seed = static_cast<uint32_t>(params->disk_seed);
+            ctx->vol_disk = std::make_unique<grrt::VolumetricDisk>(
+                params->mass, params->spin,
+                params->disk_outer > 0 ? params->disk_outer : 30.0,
+                params->disk_temperature > 0 ? params->disk_temperature : 1e7,
+                vp);
+        }
     }
+
+    // Geodesic tracer (created after volumetric disk so it can reference it)
+    ctx->tracer = std::make_unique<grrt::GeodesicTracer>(
+        *ctx->metric, *ctx->integrator, observer_r, max_steps, 1000.0, tolerance,
+        ctx->vol_disk.get());
 
     // Background (optional)
     if (params->background_type == GRRT_BG_STARS) {
