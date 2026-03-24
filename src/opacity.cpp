@@ -102,13 +102,116 @@ IonizationState solve_saha(double rho_cgs, double T) {
     return result;
 }
 
-// Stubs for Task 3 — return 0 so the library links
-double alpha_ff(double, double, const IonizationState&) { return 0.0; }
-double alpha_hminus(double, double, const IonizationState&) { return 0.0; }
-double alpha_bf_ion(double, double, const IonizationState&) { return 0.0; }
-double kappa_es(double, const IonizationState&) { return 0.0; }
-double kappa_abs(double, double, double, const IonizationState&) { return 0.0; }
-double planck_nu(double, double) { return 0.0; }
+// --- Opacity functions (Task 3) ---
+
+/// Thermally-averaged free-free Gaunt factor (Rybicki & Lightman approximation)
+static double gaunt_ff(double nu, double T) {
+    double arg = 4.0 * k_B * T / (gamma_E * h_planck * nu);
+    double gff = (std::sqrt(3.0) / std::numbers::pi) * std::log(std::max(arg, 1.0));
+    return std::max(gff, 1.0);
+}
+
+/// Free-free (bremsstrahlung) absorption coefficient [cm^{-1}]
+/// Rybicki & Lightman eq. 5.18a, includes stimulated emission correction
+double alpha_ff(double nu, double T, const IonizationState& ion) {
+    if (ion.n_e <= 0.0 || ion.n_ion_eff <= 0.0 || nu <= 0.0 || T <= 0.0) return 0.0;
+    double gff = gaunt_ff(nu, T);
+    double stim = 1.0 - std::exp(-h_planck * nu / (k_B * T));
+    return C_ff * (ion.n_e * ion.n_ion_eff / (nu * nu * nu))
+         * gff * std::pow(T, -0.5) * stim;
+}
+
+/// H⁻ bound-free cross-section [cm^2] from Wishart 1979 table, linearly interpolated
+static double sigma_bf_hminus(double lambda_cm) {
+    double lambda_nm = lambda_cm * 1e7;
+    if (lambda_nm >= hminus_bf_lambda_nm.back() || lambda_nm <= 0.0) return 0.0;
+    if (lambda_nm <= hminus_bf_lambda_nm.front()) return hminus_bf_sigma.front();
+    for (int i = 0; i < HMINUS_BF_TABLE_SIZE - 1; i++) {
+        if (lambda_nm >= hminus_bf_lambda_nm[i] && lambda_nm <= hminus_bf_lambda_nm[i + 1]) {
+            double frac = (lambda_nm - hminus_bf_lambda_nm[i])
+                        / (hminus_bf_lambda_nm[i + 1] - hminus_bf_lambda_nm[i]);
+            return hminus_bf_sigma[i] + frac * (hminus_bf_sigma[i + 1] - hminus_bf_sigma[i]);
+        }
+    }
+    return 0.0;
+}
+
+/// H⁻ free-free cross-section [cm^5] from Bell & Berrington 1987, bilinear interpolation
+static double sigma_ff_hminus(double lambda_cm, double T) {
+    double lambda_nm = lambda_cm * 1e7;
+    double lam_clamped = std::clamp(lambda_nm, hminus_ff_lambdas.front(), hminus_ff_lambdas.back());
+    double T_clamped = std::clamp(T, hminus_ff_temps.front(), hminus_ff_temps.back());
+    int il = 0;
+    for (int i = 0; i < HMINUS_FF_LAMBDA_SIZE - 1; i++) {
+        if (lam_clamped >= hminus_ff_lambdas[i]) il = i;
+    }
+    int il1 = std::min(il + 1, HMINUS_FF_LAMBDA_SIZE - 1);
+    double fl = (il == il1) ? 0.0 : (lam_clamped - hminus_ff_lambdas[il]) / (hminus_ff_lambdas[il1] - hminus_ff_lambdas[il]);
+    int it = 0;
+    for (int i = 0; i < HMINUS_FF_TEMP_SIZE - 1; i++) {
+        if (T_clamped >= hminus_ff_temps[i]) it = i;
+    }
+    int it1 = std::min(it + 1, HMINUS_FF_TEMP_SIZE - 1);
+    double ft = (it == it1) ? 0.0 : (T_clamped - hminus_ff_temps[it]) / (hminus_ff_temps[it1] - hminus_ff_temps[it]);
+    auto val = [](int ti, int li) -> double {
+        return hminus_ff_sigma[ti * HMINUS_FF_LAMBDA_SIZE + li];
+    };
+    double s00 = val(it, il), s01 = val(it, il1);
+    double s10 = val(it1, il), s11 = val(it1, il1);
+    return s00*(1-fl)*(1-ft) + s01*fl*(1-ft) + s10*(1-fl)*ft + s11*fl*ft;
+}
+
+/// Combined H⁻ bound-free + free-free absorption coefficient [cm^{-1}]
+double alpha_hminus(double nu, double T, const IonizationState& ion) {
+    if (T < 1500.0 || ion.n_HI <= 0.0) return 0.0;
+    double lambda_cm = c_cgs / nu;
+    double stim = 1.0 - std::exp(-h_planck * nu / (k_B * T));
+    double alpha_bf = ion.n_Hminus * sigma_bf_hminus(lambda_cm) * stim;
+    double alpha_free = ion.n_HI * ion.n_e * sigma_ff_hminus(lambda_cm, T);
+    return alpha_bf + alpha_free;
+}
+
+/// Bound-free absorption from all tracked ions (Kramers cross-section with threshold edges) [cm^{-1}]
+double alpha_bf_ion(double nu, double T, const IonizationState& ion) {
+    double stim = 1.0 - std::exp(-h_planck * nu / (k_B * T));
+    double alpha_total = 0.0;
+    for (int s = 0; s < NUM_ELEMENTS; s++) {
+        const auto& elem = elements[s];
+        for (int i = 0; i < elem.num_stages - 1; i++) {
+            if (elem.Z_eff[i] <= 0.0 || elem.n_outer[i] <= 0) continue;
+            double chi_erg = elem.chi_eV[i] * eV_to_erg;
+            double nu_threshold = chi_erg / h_planck;
+            if (nu < nu_threshold) continue;
+            double n_qn = static_cast<double>(elem.n_outer[i]);
+            double Z = elem.Z_eff[i];
+            double sigma_0 = 7.91e-18 * n_qn / (Z * Z);
+            double sigma = sigma_0 * std::pow(nu_threshold / nu, 3.0);
+            alpha_total += ion.n_pop[s][i] * sigma * stim;
+        }
+    }
+    return alpha_total;
+}
+
+/// Thomson electron scattering opacity [cm^2/g]
+double kappa_es(double rho_cgs, const IonizationState& ion) {
+    if (rho_cgs <= 0.0) return 0.0;
+    return sigma_T * ion.n_e / rho_cgs;
+}
+
+/// Total absorption opacity (ff + H⁻ + bf) [cm^2/g]
+double kappa_abs(double nu, double rho_cgs, double T, const IonizationState& ion) {
+    double alpha = alpha_ff(nu, T, ion) + alpha_hminus(nu, T, ion) + alpha_bf_ion(nu, T, ion);
+    if (rho_cgs <= 0.0) return 0.0;
+    return alpha / rho_cgs;
+}
+
+/// Planck function B_nu [erg/(s cm^2 Hz sr)]
+double planck_nu(double nu, double T) {
+    if (nu <= 0.0 || T <= 0.0) return 0.0;
+    double x = h_planck * nu / (k_B * T);
+    if (x > 500.0) return 0.0;
+    return (2.0 * h_planck * nu * nu * nu / (c_cgs * c_cgs)) / (std::exp(x) - 1.0);
+}
 
 // Stubs for Task 4
 double OpacityLUTs::lookup_kappa_abs(double, double, double) const { return 0.0; }
