@@ -69,6 +69,25 @@ struct RenderParams {
     int integrator_max_steps;
     double r_escape;
     double horizon_epsilon;
+
+    // Volumetric disk
+    int disk_volumetric;
+    double disk_r_isco;
+    double disk_r_horizon;
+    double disk_taper_width;
+    double disk_E_isco, disk_L_isco;
+    double disk_rho_scale;
+    double disk_turbulence;
+
+    // Volumetric disk LUT grid parameters
+    int vol_n_r, vol_n_z;
+    double vol_r_min, vol_r_max;
+
+    // Opacity LUT grid parameters
+    int opacity_n_nu, opacity_n_rho, opacity_n_T;
+    double opacity_log_nu_min, opacity_log_nu_max;
+    double opacity_log_rho_min, opacity_log_rho_max;
+    double opacity_log_T_min, opacity_log_T_max;
 };
 
 } // namespace cuda
