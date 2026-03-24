@@ -16,6 +16,8 @@
 #include "cuda_camera.h"
 #include "cuda_color.h"
 #include "cuda_scene.h"
+#include "cuda_volumetric_disk.h"
+#include "cuda_noise.h"
 #include <cuda_runtime.h>
 
 // ---------------------------------------------------------------------------
@@ -34,6 +36,19 @@ __device__ cuda::Star cuda::d_stars[cuda::MAX_STARS];
 
 // CSR prefix-sum offset array for star spatial grid (8 KB in constant memory)
 __constant__ int cuda::d_star_grid_offset[cuda::STAR_GRID_CELLS + 1];
+
+// Volumetric disk LUTs (global memory, device pointers)
+__device__ double* cuda::d_vol_H_lut = nullptr;
+__device__ double* cuda::d_vol_rho_mid_lut = nullptr;
+__device__ double* cuda::d_vol_rho_profile_lut = nullptr;
+__device__ double* cuda::d_vol_T_profile_lut = nullptr;
+__device__ double* cuda::d_opacity_kappa_abs_lut = nullptr;
+__device__ double* cuda::d_opacity_kappa_es_lut = nullptr;
+__device__ double* cuda::d_opacity_kappa_ross_lut = nullptr;
+__device__ double* cuda::d_opacity_mu_lut = nullptr;
+
+// Noise permutation table (constant memory)
+__constant__ int cuda::d_noise_perm[512];
 
 namespace cuda {
 
@@ -102,8 +117,21 @@ __global__ void render_kernel(float4* output, int* cancel_flag) {
                                                    d_params.integrator_tolerance);
         const double new_theta = result.state.position[2];
 
-        // Check equatorial disk crossing (theta crosses pi/2)
-        if (d_params.disk_enabled) {
+        // Volumetric disk: check if ray is inside the disk volume
+        if (d_params.disk_volumetric) {
+            const double r_vol = result.state.position[1];
+            const double z_vol = r_vol * cos(result.state.position[2]);
+            if (vol_inside(r_vol, z_vol, d_params)) {
+                vol_raymarch(result.state, accumulated_color, d_params);
+                state = result.state;
+                prev_theta = state.position[2];
+                dlambda = result.next_dlambda;
+                continue;
+            }
+        }
+
+        // Check equatorial thin-disk crossing (theta crosses pi/2)
+        if (!d_params.disk_volumetric && d_params.disk_enabled) {
             constexpr double half_pi = M_PI / 2.0;
             const bool crossed = (prev_theta - half_pi) * (new_theta - half_pi) < 0.0;
             if (crossed) {
@@ -177,6 +205,71 @@ void upload_stars(const Star* data, size_t count) {
 
 void upload_star_grid(const int* offsets, size_t count) {
     cudaMemcpyToSymbol(d_star_grid_offset, offsets, count * sizeof(int));
+}
+
+// ---------------------------------------------------------------------------
+// Volumetric disk LUT upload / free
+// ---------------------------------------------------------------------------
+
+// Host-side copies of device pointers (for cleanup)
+static double* h_vol_H_ptr = nullptr;
+static double* h_vol_rho_mid_ptr = nullptr;
+static double* h_vol_rho_profile_ptr = nullptr;
+static double* h_vol_T_profile_ptr = nullptr;
+static double* h_opacity_kappa_abs_ptr = nullptr;
+static double* h_opacity_kappa_es_ptr = nullptr;
+static double* h_opacity_kappa_ross_ptr = nullptr;
+static double* h_opacity_mu_ptr = nullptr;
+
+/// @brief Helper macro: allocate device memory, copy data, and set the __device__ pointer.
+///
+/// cudaMemcpyToSymbol requires the symbol name at compile time, so we use a macro
+/// rather than a function to ensure the symbol is resolved correctly.
+#define UPLOAD_VOL_LUT(symbol, h_ptr, data, count)                     \
+    do {                                                                \
+        size_t bytes = (count) * sizeof(double);                        \
+        cudaMalloc(&(h_ptr), bytes);                                    \
+        cudaMemcpy((h_ptr), (data), bytes, cudaMemcpyHostToDevice);     \
+        double* tmp = (h_ptr);                                          \
+        cudaMemcpyToSymbol(symbol, &tmp, sizeof(double*));              \
+    } while (0)
+
+void upload_volumetric_luts(const double* H_data, size_t H_size,
+                             const double* rho_mid_data, size_t rho_mid_size,
+                             const double* rho_prof_data, size_t rho_prof_size,
+                             const double* T_prof_data, size_t T_prof_size,
+                             const double* kabs_data, size_t kabs_size,
+                             const double* kes_data, size_t kes_size,
+                             const double* kross_data, size_t kross_size,
+                             const double* mu_data, size_t mu_size,
+                             const int* perm_data) {
+    UPLOAD_VOL_LUT(d_vol_H_lut, h_vol_H_ptr, H_data, H_size);
+    UPLOAD_VOL_LUT(d_vol_rho_mid_lut, h_vol_rho_mid_ptr, rho_mid_data, rho_mid_size);
+    UPLOAD_VOL_LUT(d_vol_rho_profile_lut, h_vol_rho_profile_ptr, rho_prof_data, rho_prof_size);
+    UPLOAD_VOL_LUT(d_vol_T_profile_lut, h_vol_T_profile_ptr, T_prof_data, T_prof_size);
+    UPLOAD_VOL_LUT(d_opacity_kappa_abs_lut, h_opacity_kappa_abs_ptr, kabs_data, kabs_size);
+    UPLOAD_VOL_LUT(d_opacity_kappa_es_lut, h_opacity_kappa_es_ptr, kes_data, kes_size);
+    UPLOAD_VOL_LUT(d_opacity_kappa_ross_lut, h_opacity_kappa_ross_ptr, kross_data, kross_size);
+    UPLOAD_VOL_LUT(d_opacity_mu_lut, h_opacity_mu_ptr, mu_data, mu_size);
+
+    // Upload noise permutation table to constant memory
+    cudaMemcpyToSymbol(d_noise_perm, perm_data, 512 * sizeof(int));
+}
+
+#undef UPLOAD_VOL_LUT
+
+void free_volumetric_luts() {
+    auto free_one = [](double** h_ptr) {
+        if (*h_ptr) { cudaFree(*h_ptr); *h_ptr = nullptr; }
+    };
+    free_one(&h_vol_H_ptr);
+    free_one(&h_vol_rho_mid_ptr);
+    free_one(&h_vol_rho_profile_ptr);
+    free_one(&h_vol_T_profile_ptr);
+    free_one(&h_opacity_kappa_abs_ptr);
+    free_one(&h_opacity_kappa_es_ptr);
+    free_one(&h_opacity_kappa_ross_ptr);
+    free_one(&h_opacity_mu_ptr);
 }
 
 void launch_render_kernel(float4* output, int* cancel_flag, int width, int height) {

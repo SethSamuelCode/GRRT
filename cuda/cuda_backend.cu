@@ -11,6 +11,7 @@
 #include "grrt/color/spectrum.h"
 #include "grrt/scene/accretion_disk.h"
 #include "grrt/scene/celestial_sphere.h"
+#include "cuda_vol_host_data.h"
 
 bool cuda_available() {
     int count = 0;
@@ -102,6 +103,61 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
         cuda::upload_flux_lut(flux_data.data(), flux_data.size());
     }
 
+    // Volumetric disk
+    rp.disk_volumetric = params->disk_volumetric;
+    if (params->disk_volumetric) {
+        double disk_outer = params->disk_outer > 0.0 ? params->disk_outer : 20.0;
+        double disk_temp = params->disk_temperature > 0.0 ? params->disk_temperature : 1e7;
+        double vol_alpha = params->disk_alpha > 0.0 ? params->disk_alpha : 0.1;
+        double vol_turb = params->disk_turbulence > 0.0 ? params->disk_turbulence : 0.4;
+        unsigned int vol_seed = params->disk_seed > 0 ? static_cast<unsigned int>(params->disk_seed) : 42u;
+
+        // Build VolumetricDisk on CPU (in a separate .cpp TU to avoid nvcc C++20 issues)
+        VolDiskHostData vd = build_vol_disk_host_data(mass, spin_a, disk_outer, disk_temp,
+                                                       vol_alpha, vol_turb, vol_seed);
+
+        // Fill RenderParams volumetric fields
+        rp.disk_r_isco = vd.r_isco;
+        rp.disk_r_horizon = vd.r_horizon;
+        rp.disk_taper_width = vd.taper_width;
+        rp.disk_E_isco = vd.E_isco;
+        rp.disk_L_isco = vd.L_isco;
+        rp.disk_rho_scale = vd.rho_scale;
+        rp.disk_turbulence = vd.turbulence;
+        rp.disk_r_inner = vd.r_horizon;
+        rp.disk_r_outer = disk_outer;
+
+        // LUT grid parameters
+        rp.vol_n_r = vd.n_r;
+        rp.vol_n_z = vd.n_z;
+        rp.vol_r_min = vd.r_min;
+        rp.vol_r_max = vd.r_max;
+
+        // Opacity LUT grid parameters
+        rp.opacity_n_nu = vd.opacity_n_nu;
+        rp.opacity_n_rho = vd.opacity_n_rho;
+        rp.opacity_n_T = vd.opacity_n_T;
+        rp.opacity_log_nu_min = vd.opacity_log_nu_min;
+        rp.opacity_log_nu_max = vd.opacity_log_nu_max;
+        rp.opacity_log_rho_min = vd.opacity_log_rho_min;
+        rp.opacity_log_rho_max = vd.opacity_log_rho_max;
+        rp.opacity_log_T_min = vd.opacity_log_T_min;
+        rp.opacity_log_T_max = vd.opacity_log_T_max;
+
+        // Upload all LUTs to device memory
+        cuda::upload_volumetric_luts(
+            vd.H_lut.data(), vd.H_lut.size(),
+            vd.rho_mid_lut.data(), vd.rho_mid_lut.size(),
+            vd.rho_profile_lut.data(), vd.rho_profile_lut.size(),
+            vd.T_profile_lut.data(), vd.T_profile_lut.size(),
+            vd.kappa_abs_lut.data(), vd.kappa_abs_lut.size(),
+            vd.kappa_es_lut.data(), vd.kappa_es_lut.size(),
+            vd.kappa_ross_lut.data(), vd.kappa_ross_lut.size(),
+            vd.mu_lut.data(), vd.mu_lut.size(),
+            vd.perm_table.data()
+        );
+    }
+
     // Spectrum
     grrt::SpectrumLUT cpu_spectrum;
     rp.spectrum_t_min = 1000.0;
@@ -186,7 +242,13 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         std::fprintf(stderr, "CUDA kernel error: %s\n", cudaGetErrorString(err));
+        if (params->disk_volumetric) cuda::free_volumetric_luts();
         return -1;
+    }
+
+    // Free volumetric LUTs now that the kernel has completed
+    if (params->disk_volumetric) {
+        cuda::free_volumetric_luts();
     }
 
     // --- Download results directly into framebuffer ---

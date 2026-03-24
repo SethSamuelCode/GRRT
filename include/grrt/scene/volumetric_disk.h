@@ -98,6 +98,11 @@ public:
     double r_horizon() const { return r_horizon_; }
     double rho_scale() const { return rho_scale_; }
     const SimplexNoise3D& noise() const { return noise_; }
+    double E_isco() const { return E_isco_; }
+    double L_isco() const { return L_isco_; }
+    double taper_width() const { return taper_width_; }
+    double turbulence() const { return params_.turbulence; }
+    double peak_temperature() const { return peak_temperature_; }
 
 private:
     double mass_, spin_, r_outer_, peak_temperature_;

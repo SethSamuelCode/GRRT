@@ -50,6 +50,7 @@ if(GRRT_ENABLE_CUDA)
     target_sources(grrt PRIVATE
         cuda/cuda_backend.cu
         cuda/cuda_render.cu
+        cuda/cuda_vol_host_data.cpp
     )
     target_include_directories(grrt PRIVATE cuda/)
     target_link_libraries(grrt PRIVATE CUDA::cudart)

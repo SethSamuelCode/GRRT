@@ -41,6 +41,24 @@ void upload_stars(const Star* data, size_t count);
 /// @param count    Number of entries (STAR_GRID_CELLS + 1)
 void upload_star_grid(const int* offsets, size_t count);
 
+/// @brief Upload all volumetric disk LUTs and noise permutation table to device memory.
+///
+/// Each LUT is allocated on the device with cudaMalloc; the __device__ pointer
+/// symbols in cuda_render.cu are then set to point at the allocations.
+/// Call free_volumetric_luts() after the kernel completes to release device memory.
+void upload_volumetric_luts(const double* H_data, size_t H_size,
+                             const double* rho_mid_data, size_t rho_mid_size,
+                             const double* rho_prof_data, size_t rho_prof_size,
+                             const double* T_prof_data, size_t T_prof_size,
+                             const double* kabs_data, size_t kabs_size,
+                             const double* kes_data, size_t kes_size,
+                             const double* kross_data, size_t kross_size,
+                             const double* mu_data, size_t mu_size,
+                             const int* perm_data);
+
+/// @brief Free all device memory allocated by upload_volumetric_luts().
+void free_volumetric_luts();
+
 /// @brief Launch the render kernel with a 16x16 thread block configuration.
 /// @param output      Device float4 buffer (width * height elements)
 /// @param cancel_flag Device int pointer (nullable); set to nonzero to cancel
