@@ -28,6 +28,7 @@ add_library(grrt SHARED
     src/metric.cpp
     src/opacity.cpp
     src/noise.cpp
+    src/volumetric_disk.cpp
 )
 target_include_directories(grrt PUBLIC include/ ${CMAKE_BINARY_DIR}/include PRIVATE third_party/)
 target_compile_definitions(grrt PRIVATE GRRT_BUILDING_DLL)
@@ -65,6 +66,9 @@ target_include_directories(grrt-cli PRIVATE third_party/)
 # Test executables
 add_executable(test-opacity tests/test_opacity.cpp)
 target_link_libraries(test-opacity PRIVATE grrt)
+
+add_executable(test-volumetric tests/test_volumetric.cpp)
+target_link_libraries(test-volumetric PRIVATE grrt)
 
 if(GRRT_ENABLE_CUDA)
     add_executable(grrt-cuda-test cuda/tests/test_cuda.cu)
