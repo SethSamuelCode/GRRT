@@ -1,7 +1,11 @@
 #include "grrt/geodesic/geodesic_tracer.h"
 #include "grrt/geodesic/rk4.h"
 #include "grrt/scene/accretion_disk.h"
+#include "grrt/scene/volumetric_disk.h"
+#include "grrt/color/opacity.h"
 #include "grrt/color/spectrum.h"
+#include "grrt/math/constants.h"
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 
@@ -9,10 +13,10 @@ namespace grrt {
 
 GeodesicTracer::GeodesicTracer(const Metric& metric, const Integrator& integrator,
                                double observer_r, int max_steps, double r_escape,
-                               double tolerance)
+                               double tolerance, const VolumetricDisk* vol_disk)
     : metric_(metric), integrator_(integrator),
       observer_r_(observer_r), max_steps_(max_steps), r_escape_(r_escape),
-      tolerance_(tolerance) {}
+      tolerance_(tolerance), vol_disk_(vol_disk) {}
 
 TraceResult GeodesicTracer::trace(GeodesicState state,
                                   const AccretionDisk* disk,
@@ -51,8 +55,17 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
             state = integrator_.step(metric_, state, 0.005 * r);
         }
 
-        // Check for disk crossing (θ crosses π/2)
-        if (disk && spectrum) {
+        // Check for volumetric disk entry
+        if (vol_disk_) {
+            double z = state.position[1] * std::cos(state.position[2]); // r * cos(theta)
+            if (vol_disk_->inside_volume(state.position[1], z)) {
+                raymarch_volumetric(state, color);
+                continue; // Resume normal integration after exiting disk
+            }
+        }
+
+        // Check for disk crossing (θ crosses π/2) — thin disk only
+        if (!vol_disk_ && disk && spectrum) {
             double theta_prev = prev.position[2];
             double theta_new = state.position[2];
 
@@ -76,6 +89,112 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
     }
 
     return {RayTermination::MaxSteps, color, state.position, state.momentum};
+}
+
+void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) const {
+    using namespace constants;
+    const auto& luts = vol_disk_->opacity_luts();
+
+    // Three RGB channels at 450nm, 550nm, 650nm
+    constexpr double nu_obs[3] = {c_cgs / 450e-7, c_cgs / 550e-7, c_cgs / 650e-7};
+
+    // Invariant J per channel
+    double J[3] = {0.0, 0.0, 0.0};
+
+    // Observer p·u (static observer at observer_r_)
+    // In geometric units with M=1, g_tt = -(1 - 2M/r)
+    double ut_obs = 1.0 / std::sqrt(1.0 - 2.0 / observer_r_);
+
+    double r = state.position[1];
+    double ds = vol_disk_->scale_height(r) / 8.0;
+    int step_count = 0;
+    constexpr int MAX_STEPS = 4096;
+    double tau_acc[3] = {0.0, 0.0, 0.0};
+
+    while (step_count < MAX_STEPS) {
+        GeodesicState new_state = integrator_.step(metric_, state, ds);
+        step_count++;
+
+        r = new_state.position[1];
+        const double theta = new_state.position[2];
+        const double phi = new_state.position[3];
+        const double z = r * std::cos(theta);
+
+        // Exit conditions
+        if (!vol_disk_->inside_volume(r, z)) break;
+        if (r < vol_disk_->r_horizon()) break;
+        if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
+
+        // Look up local state
+        const double rho_cgs = vol_disk_->density_cgs(r, z, phi);
+        const double T = vol_disk_->temperature(r, std::abs(z));
+        if (rho_cgs <= 0.0 || T <= 0.0) {
+            state = new_state;
+            continue;
+        }
+
+        const double T_turb = T; // Simplified for now
+
+        // Compute redshift g = (p·u)_emit / (p·u)_obs
+        double ut_emit = 0.0, ur_emit = 0.0, uphi_emit = 0.0;
+        if (r >= vol_disk_->r_isco()) {
+            vol_disk_->circular_velocity(r, ut_emit, uphi_emit);
+        } else {
+            vol_disk_->plunging_velocity(r, theta, ut_emit, ur_emit, uphi_emit);
+        }
+
+        // p·u (covariant momentum · contravariant velocity)
+        const double p_dot_u_emit = new_state.momentum[0] * ut_emit
+                                  + new_state.momentum[1] * ur_emit
+                                  + new_state.momentum[3] * uphi_emit;
+        const double p_dot_u_obs = new_state.momentum[0] * ut_obs;
+        const double g = p_dot_u_emit / p_dot_u_obs;
+
+        // Proper distance along ray
+        const double ds_proper = std::abs(p_dot_u_emit) * std::abs(ds);
+
+        // Per-channel radiative transfer
+        for (int ch = 0; ch < 3; ch++) {
+            const double nu_emit = std::abs(g) * nu_obs[ch];
+
+            const double kabs = luts.lookup_kappa_abs(nu_emit, rho_cgs, T_turb);
+            const double kes = luts.lookup_kappa_es(rho_cgs, T_turb);
+            const double ktot = kabs + kes;
+            const double epsilon = (ktot > 0.0) ? kabs / ktot : 1.0;
+
+            const double dtau = ktot * rho_cgs * ds_proper;
+            tau_acc[ch] += dtau;
+
+            // Invariant source: S = epsilon * B_nu(nu_emit, T) / nu_emit^3
+            const double Bnu = planck_nu(nu_emit, T_turb);
+            const double S = epsilon * Bnu / (nu_emit * nu_emit * nu_emit);
+
+            const double exp_dtau = std::exp(-dtau);
+            J[ch] = J[ch] * exp_dtau + S * (1.0 - exp_dtau);
+        }
+
+        // Adaptive step control
+        const double nu_G_emit = std::abs(g) * nu_obs[1];
+        const double kabs_G = luts.lookup_kappa_abs(nu_G_emit, rho_cgs, T_turb);
+        const double kes_G = luts.lookup_kappa_es(rho_cgs, T_turb);
+        const double dtau_ref = (kabs_G + kes_G) * rho_cgs * ds_proper;
+
+        double ds_tau = ds;
+        if (dtau_ref > 0.1) ds_tau = ds * 0.5;
+        if (dtau_ref < 0.01) ds_tau = ds * 2.0;
+
+        const double ds_geo = 0.1 * std::max(r - vol_disk_->r_horizon(), 0.5);
+        ds = std::min(ds_tau, ds_geo);
+        const double H = vol_disk_->scale_height(r);
+        ds = std::clamp(ds, H / 64.0, H);
+
+        state = new_state;
+    }
+
+    // Recover observed intensity: I_obs = J * nu_obs^3
+    for (int ch = 0; ch < 3; ch++) {
+        color[ch] += J[ch] * nu_obs[ch] * nu_obs[ch] * nu_obs[ch];
+    }
 }
 
 } // namespace grrt

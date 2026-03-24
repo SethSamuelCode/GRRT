@@ -9,6 +9,7 @@ namespace grrt {
 // Forward declarations
 class AccretionDisk;
 class SpectrumLUT;
+class VolumetricDisk;
 
 enum class RayTermination {
     Horizon,
@@ -27,7 +28,8 @@ class GeodesicTracer {
 public:
     GeodesicTracer(const Metric& metric, const Integrator& integrator,
                    double observer_r, int max_steps = 10000, double r_escape = 1000.0,
-                   double tolerance = 1e-8);
+                   double tolerance = 1e-8,
+                   const VolumetricDisk* vol_disk = nullptr);
 
     TraceResult trace(GeodesicState state,
                       const AccretionDisk* disk,
@@ -41,6 +43,9 @@ private:
     double r_escape_;
     double tolerance_;
     double horizon_epsilon_ = 0.01;
+    const VolumetricDisk* vol_disk_ = nullptr;
+
+    void raymarch_volumetric(GeodesicState& state, Vec3& color) const;
 };
 
 } // namespace grrt
