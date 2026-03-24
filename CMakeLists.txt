@@ -26,6 +26,7 @@ add_library(grrt SHARED
     src/celestial_sphere.cpp
     src/kerr.cpp
     src/metric.cpp
+    src/opacity.cpp
 )
 target_include_directories(grrt PUBLIC include/ ${CMAKE_BINARY_DIR}/include PRIVATE third_party/)
 target_compile_definitions(grrt PRIVATE GRRT_BUILDING_DLL)
@@ -59,6 +60,10 @@ endif()
 add_executable(grrt-cli cli/main.cpp)
 target_link_libraries(grrt-cli PRIVATE grrt)
 target_include_directories(grrt-cli PRIVATE third_party/)
+
+# Test executables
+add_executable(test-opacity tests/test_opacity.cpp)
+target_link_libraries(test-opacity PRIVATE grrt)
 
 if(GRRT_ENABLE_CUDA)
     add_executable(grrt-cuda-test cuda/tests/test_cuda.cu)
