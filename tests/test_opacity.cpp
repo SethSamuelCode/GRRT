@@ -145,6 +145,39 @@ void test_planck_nu() {
     }
 }
 
+void test_lut_construction() {
+    std::printf("\n=== Opacity LUT construction ===\n");
+    auto luts = grrt::build_opacity_luts(1e-12, 1e-4, 3000.0, 1e8);
+
+    std::printf("  kappa_abs LUT size: %d x %d x %d = %zu entries\n",
+                luts.n_nu, luts.n_rho, luts.n_T, luts.kappa_abs_lut.size());
+
+    // Test interpolation at known point
+    double kabs = luts.lookup_kappa_abs(6e14, 1e-8, 1e6);
+    std::printf("  kappa_abs(6e14, 1e-8, 1e6) = %.4e\n", kabs);
+    if (kabs <= 0.0 || !std::isfinite(kabs)) {
+        std::printf("  FAIL: should be positive\n");
+        failures++;
+    } else {
+        std::printf("  PASS\n");
+    }
+
+    double kes = luts.lookup_kappa_es(1e-8, 1e7);
+    check("kappa_es LUT ~0.34", kes, 0.34, 0.10);
+
+    double mu = luts.lookup_mu(1e-8, 1e7);
+    check("mu LUT ~0.6", mu, 0.6, 0.10);
+
+    double kr = luts.lookup_kappa_ross(1e-8, 1e6);
+    std::printf("  kappa_ross(1e-8, 1e6) = %.4e\n", kr);
+    if (kr <= 0.0 || !std::isfinite(kr)) {
+        std::printf("  FAIL\n");
+        failures++;
+    } else {
+        std::printf("  PASS\n");
+    }
+}
+
 int main() {
     test_saha_fully_ionized();
     test_saha_partially_ionized();
@@ -155,6 +188,7 @@ int main() {
     test_thomson();
     test_total_opacity();
     test_planck_nu();
+    test_lut_construction();
 
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;

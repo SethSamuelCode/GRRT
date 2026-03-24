@@ -213,11 +213,150 @@ double planck_nu(double nu, double T) {
     return (2.0 * h_planck * nu * nu * nu / (c_cgs * c_cgs)) / (std::exp(x) - 1.0);
 }
 
-// Stubs for Task 4
-double OpacityLUTs::lookup_kappa_abs(double, double, double) const { return 0.0; }
-double OpacityLUTs::lookup_kappa_es(double, double) const { return 0.0; }
-double OpacityLUTs::lookup_kappa_ross(double, double) const { return 0.0; }
-double OpacityLUTs::lookup_mu(double, double) const { return 0.0; }
-OpacityLUTs build_opacity_luts(double, double, double, double) { return {}; }
+// --- LUT helpers ---
+
+static void log_interp(double log_val, double log_min, double log_max, int n,
+                        int& idx, double& frac) {
+    double t = (log_val - log_min) / (log_max - log_min) * (n - 1);
+    t = std::clamp(t, 0.0, static_cast<double>(n - 2));
+    idx = static_cast<int>(t);
+    frac = t - idx;
+}
+
+static double dplanck_nu_dT(double nu, double T) {
+    double x = h_planck * nu / (k_B * T);
+    if (x > 500.0) return 0.0;
+    double ex = std::exp(x);
+    double denom = (ex - 1.0) * (ex - 1.0);
+    return (2.0 * h_planck * h_planck * nu * nu * nu * nu / (c_cgs * c_cgs * k_B * T * T))
+         * ex / denom;
+}
+
+// --- LUT construction ---
+
+OpacityLUTs build_opacity_luts(double rho_min, double rho_max,
+                                double T_min, double T_max) {
+    OpacityLUTs luts;
+    luts.n_nu = 20;
+    luts.n_rho = 100;
+    luts.n_T = 100;
+    luts.log_nu_min = std::log10(1e14);
+    luts.log_nu_max = std::log10(1e16);
+    luts.log_rho_min = std::log10(rho_min);
+    luts.log_rho_max = std::log10(rho_max);
+    luts.log_T_min = std::log10(T_min);
+    luts.log_T_max = std::log10(T_max);
+
+    size_t size_3d = luts.n_nu * luts.n_rho * luts.n_T;
+    size_t size_2d = luts.n_rho * luts.n_T;
+    luts.kappa_abs_lut.resize(size_3d);
+    luts.kappa_es_lut.resize(size_2d);
+    luts.kappa_ross_lut.resize(size_2d);
+    luts.mu_lut.resize(size_2d);
+
+    constexpr int n_ross_nu = 50;
+    double log_nu_ross_min = std::log10(1e13);
+    double log_nu_ross_max = std::log10(1e16);
+
+    for (int j = 0; j < luts.n_rho; j++) {
+        double log_rho = luts.log_rho_min + j * (luts.log_rho_max - luts.log_rho_min) / (luts.n_rho - 1);
+        double rho = std::pow(10.0, log_rho);
+
+        for (int k = 0; k < luts.n_T; k++) {
+            double log_T = luts.log_T_min + k * (luts.log_T_max - luts.log_T_min) / (luts.n_T - 1);
+            double T = std::pow(10.0, log_T);
+
+            IonizationState ion = solve_saha(rho, T);
+
+            size_t idx_2d = j * luts.n_T + k;
+            luts.kappa_es_lut[idx_2d] = kappa_es(rho, ion);
+            luts.mu_lut[idx_2d] = ion.mu;
+
+            for (int i = 0; i < luts.n_nu; i++) {
+                double log_nu = luts.log_nu_min + i * (luts.log_nu_max - luts.log_nu_min) / (luts.n_nu - 1);
+                double nu = std::pow(10.0, log_nu);
+                size_t idx_3d = i * luts.n_rho * luts.n_T + idx_2d;
+                luts.kappa_abs_lut[idx_3d] = kappa_abs(nu, rho, T, ion);
+            }
+
+            // Rosseland mean
+            double numerator = 0.0, denominator = 0.0;
+            for (int i = 0; i < n_ross_nu; i++) {
+                double log_nu = log_nu_ross_min + i * (log_nu_ross_max - log_nu_ross_min) / (n_ross_nu - 1);
+                double nu = std::pow(10.0, log_nu);
+                double dnu = nu * (log_nu_ross_max - log_nu_ross_min) / (n_ross_nu - 1) * std::log(10.0);
+                double dBdT = dplanck_nu_dT(nu, T);
+                double ka = kappa_abs(nu, rho, T, ion);
+                if (ka > 1e-30 && dBdT > 0.0) {
+                    numerator += (1.0 / ka) * dBdT * dnu;
+                }
+                denominator += dBdT * dnu;
+            }
+            luts.kappa_ross_lut[idx_2d] = (numerator > 0.0 && denominator > 0.0)
+                                         ? denominator / numerator : 0.0;
+        }
+    }
+    return luts;
+}
+
+// --- LUT lookups ---
+
+double OpacityLUTs::lookup_kappa_abs(double nu, double rho_cgs, double T) const {
+    int inu, irho, iT;
+    double fnu, frho, fT;
+    log_interp(std::log10(nu), log_nu_min, log_nu_max, n_nu, inu, fnu);
+    log_interp(std::log10(rho_cgs), log_rho_min, log_rho_max, n_rho, irho, frho);
+    log_interp(std::log10(T), log_T_min, log_T_max, n_T, iT, fT);
+
+    auto idx = [&](int i, int j, int k) -> size_t {
+        return i * n_rho * n_T + j * n_T + k;
+    };
+
+    double c000 = kappa_abs_lut[idx(inu, irho, iT)];
+    double c001 = kappa_abs_lut[idx(inu, irho, iT+1)];
+    double c010 = kappa_abs_lut[idx(inu, irho+1, iT)];
+    double c011 = kappa_abs_lut[idx(inu, irho+1, iT+1)];
+    double c100 = kappa_abs_lut[idx(inu+1, irho, iT)];
+    double c101 = kappa_abs_lut[idx(inu+1, irho, iT+1)];
+    double c110 = kappa_abs_lut[idx(inu+1, irho+1, iT)];
+    double c111 = kappa_abs_lut[idx(inu+1, irho+1, iT+1)];
+
+    auto safe_log = [](double x) { return std::log(std::max(x, 1e-100)); };
+
+    double l00 = safe_log(c000)*(1-fT) + safe_log(c001)*fT;
+    double l01 = safe_log(c010)*(1-fT) + safe_log(c011)*fT;
+    double l10 = safe_log(c100)*(1-fT) + safe_log(c101)*fT;
+    double l11 = safe_log(c110)*(1-fT) + safe_log(c111)*fT;
+    double l0 = l00*(1-frho) + l01*frho;
+    double l1 = l10*(1-frho) + l11*frho;
+    return std::exp(l0*(1-fnu) + l1*fnu);
+}
+
+double OpacityLUTs::lookup_kappa_es(double rho_cgs, double T) const {
+    int irho, iT; double frho, fT;
+    log_interp(std::log10(rho_cgs), log_rho_min, log_rho_max, n_rho, irho, frho);
+    log_interp(std::log10(T), log_T_min, log_T_max, n_T, iT, fT);
+    double v00 = kappa_es_lut[irho*n_T+iT], v01 = kappa_es_lut[irho*n_T+iT+1];
+    double v10 = kappa_es_lut[(irho+1)*n_T+iT], v11 = kappa_es_lut[(irho+1)*n_T+iT+1];
+    return v00*(1-frho)*(1-fT) + v01*(1-frho)*fT + v10*frho*(1-fT) + v11*frho*fT;
+}
+
+double OpacityLUTs::lookup_kappa_ross(double rho_cgs, double T) const {
+    int irho, iT; double frho, fT;
+    log_interp(std::log10(rho_cgs), log_rho_min, log_rho_max, n_rho, irho, frho);
+    log_interp(std::log10(T), log_T_min, log_T_max, n_T, iT, fT);
+    double v00 = kappa_ross_lut[irho*n_T+iT], v01 = kappa_ross_lut[irho*n_T+iT+1];
+    double v10 = kappa_ross_lut[(irho+1)*n_T+iT], v11 = kappa_ross_lut[(irho+1)*n_T+iT+1];
+    return v00*(1-frho)*(1-fT) + v01*(1-frho)*fT + v10*frho*(1-fT) + v11*frho*fT;
+}
+
+double OpacityLUTs::lookup_mu(double rho_cgs, double T) const {
+    int irho, iT; double frho, fT;
+    log_interp(std::log10(rho_cgs), log_rho_min, log_rho_max, n_rho, irho, frho);
+    log_interp(std::log10(T), log_T_min, log_T_max, n_T, iT, fT);
+    double v00 = mu_lut[irho*n_T+iT], v01 = mu_lut[irho*n_T+iT+1];
+    double v10 = mu_lut[(irho+1)*n_T+iT], v11 = mu_lut[(irho+1)*n_T+iT+1];
+    return v00*(1-frho)*(1-fT) + v01*(1-frho)*fT + v10*frho*(1-fT) + v11*frho*fT;
+}
 
 } // namespace grrt
