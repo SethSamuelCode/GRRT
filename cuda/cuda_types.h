@@ -78,6 +78,7 @@ struct RenderParams {
     double disk_E_isco, disk_L_isco;
     double disk_rho_scale;
     double disk_turbulence;
+    double disk_noise_scale;
 
     // Volumetric disk LUT grid parameters
     int vol_n_r, vol_n_z;

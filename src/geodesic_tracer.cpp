@@ -7,6 +7,7 @@
 #include "grrt/math/constants.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <numbers>
 
 namespace grrt {
@@ -55,12 +56,38 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
             state = integrator_.step(metric_, state, 0.005 * r);
         }
 
-        // Check for volumetric disk entry
+        // Volumetric disk: detect midplane crossing (θ crosses π/2),
+        // then interpolate back to the disk surface and start raymarching.
+        // This is robust even when the adaptive step overshoots the thin
+        // ±3H volume entirely.
         if (vol_disk_) {
-            double z = state.position[1] * std::cos(state.position[2]); // r * cos(theta)
-            if (vol_disk_->inside_volume(state.position[1], z)) {
-                raymarch_volumetric(state, color);
-                continue; // Resume normal integration after exiting disk
+            const double theta_prev = prev.position[2];
+            const double theta_new = state.position[2];
+            const double d_prev = theta_prev - half_pi;
+            const double d_new = theta_new - half_pi;
+
+            // Either the ray crossed the midplane, or it landed inside the volume
+            const double z_new = state.position[1] * std::cos(theta_new);
+            const bool crossed_midplane = (d_prev * d_new < 0.0)
+                                       && std::abs(d_prev - d_new) > 1e-12;
+            const bool inside_vol = vol_disk_->inside_volume(state.position[1], z_new);
+
+            if (crossed_midplane || inside_vol) {
+                const double r_approx = crossed_midplane
+                    ? prev.position[1] + (-d_prev / (d_new - d_prev))
+                      * (state.position[1] - prev.position[1])
+                    : state.position[1];
+
+                if (r_approx >= vol_disk_->r_horizon()
+                    && r_approx <= vol_disk_->r_max()) {
+                    // Rewind to just before the crossing to avoid
+                    // skipping the outer layers of the disk
+                    if (crossed_midplane && !inside_vol) {
+                        state = prev;
+                    }
+                    raymarch_volumetric(state, color);
+                    continue;
+                }
             }
         }
 
@@ -106,24 +133,55 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
     double ut_obs = 1.0 / std::sqrt(1.0 - 2.0 / observer_r_);
 
     double r = state.position[1];
-    double ds = vol_disk_->scale_height(r) / 8.0;
+    double ds = vol_disk_->scale_height(r) / 16.0;  // finer initial step
     int step_count = 0;
     constexpr int MAX_STEPS = 4096;
+    constexpr double DTAU_TARGET = 0.05;  // target optical depth per step
     double tau_acc[3] = {0.0, 0.0, 0.0};
+    int outside_count = 0;  // consecutive steps outside volume
 
     while (step_count < MAX_STEPS) {
         GeodesicState new_state = integrator_.step(metric_, state, ds);
         step_count++;
+
+#ifndef NDEBUG
+        // Check Hamiltonian constraint H = 1/2 g^{ab} p_a p_b ~ 0
+        {
+            auto g_up = metric_.g_upper(new_state.position);
+            double H_check = 0.0;
+            for (int a = 0; a < 4; ++a)
+                for (int b = 0; b < 4; ++b)
+                    H_check += g_up.m[a][b] * new_state.momentum[a] * new_state.momentum[b];
+            H_check *= 0.5;
+            if (std::abs(H_check) > 1e-10) {
+                std::fprintf(stderr, "WARNING: H=%.4e at r=%.4f during raymarch\n",
+                             H_check, new_state.position[1]);
+            }
+        }
+#endif
 
         r = new_state.position[1];
         const double theta = new_state.position[2];
         const double phi = new_state.position[3];
         const double z = r * std::cos(theta);
 
-        // Exit conditions
-        if (!vol_disk_->inside_volume(r, z)) break;
+        // Hard exit: fell into horizon or optically thick
         if (r < vol_disk_->r_horizon()) break;
         if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
+
+        // Soft exit: photon orbits oscillate in theta, so the ray can
+        // leave and re-enter the volume.  Only break after many consecutive
+        // steps outside, meaning the ray has truly departed the disk.
+        if (!vol_disk_->inside_volume(r, z)) {
+            outside_count++;
+            if (outside_count > 32) break;  // truly gone
+            // Use a fast step through empty space
+            const double H = vol_disk_->scale_height(r);
+            ds = std::clamp(H / 8.0, H / 64.0, H);
+            state = new_state;
+            continue;
+        }
+        outside_count = 0;  // back inside, reset
 
         // Look up local state
         const double rho_cgs = vol_disk_->density_cgs(r, z, phi);
@@ -173,15 +231,12 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
             J[ch] = J[ch] * exp_dtau + S * (1.0 - exp_dtau);
         }
 
-        // Adaptive step control
-        const double nu_G_emit = std::abs(g) * nu_obs[1];
-        const double kabs_G = luts.lookup_kappa_abs(nu_G_emit, rho_cgs, T_turb);
-        const double kes_G = luts.lookup_kappa_es(rho_cgs, T_turb);
-        const double dtau_ref = (kabs_G + kes_G) * rho_cgs * ds_proper;
-
-        double ds_tau = ds;
-        if (dtau_ref > 0.1) ds_tau = ds * 0.5;
-        if (dtau_ref < 0.01) ds_tau = ds * 2.0;
+        // Smooth adaptive step control: adjust ds so dtau ≈ DTAU_TARGET
+        const double alpha_tot = (luts.lookup_kappa_abs(std::abs(g) * nu_obs[1], rho_cgs, T_turb)
+                                + luts.lookup_kappa_es(rho_cgs, T_turb)) * rho_cgs;
+        double ds_tau = (alpha_tot > 0.0)
+                      ? DTAU_TARGET / alpha_tot  // step that gives target dtau
+                      : ds * 2.0;
 
         const double ds_geo = 0.1 * std::max(r - vol_disk_->r_horizon(), 0.5);
         ds = std::min(ds_tau, ds_geo);

@@ -314,8 +314,12 @@ __device__ inline double vol_density_cgs(double r, double z, double phi,
     const double H = vol_scale_height(r, params);
     const double base = rho_mid * rho_norm * params.disk_rho_scale * vol_taper(r, params);
 
-    // Turbulent noise perturbation
-    const double n = cuda_simplex_noise_turbulent(r / H, z / H, phi);
+    // Turbulent noise perturbation (Cartesian coords scaled to fixed reference)
+    const double ns = params.disk_noise_scale;
+    const double nx = r * cos(phi) / ns;
+    const double ny = r * sin(phi) / ns;
+    const double nz = z / ns;
+    const double n = cuda_simplex_noise_turbulent(nx, ny, nz);
     return base * (1.0 + params.disk_turbulence * n);
 }
 
@@ -435,10 +439,12 @@ __device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
     const double a = params.spin;
 
     double r = state.position[1];
-    double ds = vol_scale_height(r, params) / 8.0;
+    double ds = vol_scale_height(r, params) / 16.0;  // finer initial step
     int step_count = 0;
     constexpr int MAX_STEPS = 4096;
+    constexpr double DTAU_TARGET = 0.05;  // target optical depth per step
     double tau_acc[3] = {0.0, 0.0, 0.0};
+    int outside_count = 0;  // consecutive steps outside volume
 
     while (step_count < MAX_STEPS) {
         // Take one RK4 step
@@ -450,10 +456,23 @@ __device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
         const double phi = new_state.position[3];
         const double z = r * cos(theta);
 
-        // Exit conditions
-        if (!vol_inside(r, z, params)) break;
+        // Hard exit: fell into horizon or optically thick
         if (r < params.disk_r_horizon) break;
         if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
+
+        // Soft exit: photon orbits oscillate in theta, so the ray can
+        // leave and re-enter the volume. Only break after many consecutive
+        // steps outside, meaning the ray has truly departed the disk.
+        if (!vol_inside(r, z, params)) {
+            outside_count++;
+            if (outside_count > 32) break;
+            const double H = vol_scale_height(r, params);
+            ds = fmax(H / 8.0, H / 64.0);
+            if (ds > H) ds = H;
+            state = new_state;
+            continue;
+        }
+        outside_count = 0;
 
         // Local thermodynamic state
         const double rho_cgs = vol_density_cgs(r, z, phi, params);
@@ -503,15 +522,12 @@ __device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
             J[ch] = J[ch] * exp_dtau + S * (1.0 - exp_dtau);
         }
 
-        // Adaptive step control
-        const double nu_G_emit = fabs(g) * nu_obs[1]; // Green channel reference
-        const double kabs_G = vol_lookup_kappa_abs(nu_G_emit, rho_cgs, T, params);
-        const double kes_G = vol_lookup_kappa_es(rho_cgs, T, params);
-        const double dtau_ref = (kabs_G + kes_G) * rho_cgs * ds_proper;
-
-        double ds_tau = ds;
-        if (dtau_ref > 0.1) ds_tau = ds * 0.5;
-        if (dtau_ref < 0.01) ds_tau = ds * 2.0;
+        // Smooth adaptive step control: adjust ds so dtau ≈ DTAU_TARGET
+        const double alpha_tot = (vol_lookup_kappa_abs(fabs(g) * nu_obs[1], rho_cgs, T, params)
+                                + vol_lookup_kappa_es(rho_cgs, T, params)) * rho_cgs;
+        double ds_tau = (alpha_tot > 0.0)
+                      ? DTAU_TARGET / alpha_tot
+                      : ds * 2.0;
 
         const double ds_geo = 0.1 * fmax(r - params.disk_r_horizon, 0.5);
         ds = fmin(ds_tau, ds_geo);

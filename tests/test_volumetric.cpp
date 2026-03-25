@@ -72,12 +72,34 @@ void test_volume_bounds() {
     else { std::printf("  PASS: beyond r_outer outside\n"); }
 }
 
+void dump_vertical_profile() {
+    std::printf("\n=== Vertical profile diagnostic ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 0.0;  // no noise for clean profile
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    for (double r : {3.0, 5.0, 10.0, 20.0}) {
+        double H = disk.scale_height(r);
+        std::printf("\nr=%.1f  H=%.6f  taper=%.6f\n", r, H, disk.taper(r));
+        for (int i = 0; i <= 20; i++) {
+            double z_frac = i / 20.0 * 3.0;  // 0 to 3H
+            double z = z_frac * H;
+            double rho = disk.density_cgs(r, z, 0.0);
+            double T = disk.temperature(r, z);
+            bool inside = disk.inside_volume(r, z);
+            std::printf("  z/H=%5.2f  rho=%.4e  T=%8.1f  in=%d\n",
+                       z_frac, rho, T, inside);
+        }
+    }
+}
+
 int main() {
     test_construction();
     test_density_profile();
     test_temperature_profile();
     test_taper();
     test_volume_bounds();
+    dump_vertical_profile();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

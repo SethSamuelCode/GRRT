@@ -124,6 +124,7 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
         rp.disk_L_isco = vd.L_isco;
         rp.disk_rho_scale = vd.rho_scale;
         rp.disk_turbulence = vd.turbulence;
+        rp.disk_noise_scale = vd.noise_scale;
         rp.disk_r_inner = vd.r_horizon;
         rp.disk_r_outer = disk_outer;
 

@@ -26,6 +26,7 @@ VolDiskHostData build_vol_disk_host_data(double mass, double spin,
     data.L_isco      = disk.L_isco();
     data.rho_scale   = disk.rho_scale();
     data.turbulence  = turbulence;
+    data.noise_scale = disk.noise_scale();
     data.r_min       = disk.r_min();
     data.r_max       = disk.r_max();
     data.n_r         = disk.radial_bins();

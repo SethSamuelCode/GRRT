@@ -117,16 +117,33 @@ __global__ void render_kernel(float4* output, int* cancel_flag) {
                                                    d_params.integrator_tolerance);
         const double new_theta = result.state.position[2];
 
-        // Volumetric disk: check if ray is inside the disk volume
+        // Volumetric disk: detect midplane crossing (θ crosses π/2)
+        // or direct volume entry, then start raymarching.
         if (d_params.disk_volumetric) {
-            const double r_vol = result.state.position[1];
-            const double z_vol = r_vol * cos(result.state.position[2]);
-            if (vol_inside(r_vol, z_vol, d_params)) {
-                vol_raymarch(result.state, accumulated_color, d_params);
-                state = result.state;
-                prev_theta = state.position[2];
-                dlambda = result.next_dlambda;
-                continue;
+            constexpr double half_pi = M_PI / 2.0;
+            const double d_prev = prev_theta - half_pi;
+            const double d_new = new_theta - half_pi;
+            const double z_new = result.state.position[1] * cos(new_theta);
+            const bool crossed = (d_prev * d_new < 0.0)
+                              && fabs(d_prev - d_new) > 1e-12;
+            const bool inside = vol_inside(result.state.position[1], z_new, d_params);
+
+            if (crossed || inside) {
+                const double r_approx = crossed
+                    ? state.position[1] + (-d_prev / (d_new - d_prev))
+                      * (result.state.position[1] - state.position[1])
+                    : result.state.position[1];
+
+                if (r_approx >= d_params.disk_r_horizon
+                    && r_approx <= d_params.disk_r_outer) {
+                    // Rewind to pre-crossing state if we overshot
+                    GeodesicState entry = (crossed && !inside) ? state : result.state;
+                    vol_raymarch(entry, accumulated_color, d_params);
+                    state = entry;
+                    prev_theta = state.position[2];
+                    dlambda = result.next_dlambda;
+                    continue;
+                }
             }
         }
 

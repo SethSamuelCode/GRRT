@@ -103,6 +103,7 @@ public:
     double taper_width() const { return taper_width_; }
     double turbulence() const { return params_.turbulence; }
     double peak_temperature() const { return peak_temperature_; }
+    double noise_scale() const { return noise_scale_; }
 
 private:
     double mass_, spin_, r_outer_, peak_temperature_;
@@ -131,6 +132,9 @@ private:
 
     // Density normalization factor
     double rho_scale_ = 1.0;
+
+    // Noise spatial scale (fixed reference length to avoid aliasing)
+    double noise_scale_ = 1.0;
 
     // --- Construction helpers ---
     void build_flux_lut(std::vector<double>& flux, double& flux_max) const;
