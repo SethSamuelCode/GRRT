@@ -56,43 +56,58 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
             state = integrator_.step(metric_, state, 0.005 * r);
         }
 
-        // Volumetric disk: detect midplane crossing (θ crosses π/2),
-        // then interpolate to the crossing point and start raymarching.
-        // This is robust even when the adaptive step overshoots the thin
-        // ±3H volume entirely.
+        // Volumetric disk entry detection.  Three cases to catch:
+        // (a) θ crossed π/2 (midplane crossing — most common)
+        // (b) Endpoint landed inside the volume
+        // (c) Ray passed through the volume without crossing the midplane
+        //     (tangential pass: both endpoints outside, but the minimum |z|
+        //     along the step was inside ±3H).  We detect this conservatively
+        //     by checking if either endpoint's |z| is within 3H of the
+        //     midplane at the endpoint's r.
         if (vol_disk_) {
             const double theta_prev = prev.position[2];
             const double theta_new = state.position[2];
             const double d_prev = theta_prev - half_pi;
             const double d_new = theta_new - half_pi;
+            const double r_new = state.position[1];
+            const double r_prev = prev.position[1];
 
-            const double z_new = state.position[1] * std::cos(theta_new);
+            const double z_new = r_new * std::cos(theta_new);
+            const double z_prev = r_prev * std::cos(theta_prev);
             const bool crossed_midplane = (d_prev * d_new < 0.0)
                                        && std::abs(d_prev - d_new) > 1e-12;
-            const bool inside_vol = vol_disk_->inside_volume(state.position[1], z_new);
+            const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
+            // Check if the minimum |z| along the step could have been inside
+            // the disk.  Conservative: if either endpoint is within 6H, the
+            // ray may have grazed the volume.
+            const double H_new = vol_disk_->scale_height(r_new);
+            const bool near_disk = (std::abs(z_new) < 6.0 * H_new
+                                 || std::abs(z_prev) < 6.0 * vol_disk_->scale_height(r_prev))
+                                && r_new >= vol_disk_->r_horizon()
+                                && r_new <= vol_disk_->r_max();
+            const bool should_raymarch = crossed_midplane || inside_now || near_disk;
 
-            if (crossed_midplane || inside_vol) {
-                // Interpolate state to the midplane crossing point so the
-                // raymarch begins inside the disk, not far above it.
-                GeodesicState entry = state;
-                if (crossed_midplane) {
-                    const double frac = -d_prev / (d_new - d_prev);
-                    for (int mu = 0; mu < 4; ++mu) {
-                        entry.position[mu] = prev.position[mu]
-                            + frac * (state.position[mu] - prev.position[mu]);
-                        entry.momentum[mu] = prev.momentum[mu]
-                            + frac * (state.momentum[mu] - prev.momentum[mu]);
-                    }
-                }
+            if (should_raymarch) {
+                // Radial bounds: the step's radial range must overlap the disk.
+                const double r_lo = std::min(r_prev, r_new);
+                const double r_hi = std::max(r_prev, r_new);
+                if (r_hi < vol_disk_->r_horizon() || r_lo > vol_disk_->r_max())
+                    goto skip_vol;
 
-                const double r_entry = entry.position[1];
-                if (r_entry >= vol_disk_->r_horizon()
-                    && r_entry <= vol_disk_->r_max()) {
+                // Always use the pre-step state — it has correct momentum
+                // from the adaptive integrator.  The raymarcher handles
+                // approaching the disk from above with fast coarse steps,
+                // then switches to fine steps once inside the volume.
+                GeodesicState entry = prev;
+                const double re = entry.position[1];
+                if (re >= vol_disk_->r_horizon() * 0.9
+                    && re <= vol_disk_->r_max() * 1.5) {
                     raymarch_volumetric(entry, color);
                     state = entry;
                     continue;
                 }
             }
+            skip_vol:;
         }
 
         // Check for disk crossing (θ crosses π/2) — thin disk only
@@ -137,11 +152,18 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
     double ut_obs = 1.0 / std::sqrt(1.0 - 2.0 / observer_r_);
 
     double r = state.position[1];
-    double ds = vol_disk_->scale_height(r) / 16.0;  // finer initial step
+    const double z_start = r * std::cos(state.position[2]);
+    const double H_start = vol_disk_->scale_height(r);
+    // If starting outside the volume, use coarse steps to approach quickly;
+    // if already inside, use fine steps for accurate radiative transfer.
+    double ds = vol_disk_->inside_volume(r, z_start)
+              ? H_start / 16.0
+              : std::min(std::abs(z_start) / 8.0, H_start * 2.0);
     int step_count = 0;
     constexpr int MAX_STEPS = 4096;
     constexpr double DTAU_TARGET = 0.05;  // target optical depth per step
     double tau_acc[3] = {0.0, 0.0, 0.0};
+    bool been_inside = vol_disk_->inside_volume(r, z_start);
 
     while (step_count < MAX_STEPS) {
         GeodesicState new_state = integrator_.step(metric_, state, ds);
@@ -173,17 +195,23 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
         if (r > vol_disk_->r_max()) break;  // left the disk radially
         if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
 
-        // Outside the vertical extent: the ray oscillates in theta so
-        // it can leave ±3H and come back.  Only exit after |z| > 6H
-        // (well beyond the disk surface where re-entry is impossible).
         const double H = vol_disk_->scale_height(r);
         if (!vol_disk_->inside_volume(r, z)) {
-            if (std::abs(z) > 6.0 * H) break;  // truly gone
-            // Still close — keep stepping through empty space
-            ds = std::clamp(H / 4.0, H / 64.0, H);
+            // Only exit when leaving after having been inside the volume,
+            // and we're well beyond the disk surface.
+            if (been_inside && std::abs(z) > 6.0 * H) break;
+            // Still approaching or close — use coarse steps when far,
+            // fine steps when near the disk surface.
+            if (!been_inside) {
+                ds = std::min(std::abs(z) / 8.0, H * 2.0);
+                ds = std::max(ds, H / 64.0);
+            } else {
+                ds = std::clamp(H / 4.0, H / 64.0, H);
+            }
             state = new_state;
             continue;
         }
+        been_inside = true;
 
         // Look up local state
         const double rho_cgs = vol_disk_->density_cgs(r, z, phi);

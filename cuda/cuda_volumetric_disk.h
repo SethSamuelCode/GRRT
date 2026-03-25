@@ -439,11 +439,18 @@ __device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
     const double a = params.spin;
 
     double r = state.position[1];
-    double ds = vol_scale_height(r, params) / 16.0;  // finer initial step
+    const double z_start = r * cos(state.position[2]);
+    const double H_start = vol_scale_height(r, params);
+    // If starting outside the volume, use coarse steps to approach quickly;
+    // if already inside, use fine steps for accurate radiative transfer.
+    double ds = vol_inside(r, z_start, params)
+              ? H_start / 16.0
+              : fmin(fabs(z_start) / 8.0, H_start * 2.0);
     int step_count = 0;
     constexpr int MAX_STEPS = 4096;
     constexpr double DTAU_TARGET = 0.05;  // target optical depth per step
     double tau_acc[3] = {0.0, 0.0, 0.0};
+    bool been_inside = vol_inside(r, z_start, params);
 
     while (step_count < MAX_STEPS) {
         // Take one RK4 step
@@ -460,15 +467,23 @@ __device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
         if (r > params.disk_r_outer) break;  // left the disk radially
         if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
 
-        // Outside vertical extent: only exit if well beyond the disk (|z|>6H)
         const double H = vol_scale_height(r, params);
         if (!vol_inside(r, z, params)) {
-            if (fabs(z) > 6.0 * H) break;  // truly gone
-            ds = fmax(H / 4.0, H / 64.0);
-            if (ds > H) ds = H;
+            // Only exit when leaving after having been inside the volume,
+            // and we're well beyond the disk surface.
+            if (been_inside && fabs(z) > 6.0 * H) break;
+            // Approaching or close — coarse steps when far, fine when near.
+            if (!been_inside) {
+                ds = fmin(fabs(z) / 8.0, H * 2.0);
+                ds = fmax(ds, H / 64.0);
+            } else {
+                ds = fmax(H / 4.0, H / 64.0);
+                if (ds > H) ds = H;
+            }
             state = new_state;
             continue;
         }
+        been_inside = true;
 
         // Local thermodynamic state
         const double rho_cgs = vol_density_cgs(r, z, phi, params);

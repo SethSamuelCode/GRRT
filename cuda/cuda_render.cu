@@ -117,39 +117,48 @@ __global__ void render_kernel(float4* output, int* cancel_flag) {
                                                    d_params.integrator_tolerance);
         const double new_theta = result.state.position[2];
 
-        // Volumetric disk: detect midplane crossing (θ crosses π/2)
-        // or direct volume entry, then interpolate to crossing and raymarch.
+        // Volumetric disk entry detection: midplane crossing, inside volume,
+        // or near-disk tangential pass.
         if (d_params.disk_volumetric) {
             constexpr double half_pi = M_PI / 2.0;
             const double d_prev = prev_theta - half_pi;
             const double d_new = new_theta - half_pi;
-            const double z_new = result.state.position[1] * cos(new_theta);
+            const double r_new = result.state.position[1];
+            const double r_prev = state.position[1];
+            const double z_new = r_new * cos(new_theta);
+            const double z_prev = r_prev * cos(prev_theta);
             const bool crossed = (d_prev * d_new < 0.0)
                               && fabs(d_prev - d_new) > 1e-12;
-            const bool inside = vol_inside(result.state.position[1], z_new, d_params);
+            const bool inside_now = vol_inside(r_new, z_new, d_params);
+            const double H_new = vol_scale_height(r_new, d_params);
+            const double H_prev = vol_scale_height(r_prev, d_params);
+            const bool near_disk = (fabs(z_new) < 6.0 * H_new
+                                 || fabs(z_prev) < 6.0 * H_prev)
+                                && r_new >= d_params.disk_r_horizon
+                                && r_new <= d_params.disk_r_outer;
+            const bool should_raymarch = crossed || inside_now || near_disk;
 
-            if (crossed || inside) {
-                // Interpolate to the midplane crossing so raymarch starts
-                // inside the disk, not far above/below it.
-                GeodesicState entry = result.state;
-                if (crossed) {
-                    const double frac = -d_prev / (d_new - d_prev);
-                    for (int mu = 0; mu < 4; ++mu) {
-                        entry.position[mu] = state.position[mu]
-                            + frac * (result.state.position[mu] - state.position[mu]);
-                        entry.momentum[mu] = state.momentum[mu]
-                            + frac * (result.state.momentum[mu] - state.momentum[mu]);
+            if (should_raymarch) {
+                // Radial bounds: the step's radial range must overlap the disk.
+                const double r_lo = fmin(r_prev, r_new);
+                const double r_hi = fmax(r_prev, r_new);
+                if (r_hi >= d_params.disk_r_horizon
+                    && r_lo <= d_params.disk_r_outer) {
+
+                    // Always use the pre-step state — it has correct
+                    // momentum from the adaptive integrator.  The
+                    // raymarcher handles approaching the disk from above
+                    // with coarse steps, then fine steps inside.
+                    GeodesicState entry = state;  // pre-step
+                    const double re = entry.position[1];
+                    if (re >= d_params.disk_r_horizon * 0.9
+                        && re <= d_params.disk_r_outer * 1.5) {
+                        vol_raymarch(entry, accumulated_color, d_params);
+                        state = entry;
+                        prev_theta = state.position[2];
+                        dlambda = result.next_dlambda;
+                        continue;
                     }
-                }
-
-                const double r_entry = entry.position[1];
-                if (r_entry >= d_params.disk_r_horizon
-                    && r_entry <= d_params.disk_r_outer) {
-                    vol_raymarch(entry, accumulated_color, d_params);
-                    state = entry;
-                    prev_theta = state.position[2];
-                    dlambda = result.next_dlambda;
-                    continue;
                 }
             }
         }
