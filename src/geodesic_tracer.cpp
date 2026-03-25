@@ -57,7 +57,7 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
         }
 
         // Volumetric disk: detect midplane crossing (θ crosses π/2),
-        // then interpolate back to the disk surface and start raymarching.
+        // then interpolate to the crossing point and start raymarching.
         // This is robust even when the adaptive step overshoots the thin
         // ±3H volume entirely.
         if (vol_disk_) {
@@ -66,26 +66,30 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
             const double d_prev = theta_prev - half_pi;
             const double d_new = theta_new - half_pi;
 
-            // Either the ray crossed the midplane, or it landed inside the volume
             const double z_new = state.position[1] * std::cos(theta_new);
             const bool crossed_midplane = (d_prev * d_new < 0.0)
                                        && std::abs(d_prev - d_new) > 1e-12;
             const bool inside_vol = vol_disk_->inside_volume(state.position[1], z_new);
 
             if (crossed_midplane || inside_vol) {
-                const double r_approx = crossed_midplane
-                    ? prev.position[1] + (-d_prev / (d_new - d_prev))
-                      * (state.position[1] - prev.position[1])
-                    : state.position[1];
-
-                if (r_approx >= vol_disk_->r_horizon()
-                    && r_approx <= vol_disk_->r_max()) {
-                    // Rewind to just before the crossing to avoid
-                    // skipping the outer layers of the disk
-                    if (crossed_midplane && !inside_vol) {
-                        state = prev;
+                // Interpolate state to the midplane crossing point so the
+                // raymarch begins inside the disk, not far above it.
+                GeodesicState entry = state;
+                if (crossed_midplane) {
+                    const double frac = -d_prev / (d_new - d_prev);
+                    for (int mu = 0; mu < 4; ++mu) {
+                        entry.position[mu] = prev.position[mu]
+                            + frac * (state.position[mu] - prev.position[mu]);
+                        entry.momentum[mu] = prev.momentum[mu]
+                            + frac * (state.momentum[mu] - prev.momentum[mu]);
                     }
-                    raymarch_volumetric(state, color);
+                }
+
+                const double r_entry = entry.position[1];
+                if (r_entry >= vol_disk_->r_horizon()
+                    && r_entry <= vol_disk_->r_max()) {
+                    raymarch_volumetric(entry, color);
+                    state = entry;
                     continue;
                 }
             }
@@ -138,7 +142,6 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
     constexpr int MAX_STEPS = 4096;
     constexpr double DTAU_TARGET = 0.05;  // target optical depth per step
     double tau_acc[3] = {0.0, 0.0, 0.0};
-    int outside_count = 0;  // consecutive steps outside volume
 
     while (step_count < MAX_STEPS) {
         GeodesicState new_state = integrator_.step(metric_, state, ds);
@@ -165,23 +168,22 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
         const double phi = new_state.position[3];
         const double z = r * std::cos(theta);
 
-        // Hard exit: fell into horizon or optically thick
+        // Hard exits
         if (r < vol_disk_->r_horizon()) break;
+        if (r > vol_disk_->r_max()) break;  // left the disk radially
         if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
 
-        // Soft exit: photon orbits oscillate in theta, so the ray can
-        // leave and re-enter the volume.  Only break after many consecutive
-        // steps outside, meaning the ray has truly departed the disk.
+        // Outside the vertical extent: the ray oscillates in theta so
+        // it can leave ±3H and come back.  Only exit after |z| > 6H
+        // (well beyond the disk surface where re-entry is impossible).
+        const double H = vol_disk_->scale_height(r);
         if (!vol_disk_->inside_volume(r, z)) {
-            outside_count++;
-            if (outside_count > 32) break;  // truly gone
-            // Use a fast step through empty space
-            const double H = vol_disk_->scale_height(r);
-            ds = std::clamp(H / 8.0, H / 64.0, H);
+            if (std::abs(z) > 6.0 * H) break;  // truly gone
+            // Still close — keep stepping through empty space
+            ds = std::clamp(H / 4.0, H / 64.0, H);
             state = new_state;
             continue;
         }
-        outside_count = 0;  // back inside, reset
 
         // Look up local state
         const double rho_cgs = vol_disk_->density_cgs(r, z, phi);
@@ -240,7 +242,7 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
 
         const double ds_geo = 0.1 * std::max(r - vol_disk_->r_horizon(), 0.5);
         ds = std::min(ds_tau, ds_geo);
-        const double H = vol_disk_->scale_height(r);
+        // H already declared above in the outside-volume check
         ds = std::clamp(ds, H / 64.0, H);
 
         state = new_state;

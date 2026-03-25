@@ -118,7 +118,7 @@ __global__ void render_kernel(float4* output, int* cancel_flag) {
         const double new_theta = result.state.position[2];
 
         // Volumetric disk: detect midplane crossing (θ crosses π/2)
-        // or direct volume entry, then start raymarching.
+        // or direct volume entry, then interpolate to crossing and raymarch.
         if (d_params.disk_volumetric) {
             constexpr double half_pi = M_PI / 2.0;
             const double d_prev = prev_theta - half_pi;
@@ -129,15 +129,22 @@ __global__ void render_kernel(float4* output, int* cancel_flag) {
             const bool inside = vol_inside(result.state.position[1], z_new, d_params);
 
             if (crossed || inside) {
-                const double r_approx = crossed
-                    ? state.position[1] + (-d_prev / (d_new - d_prev))
-                      * (result.state.position[1] - state.position[1])
-                    : result.state.position[1];
+                // Interpolate to the midplane crossing so raymarch starts
+                // inside the disk, not far above/below it.
+                GeodesicState entry = result.state;
+                if (crossed) {
+                    const double frac = -d_prev / (d_new - d_prev);
+                    for (int mu = 0; mu < 4; ++mu) {
+                        entry.position[mu] = state.position[mu]
+                            + frac * (result.state.position[mu] - state.position[mu]);
+                        entry.momentum[mu] = state.momentum[mu]
+                            + frac * (result.state.momentum[mu] - state.momentum[mu]);
+                    }
+                }
 
-                if (r_approx >= d_params.disk_r_horizon
-                    && r_approx <= d_params.disk_r_outer) {
-                    // Rewind to pre-crossing state if we overshot
-                    GeodesicState entry = (crossed && !inside) ? state : result.state;
+                const double r_entry = entry.position[1];
+                if (r_entry >= d_params.disk_r_horizon
+                    && r_entry <= d_params.disk_r_outer) {
                     vol_raymarch(entry, accumulated_color, d_params);
                     state = entry;
                     prev_theta = state.position[2];

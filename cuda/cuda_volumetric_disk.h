@@ -444,7 +444,6 @@ __device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
     constexpr int MAX_STEPS = 4096;
     constexpr double DTAU_TARGET = 0.05;  // target optical depth per step
     double tau_acc[3] = {0.0, 0.0, 0.0};
-    int outside_count = 0;  // consecutive steps outside volume
 
     while (step_count < MAX_STEPS) {
         // Take one RK4 step
@@ -456,23 +455,20 @@ __device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
         const double phi = new_state.position[3];
         const double z = r * cos(theta);
 
-        // Hard exit: fell into horizon or optically thick
+        // Hard exits
         if (r < params.disk_r_horizon) break;
+        if (r > params.disk_r_outer) break;  // left the disk radially
         if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
 
-        // Soft exit: photon orbits oscillate in theta, so the ray can
-        // leave and re-enter the volume. Only break after many consecutive
-        // steps outside, meaning the ray has truly departed the disk.
+        // Outside vertical extent: only exit if well beyond the disk (|z|>6H)
+        const double H = vol_scale_height(r, params);
         if (!vol_inside(r, z, params)) {
-            outside_count++;
-            if (outside_count > 32) break;
-            const double H = vol_scale_height(r, params);
-            ds = fmax(H / 8.0, H / 64.0);
+            if (fabs(z) > 6.0 * H) break;  // truly gone
+            ds = fmax(H / 4.0, H / 64.0);
             if (ds > H) ds = H;
             state = new_state;
             continue;
         }
-        outside_count = 0;
 
         // Local thermodynamic state
         const double rho_cgs = vol_density_cgs(r, z, phi, params);
@@ -531,7 +527,7 @@ __device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
 
         const double ds_geo = 0.1 * fmax(r - params.disk_r_horizon, 0.5);
         ds = fmin(ds_tau, ds_geo);
-        const double H = vol_scale_height(r, params);
+        // H already declared above in the outside-volume check
         if (ds < H / 64.0) ds = H / 64.0;
         if (ds > H) ds = H;
 
