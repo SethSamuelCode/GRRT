@@ -443,12 +443,40 @@ void VolumetricDisk::compute_radial_structure() {
 }
 
 // ============================================================================
+// Flux-limiter helpers (Levermore & Pomraning 1981)
+// ============================================================================
+
+/// Levermore-Pomraning flux limiter λ(R).
+static double lp_lambda(double R) {
+    return (2.0 + R) / (6.0 + 3.0 * R + R * R);
+}
+
+/// Eddington factor f(R) = λ + λ²R² (radiation pressure coefficient).
+/// Limits: f → 1/3 (optically thick), f → 1 (optically thin).
+static double lp_eddington_factor(double R) {
+    const double lam = lp_lambda(R);
+    return lam + lam * lam * R * R;
+}
+
+// ============================================================================
 // compute_vertical_profiles()
 // ============================================================================
 
 void VolumetricDisk::compute_vertical_profiles() {
     using namespace constants;
 
+    // Initial z_max guess: 3H (will be extended if needed)
+    z_max_lut_.resize(n_r_);
+
+    // Temporary storage for profiles (will be resized per radius if z_max changes)
+    std::vector<double> rho_z(n_z_);
+    std::vector<double> T_z(n_z_);
+    std::vector<double> tau_z(n_z_);
+    std::vector<double> E_rad_z(n_z_);
+    std::vector<double> f_z(n_z_);      // Eddington factor at each z
+    std::vector<double> mu_z(n_z_);     // mean molecular weight
+
+    // Final 2D LUTs
     rho_profile_lut_.resize(n_r_ * n_z_, 0.0);
     T_profile_lut_.resize(n_r_ * n_z_, 0.0);
 
@@ -459,7 +487,7 @@ void VolumetricDisk::compute_vertical_profiles() {
         const double rho_mid_val = rho_mid_lut_[ri];
 
         if (H <= 0.0 || T_eff <= 0.0 || rho_mid_val <= 0.0) {
-            // Zero profiles: set midplane to identity for rho_profile, T_eff for T
+            z_max_lut_[ri] = 3.0 * H;
             rho_profile_lut_[ri * n_z_] = 1.0;
             T_profile_lut_[ri * n_z_] = T_eff;
             for (int zi = 1; zi < n_z_; ++zi) {
@@ -469,134 +497,232 @@ void VolumetricDisk::compute_vertical_profiles() {
             continue;
         }
 
-        // Omega_z^2 (use ISCO value if inside ISCO)
+        // Omega_z^2
         double Omz2 = omega_z_sq(r);
         if (r < r_isco_ || Omz2 <= 0.0) {
             Omz2 = omega_z_sq(r_isco_);
             if (Omz2 <= 0.0) Omz2 = omega_orb(r_isco_) * omega_orb(r_isco_);
         }
 
-        const double z_max = 3.0 * H;
-        const double dz = z_max / (n_z_ - 1);
-
-        // Hydrostatic equilibrium ODE solve (iterated)
-        // We store rho(z)/rho_mid as normalized profile
-        std::vector<double> rho_z(n_z_, 1.0);
-        std::vector<double> T_z(n_z_, T_eff);
-
-        // Estimate a physically meaningful CGS midplane density from
-        // the target optical depth: tau_mid ~ kappa * rho_mid * 3H.
-        // Use a reference opacity at this T_eff to invert.
+        // Reference CGS midplane density (for opacity lookups)
         const double kR_ref = opacity_luts_.lookup_kappa_ross(
             1e-10, std::clamp(T_eff, 3000.0, 1e8));
         const double kE_ref = opacity_luts_.lookup_kappa_es(
             1e-10, std::clamp(T_eff, 3000.0, 1e8));
         const double kappa_ref_total = std::max(kR_ref + kE_ref, 1.0);
-        // H is in geometric units; for the column integral we use H directly
-        // since rho_cgs * dz (both CGS) ~ rho_cgs * H * L_unit. But we're
-        // working in a self-consistent normalized framework, so:
         const double rho_cgs_ref = std::clamp(
-            params_.tau_mid / (kappa_ref_total * 3.0 * H),
-            1e-18, 1e-6);
+            params_.tau_mid / (kappa_ref_total * 3.0 * H), 1e-18, 1e-6);
 
         // Midplane temperature from Eddington at tau = tau_mid
         const double T_mid4 = 0.75 * T_eff * T_eff * T_eff * T_eff
                              * (params_.tau_mid + 2.0 / 3.0);
         const double T_mid = std::pow(T_mid4, 0.25);
 
-        // Iterate vertical profile (3-5 iterations for self-consistency)
-        for (int iter = 0; iter < 4; ++iter) {
-            // Forward pass: integrate from midplane outward
+        // Dynamic z_max: start at 3H, extend up to 20H if needed
+        double z_max = 3.0 * H;
+        constexpr double Z_MAX_CAP = 20.0;  // in units of H
+
+        // Iterate for self-consistency (up to 8 times)
+        std::vector<double> prev_rho_z(n_z_, 1.0);
+        const double rho_floor = 1e-15;  // floor relative to midplane
+        for (int iter = 0; iter < 8; ++iter) {
+            const double dz = z_max / (n_z_ - 1);
+
+            // Initialize
+            std::fill(rho_z.begin(), rho_z.end(), 1.0);
+            std::fill(T_z.begin(), T_z.end(), T_mid);
             rho_z[0] = 1.0;
             T_z[0] = T_mid;
 
-            // Accumulate optical depth from surface inward to get tau(z)
-            // First pass: estimate tau from current profiles
-            std::vector<double> tau_z(n_z_, 0.0);
-
-            // Integrate tau from surface (z_max) inward to each z
+            // --- Pass 1: Compute tau(z) from current rho(z) ---
+            std::fill(tau_z.begin(), tau_z.end(), 0.0);
             for (int zi = n_z_ - 2; zi >= 0; --zi) {
-                const double z_here = zi * dz;
-                const double z_next = (zi + 1) * dz;
                 const double rho_here_cgs = rho_z[zi] * rho_cgs_ref;
                 const double rho_next_cgs = rho_z[zi + 1] * rho_cgs_ref;
-                const double T_here = T_z[zi];
-                const double T_next = T_z[zi + 1];
-
-                // Total extinction = Rosseland absorption + Thomson scattering
-                const double kR_here = opacity_luts_.lookup_kappa_ross(
+                const double kR_h = opacity_luts_.lookup_kappa_ross(
                     std::clamp(rho_here_cgs, 1e-18, 1e-6),
-                    std::clamp(T_here, 3000.0, 1e8));
-                const double kE_here = opacity_luts_.lookup_kappa_es(
+                    std::clamp(T_z[zi], 3000.0, 1e8));
+                const double kE_h = opacity_luts_.lookup_kappa_es(
                     std::clamp(rho_here_cgs, 1e-18, 1e-6),
-                    std::clamp(T_here, 3000.0, 1e8));
-                const double kR_next = opacity_luts_.lookup_kappa_ross(
+                    std::clamp(T_z[zi], 3000.0, 1e8));
+                const double kR_n = opacity_luts_.lookup_kappa_ross(
                     std::clamp(rho_next_cgs, 1e-18, 1e-6),
-                    std::clamp(T_next, 3000.0, 1e8));
-                const double kE_next = opacity_luts_.lookup_kappa_es(
+                    std::clamp(T_z[zi + 1], 3000.0, 1e8));
+                const double kE_n = opacity_luts_.lookup_kappa_es(
                     std::clamp(rho_next_cgs, 1e-18, 1e-6),
-                    std::clamp(T_next, 3000.0, 1e8));
-
-                const double dtau = 0.5 * ((kR_here + kE_here) * rho_here_cgs
-                                          + (kR_next + kE_next) * rho_next_cgs) * dz;
+                    std::clamp(T_z[zi + 1], 3000.0, 1e8));
+                const double dtau = 0.5 * ((kR_h + kE_h) * rho_here_cgs
+                                          + (kR_n + kE_n) * rho_next_cgs) * dz;
                 tau_z[zi] = tau_z[zi + 1] + dtau;
             }
 
-            // Now compute T(z) from Eddington relation using tau(z)
-            // and drho/dz from hydrostatic equilibrium
-            rho_z[0] = 1.0;
+            // --- Pass 2: Compute T(z) from Eddington relation ---
             for (int zi = 0; zi < n_z_; ++zi) {
-                // Eddington T-tau: T^4 = (3/4)*T_eff^4*(tau+2/3)
                 const double T4 = 0.75 * T_eff * T_eff * T_eff * T_eff
                                 * (tau_z[zi] + 2.0 / 3.0);
                 T_z[zi] = std::pow(std::max(T4, 0.0), 0.25);
             }
 
-            // Integrate hydrostatic equilibrium from midplane outward
-            // dP/dz = -rho * Omega_z^2 * z
-            // P = P_gas + P_rad = rho*kB*T/(mu*mp) + (4*sigma/3c)*T^4
-            // dP/dz = (kB*T/(mu*mp) + ...) * drho/dz + rho * kB/(mu*mp) * dT/dz + ...
-            // Simplification: assume pressure profile and solve for density
+            // --- Pass 3: Compute radiation field and flux limiter ---
+            for (int zi = 0; zi < n_z_; ++zi) {
+                E_rad_z[zi] = a_rad * T_z[zi] * T_z[zi] * T_z[zi] * T_z[zi];
+                const double rho_cgs = rho_z[zi] * rho_cgs_ref;
+                mu_z[zi] = opacity_luts_.lookup_mu(
+                    std::clamp(rho_cgs, 1e-18, 1e-6),
+                    std::clamp(T_z[zi], 3000.0, 1e8));
+                if (mu_z[zi] <= 0.0 || !std::isfinite(mu_z[zi])) mu_z[zi] = 0.6;
+            }
+
+            // Compute Eddington factor f(z) via flux limiter
+            for (int zi = 0; zi < n_z_; ++zi) {
+                // dE_rad/dz via finite differences
+                double dE_dz = 0.0;
+                if (zi == 0) {
+                    dE_dz = 0.0;  // symmetry at midplane
+                } else if (zi == n_z_ - 1) {
+                    dE_dz = (E_rad_z[zi] - E_rad_z[zi - 1]) / dz;  // one-sided
+                } else {
+                    dE_dz = (E_rad_z[zi + 1] - E_rad_z[zi - 1]) / (2.0 * dz);  // central
+                }
+
+                const double rho_cgs = rho_z[zi] * rho_cgs_ref;
+                const double kR = opacity_luts_.lookup_kappa_ross(
+                    std::clamp(rho_cgs, 1e-18, 1e-6),
+                    std::clamp(T_z[zi], 3000.0, 1e8));
+                const double denom = kR * rho_cgs * E_rad_z[zi];
+
+                double R_param;
+                if (denom < 1e-30) {
+                    R_param = 1e30;  // free-streaming
+                } else {
+                    R_param = std::abs(dE_dz) / denom;
+                }
+                f_z[zi] = lp_eddington_factor(R_param);
+            }
+
+            // --- Pass 4: Integrate density via RK4 ---
+            // ODE: dρ/dz = F(z, ρ) where
+            // F = [-ρ·Ωz²·z - ρ·d(kT/μmp)/dz - d(f·E_rad)/dz] / (kT/μmp)
+            // We precompute the d(kT/μmp)/dz and d(f·E_rad)/dz arrays.
+
+            std::vector<double> d_cs2_dz(n_z_, 0.0);   // d(kT/μmp)/dz
+            std::vector<double> d_fE_dz(n_z_, 0.0);     // d(f·E_rad)/dz
+
+            for (int zi = 0; zi < n_z_; ++zi) {
+                // d(kT/μmp)/dz
+                if (zi == 0) {
+                    d_cs2_dz[zi] = 0.0;
+                } else if (zi == n_z_ - 1) {
+                    const double cs2_here = k_B * T_z[zi] / (mu_z[zi] * m_p);
+                    const double cs2_prev = k_B * T_z[zi-1] / (mu_z[zi-1] * m_p);
+                    d_cs2_dz[zi] = (cs2_here - cs2_prev) / dz;
+                } else {
+                    const double cs2_next = k_B * T_z[zi+1] / (mu_z[zi+1] * m_p);
+                    const double cs2_prev = k_B * T_z[zi-1] / (mu_z[zi-1] * m_p);
+                    d_cs2_dz[zi] = (cs2_next - cs2_prev) / (2.0 * dz);
+                }
+
+                // d(f·E_rad)/dz
+                if (zi == 0) {
+                    d_fE_dz[zi] = 0.0;
+                } else if (zi == n_z_ - 1) {
+                    d_fE_dz[zi] = (f_z[zi]*E_rad_z[zi] - f_z[zi-1]*E_rad_z[zi-1]) / dz;
+                } else {
+                    d_fE_dz[zi] = (f_z[zi+1]*E_rad_z[zi+1] - f_z[zi-1]*E_rad_z[zi-1])
+                                 / (2.0 * dz);
+                }
+            }
+
+            // RK4 integration from midplane outward
             rho_z[0] = 1.0;
-            for (int zi = 1; zi < n_z_; ++zi) {
+            for (int zi = 0; zi < n_z_ - 1; ++zi) {
                 const double z_here = zi * dz;
-                const double T_here = T_z[zi];
-                const double T_prev = T_z[zi - 1];
+                const double rho_here = rho_z[zi];
 
-                // Mean molecular weight
-                const double rho_prev_cgs = rho_z[zi - 1] * rho_cgs_ref;
-                const double mu = opacity_luts_.lookup_mu(
-                    std::clamp(rho_prev_cgs, 1e-18, 1e-6),
-                    std::clamp(T_here, 3000.0, 1e8));
-                const double mu_safe = (mu > 0.0 && std::isfinite(mu)) ? mu : 0.6;
+                // RHS function: dρ/dz at a given z and ρ
+                // We use precomputed arrays evaluated at grid points,
+                // linearly interpolating for fractional positions.
+                auto rhs = [&](double z_eval, double rho_eval) -> double {
+                    // Find the grid index for z_eval
+                    const double z_frac = z_eval / dz;
+                    const int idx = std::clamp(static_cast<int>(z_frac), 0, n_z_ - 2);
+                    const double t = z_frac - idx;
 
-                // Pressure scale: P_gas/rho = kB*T/(mu*mp)
-                const double P_gas_per_rho = k_B * T_here / (mu_safe * m_p);
-                // Radiation pressure: P_rad = (4*sigma_SB/(3*c)) * T^4
-                const double P_rad = 4.0 * sigma_SB / (3.0 * c_cgs) * T_here * T_here * T_here * T_here;
-                const double P_rad_prev = 4.0 * sigma_SB / (3.0 * c_cgs) * T_prev * T_prev * T_prev * T_prev;
+                    const double cs2 = k_B * ((1.0-t)*T_z[idx] + t*T_z[idx+1])
+                                     / (((1.0-t)*mu_z[idx] + t*mu_z[idx+1]) * m_p);
+                    const double dcs2 = (1.0-t)*d_cs2_dz[idx] + t*d_cs2_dz[idx+1];
+                    const double dfE  = (1.0-t)*d_fE_dz[idx] + t*d_fE_dz[idx+1];
+                    const double Omz2_z = Omz2 * z_eval;
 
-                // Total pressure per unit density (rough):
-                // P_total = rho * P_gas_per_rho + P_rad
-                // dP/dz = -rho * Omega_z^2 * z (in mixed geometric/CGS)
-                // The Omega_z^2 is in geometric units (1/M^2), z is geometric.
-                // We work with normalized rho (dimensionless), solving:
-                // d(rho_norm)/dz = -(Omega_z^2 * z * rho_norm) / c_eff^2
-                // where c_eff^2 = P_gas_per_rho + P_rad/(rho*rho_cgs_ref)
+                    if (cs2 < 1e-30) return 0.0;
 
-                const double rho_here_cgs = rho_z[zi - 1] * rho_cgs_ref;
-                const double c_eff2_cgs = P_gas_per_rho + P_rad / std::max(rho_here_cgs, 1e-30);
-                // Convert to geometric: c_eff_geom^2 = c_eff_cgs / c^2
-                const double c_eff2_geom = c_eff2_cgs / (c_cgs * c_cgs);
+                    // Unit conversion: mixed-unit framework.
+                    // z is geometric (units of M), Ωz² is geometric (1/M²).
+                    // Thermodynamic quantities are CGS.
+                    //
+                    // The ODE is: dρ̃/dz = [-ρ̃·Ωz²·z - ρ̃·d(cs²)/dz - (1/ρ_cgs_ref)·d(f·E_rad)/dz] / cs²
+                    // where ρ̃ = ρ/ρ_midplane (dimensionless), z is geometric.
+                    //
+                    // cs² = kT/(μmp) [cm²/s²] → divide by c² to get geometric (dimensionless)
+                    // d(f·E_rad)/dz [erg/cm⁴] → divide by (ρ_cgs_ref · c²) to get
+                    //   geometric units consistent with (ρ̃ · Ωz² · z) [1/M]
+                    const double cs2_geom = cs2 / (c_cgs * c_cgs);
+                    const double dcs2_geom = dcs2 / (c_cgs * c_cgs);
+                    const double dfE_geom = dfE / (rho_cgs_ref * c_cgs * c_cgs);
 
-                // Simple forward Euler: d(ln rho)/dz = -Omega_z^2 * z / c_eff_geom^2
-                const double dlnrho = -Omz2 * z_here / std::max(c_eff2_geom, 1e-30) * dz;
-                rho_z[zi] = rho_z[zi - 1] * std::exp(std::clamp(dlnrho, -10.0, 0.0));
+                    return (-rho_eval * Omz2_z - rho_eval * dcs2_geom - dfE_geom)
+                           / std::max(cs2_geom, 1e-30);
+                };
 
-                // Floor
-                if (rho_z[zi] < 1e-12) rho_z[zi] = 1e-12;
+                // RK4 step
+                const double k1 = dz * rhs(z_here, rho_here);
+                const double k2 = dz * rhs(z_here + 0.5*dz, std::max(rho_here + 0.5*k1, rho_floor));
+                const double k3 = dz * rhs(z_here + 0.5*dz, std::max(rho_here + 0.5*k2, rho_floor));
+                const double k4 = dz * rhs(z_here + dz, std::max(rho_here + k3, rho_floor));
+
+                rho_z[zi + 1] = std::max(rho_here + (k1 + 2.0*k2 + 2.0*k3 + k4) / 6.0,
+                                          rho_floor);
+            }
+
+            // --- Check if z_max needs extending ---
+            // rho_z is normalized to midplane = 1.0, so 1e-10 is relative to midplane
+            if (rho_z[n_z_ - 1] > 1e-10 && z_max < Z_MAX_CAP * H) {
+                z_max = std::min(z_max + H, Z_MAX_CAP * H);
+                prev_rho_z = rho_z;  // update before restart to avoid stale comparison
+                // This counts as one of the 8 outer iterations (counter increments via for-loop)
+                continue;
+            }
+
+            // --- Convergence check ---
+            double max_delta = 0.0;
+            for (int zi = 0; zi < n_z_; ++zi) {
+                if (prev_rho_z[zi] > rho_floor * 10.0) {
+                    const double delta = std::abs(rho_z[zi] - prev_rho_z[zi]) / prev_rho_z[zi];
+                    max_delta = std::max(max_delta, delta);
+                }
+            }
+            prev_rho_z = rho_z;
+
+            if (iter > 0 && max_delta < 0.001) break;  // converged
+        }
+
+        // Convergence warning (spec requirement)
+        {
+            double max_delta = 0.0;
+            for (int zi = 0; zi < n_z_; ++zi) {
+                if (prev_rho_z[zi] > rho_floor * 10.0) {
+                    const double delta = std::abs(rho_z[zi] - prev_rho_z[zi]) / prev_rho_z[zi];
+                    max_delta = std::max(max_delta, delta);
+                }
+            }
+            if (max_delta >= 0.001) {
+                std::fprintf(stderr,
+                    "[VolumetricDisk] WARNING: vertical profile did not converge at r_idx=%d (max delta=%.2e)\n",
+                    ri, max_delta);
             }
         }
+
+        z_max_lut_[ri] = z_max;
 
         // Store profiles
         for (int zi = 0; zi < n_z_; ++zi) {
@@ -604,6 +730,10 @@ void VolumetricDisk::compute_vertical_profiles() {
             T_profile_lut_[ri * n_z_ + zi] = T_z[zi];
         }
     }
+
+    std::printf("[VolumetricDisk] Vertical profiles computed. z_max range: %.2f H to %.2f H\n",
+                *std::min_element(z_max_lut_.begin(), z_max_lut_.end()) / H_lut_[0],
+                *std::max_element(z_max_lut_.begin(), z_max_lut_.end()) / H_lut_[n_r_/2]);
 }
 
 // ============================================================================
