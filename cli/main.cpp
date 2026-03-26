@@ -27,6 +27,8 @@ static void print_usage() {
     std::println("  --disk-alpha A        Shakura-Sunyaev viscosity (default: 0.1)");
     std::println("  --disk-turbulence T   Noise amplitude (default: 0.4)");
     std::println("  --disk-seed N         Noise seed (default: 42)");
+    std::println("  --disk-noise-scale S  Noise feature size in M, 0=auto (default: 0)");
+    std::println("  --disk-noise-octaves N  fBm octave count (default: 2)");
     std::println("  --background TYPE     black | stars (default: stars)");
     std::println("  --max-steps N         Max integration steps (default: 10000)");
     std::println("  --tolerance T         Integrator tolerance (default: 1e-8)");
@@ -64,6 +66,8 @@ int main(int argc, char* argv[]) {
     params.disk_alpha = 0.1;
     params.disk_turbulence = 0.4;
     params.disk_seed = 42;
+    params.disk_noise_scale = 0.0;
+    params.disk_noise_octaves = 2;
 
     std::string output_name = "output";
     std::string backend_str = "cpu";
@@ -117,6 +121,10 @@ int main(int argc, char* argv[]) {
             if (auto v = next()) params.disk_turbulence = std::atof(v);
         } else if (arg("--disk-seed")) {
             if (auto v = next()) params.disk_seed = std::atoi(v);
+        } else if (arg("--disk-noise-scale")) {
+            if (auto v = next()) params.disk_noise_scale = std::atof(v);
+        } else if (arg("--disk-noise-octaves")) {
+            if (auto v = next()) params.disk_noise_octaves = std::atoi(v);
         } else if (arg("--background")) {
             if (auto v = next()) {
                 if (std::strcmp(v, "black") == 0) params.background_type = GRRT_BG_BLACK;

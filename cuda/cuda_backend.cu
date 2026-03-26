@@ -110,11 +110,15 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
         double disk_temp = params->disk_temperature > 0.0 ? params->disk_temperature : 1e7;
         double vol_alpha = params->disk_alpha > 0.0 ? params->disk_alpha : 0.1;
         double vol_turb = params->disk_turbulence > 0.0 ? params->disk_turbulence : 0.4;
+        double vol_noise_scale = params->disk_noise_scale;  // 0.0 = auto
+        int vol_noise_octaves = params->disk_noise_octaves > 0 ? params->disk_noise_octaves : 2;
         unsigned int vol_seed = params->disk_seed > 0 ? static_cast<unsigned int>(params->disk_seed) : 42u;
 
         // Build VolumetricDisk on CPU (in a separate .cpp TU to avoid nvcc C++20 issues)
         VolDiskHostData vd = build_vol_disk_host_data(mass, spin_a, disk_outer, disk_temp,
-                                                       vol_alpha, vol_turb, vol_seed);
+                                                       vol_alpha, vol_turb,
+                                                       vol_noise_scale, vol_noise_octaves,
+                                                       vol_seed);
 
         // Fill RenderParams volumetric fields
         rp.disk_r_isco = vd.r_isco;
@@ -125,6 +129,7 @@ int cuda_render(CudaRenderContext* ctx, const GRRTParams* params, float* framebu
         rp.disk_rho_scale = vd.rho_scale;
         rp.disk_turbulence = vd.turbulence;
         rp.disk_noise_scale = vd.noise_scale;
+        rp.disk_noise_octaves = vd.noise_octaves;
         rp.disk_r_inner = vd.r_horizon;
         rp.disk_r_outer = disk_outer;
 

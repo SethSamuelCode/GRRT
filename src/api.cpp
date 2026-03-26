@@ -80,6 +80,8 @@ GRRTContext* grrt_create(const GRRTParams* params) {
             vp.alpha = params->disk_alpha;
             vp.turbulence = params->disk_turbulence;
             vp.seed = static_cast<uint32_t>(params->disk_seed);
+            vp.noise_scale = params->disk_noise_scale;
+            vp.noise_octaves = params->disk_noise_octaves;
             ctx->vol_disk = std::make_unique<grrt::VolumetricDisk>(
                 params->mass, params->spin,
                 params->disk_outer > 0 ? params->disk_outer : 30.0,

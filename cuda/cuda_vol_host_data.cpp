@@ -10,10 +10,13 @@
 VolDiskHostData build_vol_disk_host_data(double mass, double spin,
                                           double r_outer, double peak_temperature,
                                           double alpha, double turbulence,
+                                          double noise_scale,
+                                          int noise_octaves,
                                           unsigned int seed) {
     grrt::VolumetricParams vp;
     vp.alpha = alpha;
     vp.turbulence = turbulence;
+    vp.noise_scale = noise_scale;
     vp.seed = seed;
 
     grrt::VolumetricDisk disk(mass, spin, r_outer, peak_temperature, vp);
@@ -25,9 +28,10 @@ VolDiskHostData build_vol_disk_host_data(double mass, double spin,
     data.E_isco      = disk.E_isco();
     data.L_isco      = disk.L_isco();
     data.rho_scale   = disk.rho_scale();
-    data.turbulence  = turbulence;
-    data.noise_scale = disk.noise_scale();
-    data.r_min       = disk.r_min();
+    data.turbulence   = turbulence;
+    data.noise_scale  = disk.noise_scale();
+    data.noise_octaves = noise_octaves;
+    data.r_min        = disk.r_min();
     data.r_max       = disk.r_max();
     data.n_r         = disk.radial_bins();
     data.n_z         = disk.vertical_bins();

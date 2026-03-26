@@ -53,6 +53,8 @@ struct VolDiskHostData {
 VolDiskHostData build_vol_disk_host_data(double mass, double spin,
                                           double r_outer, double peak_temperature,
                                           double alpha, double turbulence,
+                                          double noise_scale,
+                                          int noise_octaves,
                                           unsigned int seed);
 
 #endif // CUDA_VOL_HOST_DATA_H
