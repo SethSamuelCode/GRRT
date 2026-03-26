@@ -80,9 +80,10 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
             // Check if the minimum |z| along the step could have been inside
             // the disk.  Conservative: if either endpoint is within 6H, the
             // ray may have grazed the volume.
+            const double zm_new = vol_disk_->z_max_at(r_new);
             const double H_new = vol_disk_->scale_height(r_new);
-            const bool near_disk = (std::abs(z_new) < 6.0 * H_new
-                                 || std::abs(z_prev) < 6.0 * vol_disk_->scale_height(r_prev))
+            const bool near_disk = (std::abs(z_new) < zm_new + H_new
+                                 || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + vol_disk_->scale_height(r_prev))
                                 && r_new >= vol_disk_->r_horizon()
                                 && r_new <= vol_disk_->r_max();
             const bool should_raymarch = crossed_midplane || inside_now || near_disk;
@@ -199,7 +200,8 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
         if (!vol_disk_->inside_volume(r, z)) {
             // Only exit when leaving after having been inside the volume,
             // and we're well beyond the disk surface.
-            if (been_inside && std::abs(z) > 6.0 * H) break;
+            const double zm = vol_disk_->z_max_at(r);
+            if (been_inside && std::abs(z) > zm + H) break;
             // Still approaching or close — use coarse steps when far,
             // fine steps when near the disk surface.
             if (!been_inside) {

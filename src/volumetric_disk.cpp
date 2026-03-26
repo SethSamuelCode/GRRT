@@ -151,8 +151,8 @@ double VolumetricDisk::taper(double r) const {
 
 bool VolumetricDisk::inside_volume(double r, double z) const {
     if (r <= r_horizon_ || r > r_outer_) return false;
-    const double H = scale_height(r);
-    return std::abs(z) < 3.0 * H;
+    const double zm = z_max_at(r);
+    return std::abs(z) < zm;
 }
 
 // ============================================================================
@@ -169,28 +169,44 @@ double VolumetricDisk::interp_radial(const std::vector<double>& lut, double r) c
 }
 
 double VolumetricDisk::interp_2d(const std::vector<double>& lut, double r, double z_abs) const {
-    // Radial index
+    // Radial interpolation
     const double r_frac = std::clamp((r - r_min_) / (r_outer_ - r_min_) * (n_r_ - 1),
-                                     0.0, static_cast<double>(n_r_ - 1));
-    const int ri = std::clamp(static_cast<int>(r_frac), 0, n_r_ - 2);
-    const double rt = r_frac - ri;
+                                      0.0, static_cast<double>(n_r_ - 1));
+    const int ri = std::min(static_cast<int>(r_frac), n_r_ - 2);
+    const double tr = r_frac - ri;
 
-    // Vertical index: z_abs / (3*H(r)) maps to [0, n_z_-1]
-    const double H = scale_height(r);
-    const double z_max = 3.0 * H;
-    if (z_abs >= z_max) return 0.0;
-    const double z_frac = std::clamp(z_abs / z_max * (n_z_ - 1), 0.0, static_cast<double>(n_z_ - 1));
-    const int zi = std::clamp(static_cast<int>(z_frac), 0, n_z_ - 2);
-    const double zt = z_frac - zi;
+    // Per-column z normalization: each column has its own z_max
+    const double zm_lo = z_max_lut_[ri];
+    const double zm_hi = z_max_lut_[std::min(ri + 1, n_r_ - 1)];
 
-    // Bilinear interpolation
-    const auto idx = [&](int ir, int iz) { return ir * n_z_ + iz; };
-    const double v00 = lut[idx(ri, zi)];
-    const double v01 = lut[idx(ri, zi + 1)];
-    const double v10 = lut[idx(ri + 1, zi)];
-    const double v11 = lut[idx(ri + 1, zi + 1)];
-    return (v00 * (1.0 - rt) + v10 * rt) * (1.0 - zt)
-         + (v01 * (1.0 - rt) + v11 * rt) * zt;
+    // If z_abs is beyond both columns' extent, return 0
+    if ((zm_lo <= 0.0 || z_abs >= zm_lo) && (zm_hi <= 0.0 || z_abs >= zm_hi))
+        return 0.0;
+
+    // Look up in column ri
+    double val_lo = 0.0;
+    if (zm_lo > 0.0 && z_abs < zm_lo) {
+        const double z_frac_lo = std::clamp(z_abs / zm_lo * (n_z_ - 1), 0.0,
+                                             static_cast<double>(n_z_ - 1));
+        const int zi_lo = std::min(static_cast<int>(z_frac_lo), n_z_ - 2);
+        const double tz_lo = z_frac_lo - zi_lo;
+        val_lo = (1.0 - tz_lo) * lut[ri * n_z_ + zi_lo]
+               + tz_lo * lut[ri * n_z_ + zi_lo + 1];
+    }
+
+    // Look up in column ri+1
+    double val_hi = 0.0;
+    const int ri1 = std::min(ri + 1, n_r_ - 1);
+    if (zm_hi > 0.0 && z_abs < zm_hi) {
+        const double z_frac_hi = std::clamp(z_abs / zm_hi * (n_z_ - 1), 0.0,
+                                             static_cast<double>(n_z_ - 1));
+        const int zi_hi = std::min(static_cast<int>(z_frac_hi), n_z_ - 2);
+        const double tz_hi = z_frac_hi - zi_hi;
+        val_hi = (1.0 - tz_hi) * lut[ri1 * n_z_ + zi_hi]
+               + tz_hi * lut[ri1 * n_z_ + zi_hi + 1];
+    }
+
+    return (1.0 - tr) * val_lo + tr * val_hi;
 }
 
 // ============================================================================
@@ -765,8 +781,7 @@ void VolumetricDisk::normalize_density() {
     if (noise_scale_ < 0.01) noise_scale_ = 0.01; // safety floor
 
     // Integrate rho_profile * dz at peak radius to get column integral
-    const double H_peak = H_lut_[peak_idx];
-    const double z_max = 3.0 * H_peak;
+    const double z_max = z_max_lut_[peak_idx];
     const double dz = z_max / (n_z_ - 1);
     double col_integral = 0.0;
     for (int zi = 0; zi < n_z_ - 1; ++zi) {

@@ -29,6 +29,8 @@ static void print_usage() {
     std::println("  --disk-seed N         Noise seed (default: 42)");
     std::println("  --disk-noise-scale S  Noise feature size in M, 0=auto (default: 0)");
     std::println("  --disk-noise-octaves N  fBm octave count (default: 2)");
+    std::println("  --mass-solar M        Black hole mass in solar masses (derives temperature)");
+    std::println("  --eddington-fraction F  Accretion rate as Eddington fraction (derives temperature)");
     std::println("  --background TYPE     black | stars (default: stars)");
     std::println("  --max-steps N         Max integration steps (default: 10000)");
     std::println("  --tolerance T         Integrator tolerance (default: 1e-8)");
@@ -59,7 +61,7 @@ int main(int argc, char* argv[]) {
     params.disk_enabled = 1;
     params.disk_inner = 0.0;
     params.disk_outer = 20.0;
-    params.disk_temperature = 1e7;
+    params.disk_temperature = 0.0;  // 0 = auto (derive from mass/Eddington, or default 1e7)
     params.background_type = GRRT_BG_STARS;
     params.thread_count = 0;
     params.disk_volumetric = 0;
@@ -68,6 +70,8 @@ int main(int argc, char* argv[]) {
     params.disk_seed = 42;
     params.disk_noise_scale = 0.0;
     params.disk_noise_octaves = 2;
+    params.mass_solar = 0.0;
+    params.eddington_fraction = 0.0;
 
     std::string output_name = "output";
     std::string backend_str = "cpu";
@@ -125,6 +129,10 @@ int main(int argc, char* argv[]) {
             if (auto v = next()) params.disk_noise_scale = std::atof(v);
         } else if (arg("--disk-noise-octaves")) {
             if (auto v = next()) params.disk_noise_octaves = std::atoi(v);
+        } else if (arg("--mass-solar")) {
+            if (auto v = next()) params.mass_solar = std::atof(v);
+        } else if (arg("--eddington-fraction")) {
+            if (auto v = next()) params.eddington_fraction = std::atof(v);
         } else if (arg("--background")) {
             if (auto v = next()) {
                 if (std::strcmp(v, "black") == 0) params.background_type = GRRT_BG_BLACK;

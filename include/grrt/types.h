@@ -46,6 +46,9 @@ typedef struct {
     double disk_noise_scale;    /* Noise feature size in M (0 = auto, default 0) */
     int disk_noise_octaves;     /* fBm octave count (default 2) */
 
+    double mass_solar;          /* BH mass in solar masses (0 = use disk_temperature directly) */
+    double eddington_fraction;  /* Accretion rate as fraction of Eddington (0 = use disk_temperature) */
+
     GRRTBackgroundType background_type;
     const char* background_texture_path;
 

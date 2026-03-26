@@ -76,6 +76,30 @@ GRRTContext* grrt_create(const GRRTParams* params) {
             mass, spin_a, r_inner, disk_outer, disk_temp);
 
         if (params->disk_volumetric) {
+            // Derive peak_temperature from mass and Eddington fraction if provided
+            double vol_disk_temp = params->disk_temperature > 0 ? params->disk_temperature : 1e7;
+            if (params->mass_solar > 0.0 && params->eddington_fraction > 0.0
+                && params->disk_temperature <= 0.0) {
+                // Radiative efficiency: η = 1 - E_isco (Bardeen, Press & Teukolsky 1972)
+                // E_isco is the specific orbital energy at the ISCO.
+                // Re-derived here because this runs before VolumetricDisk construction.
+                // The same formula exists in VolumetricDisk::E_isco().
+                const double a_star = std::abs(params->spin);
+                const double Z1 = 1.0 + std::cbrt(1.0 - a_star * a_star)
+                                       * (std::cbrt(1.0 + a_star) + std::cbrt(1.0 - a_star));
+                const double Z2 = std::sqrt(3.0 * a_star * a_star + Z1 * Z1);
+                const double r_isco_M = 3.0 + Z2 - std::sqrt((3.0 - Z1) * (3.0 + Z1 + 2.0 * Z2));
+                const double v_isco = 1.0 / std::sqrt(r_isco_M);
+                const double E_isco = (1.0 - 2.0*v_isco*v_isco + a_star*v_isco*v_isco*v_isco)
+                                    / std::sqrt(1.0 - 3.0*v_isco*v_isco + 2.0*a_star*v_isco*v_isco*v_isco);
+                const double eta = 1.0 - E_isco;
+                vol_disk_temp = 5.0e7 * std::pow(eta, 0.25)
+                              * std::pow(params->mass_solar, -0.25)
+                              * std::pow(params->eddington_fraction, 0.25);
+                std::printf("[GRRT] Derived T_peak = %.0f K from M=%.1f M_sun, f_Edd=%.3f, eta=%.4f\n",
+                            vol_disk_temp, params->mass_solar, params->eddington_fraction, eta);
+            }
+
             grrt::VolumetricParams vp;
             vp.alpha = params->disk_alpha;
             vp.turbulence = params->disk_turbulence;
@@ -85,7 +109,7 @@ GRRTContext* grrt_create(const GRRTParams* params) {
             ctx->vol_disk = std::make_unique<grrt::VolumetricDisk>(
                 params->mass, params->spin,
                 params->disk_outer > 0 ? params->disk_outer : 30.0,
-                params->disk_temperature > 0 ? params->disk_temperature : 1e7,
+                vol_disk_temp,
                 vp);
         }
     }
