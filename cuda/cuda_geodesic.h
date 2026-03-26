@@ -203,8 +203,8 @@ __device__ inline Vec4 kerr_force(double M, double a, const Vec4& x, const Vec4&
 /// @param a       Spin parameter (ignored for Schwarzschild)
 /// @param state   Current geodesic state (x^μ, p_μ)
 /// @return        Derivatives (dx^μ/dλ, dp_μ/dλ) packaged as a GeodesicState
-__device__ inline GeodesicState derivatives(MetricType type, double M, double a,
-                                             const GeodesicState& state) {
+static __device__ __noinline__ GeodesicState derivatives(MetricType type, double M, double a,
+                                                         const GeodesicState& state) {
     const Vec4& x = state.position;
     const Vec4& p = state.momentum;
 
@@ -253,9 +253,9 @@ __device__ inline GeodesicState derivatives(MetricType type, double M, double a,
 /// @param state     Current state
 /// @param dlambda   Step size in affine parameter λ
 /// @return          New state after one RK4 step
-__device__ inline GeodesicState rk4_step(MetricType type, double M, double a,
-                                          const GeodesicState& state,
-                                          double dlambda) {
+static __device__ __noinline__ GeodesicState rk4_step(MetricType type, double M, double a,
+                                                      const GeodesicState& state,
+                                                      double dlambda) {
     GeodesicState k1 = derivatives(type, M, a, state);
     GeodesicState k2 = derivatives(type, M, a, geodesic_add(state, k1, dlambda * 0.5));
     GeodesicState k3 = derivatives(type, M, a, geodesic_add(state, k2, dlambda * 0.5));
@@ -294,10 +294,10 @@ __device__ inline GeodesicState rk4_step(MetricType type, double M, double a,
 /// @param dlambda    Initial step size
 /// @param tolerance  Error tolerance (e.g. 1e-8)
 /// @return           AdaptiveResult with accepted state and next step suggestion
-__device__ inline AdaptiveResult rk4_adaptive_step(MetricType type, double M, double a,
-                                                    const GeodesicState& state,
-                                                    double dlambda,
-                                                    double tolerance) {
+static __device__ __noinline__ AdaptiveResult rk4_adaptive_step(MetricType type, double M, double a,
+                                                                const GeodesicState& state,
+                                                                double dlambda,
+                                                                double tolerance) {
     constexpr double dl_min     = 1e-6;
     constexpr int    max_retries = 20;
     constexpr double eps_scale  = 1e-10;  // scale guard to avoid div-by-zero in relative error

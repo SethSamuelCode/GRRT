@@ -78,7 +78,7 @@ enum class RayTermination { Horizon, Escaped, MaxSteps };
 ///
 /// @param output      Device float4 buffer (width * height), stores linear HDR color
 /// @param cancel_flag Device int pointer; if non-null and *cancel_flag != 0, threads exit
-__global__ void render_kernel(float4* output, int* cancel_flag) {
+__global__ __launch_bounds__(256) void render_kernel(float4* output, int* cancel_flag) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i >= d_params.width || j >= d_params.height) return;

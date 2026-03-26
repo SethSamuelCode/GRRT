@@ -420,8 +420,8 @@ __device__ inline double vol_planck_nu(double nu, double T) {
 /// @param state   Current geodesic state (modified in place to disk exit point)
 /// @param color   Accumulated RGB color (modified in place)
 /// @param params  RenderParams with all disk and integrator parameters
-__device__ inline void vol_raymarch(GeodesicState& state, Vec3& color,
-                                     const RenderParams& params) {
+static __device__ __noinline__ void vol_raymarch(GeodesicState& state, Vec3& color,
+                                                  const RenderParams& params) {
     // RGB observation frequencies at 450nm, 550nm, 650nm
     const double nu_obs[3] = {
         VOL_c_cgs / 450e-7,
