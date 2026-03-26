@@ -102,4 +102,16 @@ double SimplexNoise3D::evaluate_turbulent(double x, double y, double z) const {
     return evaluate(x, y, z) + 0.5 * evaluate(x * 3.0, y * 3.0, z * 3.0);
 }
 
+double SimplexNoise3D::evaluate_fbm(double x, double y, double z, int octaves) const {
+    double result = 0.0;
+    double amplitude = 1.0;
+    double frequency = 1.0;
+    for (int i = 0; i < octaves; ++i) {
+        result += amplitude * evaluate(x * frequency, y * frequency, z * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    return result;
+}
+
 } // namespace grrt

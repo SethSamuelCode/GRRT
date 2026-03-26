@@ -20,6 +20,7 @@ struct VolDiskHostData {
     double rho_scale;
     double turbulence;
     double noise_scale;
+    int noise_octaves;
     double r_min;
     double r_max;
     int n_r;

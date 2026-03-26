@@ -43,6 +43,8 @@ typedef struct {
     double disk_alpha;          /* Shakura-Sunyaev viscosity (default 0.1) */
     double disk_turbulence;     /* Noise amplitude (default 0.4) */
     int disk_seed;              /* Noise seed (default 42) */
+    double disk_noise_scale;    /* Noise feature size in M (0 = auto, default 0) */
+    int disk_noise_octaves;     /* fBm octave count (default 2) */
 
     GRRTBackgroundType background_type;
     const char* background_texture_path;

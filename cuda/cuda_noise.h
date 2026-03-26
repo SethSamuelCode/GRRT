@@ -165,6 +165,27 @@ __device__ inline double cuda_simplex_noise_turbulent(double x, double y, double
          + 0.5 * cuda_simplex_noise_3d(x * 3.0, y * 3.0, z * 3.0);
 }
 
+// ---------------------------------------------------------------------------
+// Fractional Brownian Motion (fBm) noise
+// ---------------------------------------------------------------------------
+
+/// @brief Evaluate fBm simplex noise at (x, y, z) with configurable octaves.
+///
+/// Standard fBm: lacunarity=2, persistence=0.5.
+/// @param octaves Number of noise layers.
+/// @return Value in approximately [-(2 - 2^(1-octaves)), +(2 - 2^(1-octaves))].
+__device__ inline double cuda_simplex_noise_fbm(double x, double y, double z, int octaves) {
+    double result = 0.0;
+    double amplitude = 1.0;
+    double frequency = 1.0;
+    for (int i = 0; i < octaves; ++i) {
+        result += amplitude * cuda_simplex_noise_3d(x * frequency, y * frequency, z * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    return result;
+}
+
 } // namespace cuda
 
 #endif // GRRT_CUDA_NOISE_H

@@ -15,6 +15,8 @@ struct VolumetricParams {
     double turbulence = 0.4;    ///< Noise amplitude delta
     uint32_t seed     = 42;     ///< Noise seed
     double tau_mid    = 100.0;  ///< Midplane optical depth normalization at peak-flux radius
+    double noise_scale  = 0.0;  ///< Noise feature size (0 = auto = 2*H at peak)
+    int noise_octaves   = 2;    ///< fBm octave count
 };
 
 /// Volumetric accretion disk with Shakura-Sunyaev vertical structure,

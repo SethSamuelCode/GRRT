@@ -35,6 +35,12 @@ public:
     /// @return Value in approximately [-1.5, 1.5].
     double evaluate_turbulent(double x, double y, double z) const;
 
+    /// Evaluate fractional Brownian motion noise at (x, y, z).
+    /// Standard fBm: lacunarity=2, persistence=0.5.
+    /// @param octaves Number of noise layers (1 = base only, 2 = matches old turbulent).
+    /// @return Value in approximately [-(2 - 2^(1-octaves)), +(2 - 2^(1-octaves))].
+    double evaluate_fbm(double x, double y, double z, int octaves) const;
+
     /// Read-only access to the internal permutation table (512 entries).
     const std::array<int, 512>& permutation_table() const { return perm_; }
 
