@@ -152,7 +152,7 @@ double VolumetricDisk::taper(double r) const {
 bool VolumetricDisk::inside_volume(double r, double z) const {
     if (r <= r_horizon_ || r > r_outer_) return false;
     const double H = scale_height(r);
-    return std::abs(z) < 4.0 * H;
+    return std::abs(z) < 3.0 * H;
 }
 
 // ============================================================================
@@ -178,18 +178,8 @@ double VolumetricDisk::interp_2d(const std::vector<double>& lut, double r, doubl
     // Vertical index: z_abs / (3*H(r)) maps to [0, n_z_-1]
     const double H = scale_height(r);
     const double z_max = 3.0 * H;
-    if (z_abs >= 4.0 * H) return 0.0;
-
-    // Taper factor: 1.0 inside 3H, smooth exponential falloff from 3H to 4H
-    double taper = 1.0;
-    double z_lookup = z_abs;
-    if (z_abs >= z_max) {
-        const double dz = (z_abs - z_max) / H;
-        taper = std::exp(-4.0 * dz * dz);
-        z_lookup = z_max - 1e-10;  // clamp to last valid LUT entry
-    }
-
-    const double z_frac = std::clamp(z_lookup / z_max * (n_z_ - 1), 0.0, static_cast<double>(n_z_ - 1));
+    if (z_abs >= z_max) return 0.0;
+    const double z_frac = std::clamp(z_abs / z_max * (n_z_ - 1), 0.0, static_cast<double>(n_z_ - 1));
     const int zi = std::clamp(static_cast<int>(z_frac), 0, n_z_ - 2);
     const double zt = z_frac - zi;
 
@@ -199,9 +189,8 @@ double VolumetricDisk::interp_2d(const std::vector<double>& lut, double r, doubl
     const double v01 = lut[idx(ri, zi + 1)];
     const double v10 = lut[idx(ri + 1, zi)];
     const double v11 = lut[idx(ri + 1, zi + 1)];
-    const double result = (v00 * (1.0 - rt) + v10 * rt) * (1.0 - zt)
-                        + (v01 * (1.0 - rt) + v11 * rt) * zt;
-    return result * taper;
+    return (v00 * (1.0 - rt) + v10 * rt) * (1.0 - zt)
+         + (v01 * (1.0 - rt) + v11 * rt) * zt;
 }
 
 // ============================================================================

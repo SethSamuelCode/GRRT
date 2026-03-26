@@ -139,18 +139,9 @@ __device__ inline double vol_interp_2d(const double* lut, double r, double z_abs
     // Vertical index: z_abs / (3*H(r)) maps to [0, n_z-1]
     const double H = vol_scale_height(r, params);
     const double z_max = 3.0 * H;
-    if (z_abs >= 4.0 * H) return 0.0;
+    if (z_abs >= z_max) return 0.0;
 
-    // Taper factor: 1.0 inside 3H, smooth exponential falloff from 3H to 4H
-    double taper = 1.0;
-    double z_lookup = z_abs;
-    if (z_abs >= z_max) {
-        const double dz = (z_abs - z_max) / H;
-        taper = exp(-4.0 * dz * dz);
-        z_lookup = z_max - 1e-10;  // clamp to last valid LUT entry
-    }
-
-    double z_frac = z_lookup / z_max * (params.vol_n_z - 1);
+    double z_frac = z_abs / z_max * (params.vol_n_z - 1);
     if (z_frac < 0.0) z_frac = 0.0;
     if (z_frac > (double)(params.vol_n_z - 1)) z_frac = (double)(params.vol_n_z - 1);
     int zi = (int)z_frac;
@@ -163,9 +154,8 @@ __device__ inline double vol_interp_2d(const double* lut, double r, double z_abs
     const double v01 = lut[ri * n_z + zi + 1];
     const double v10 = lut[(ri + 1) * n_z + zi];
     const double v11 = lut[(ri + 1) * n_z + zi + 1];
-    const double result = (v00 * (1.0 - rt) + v10 * rt) * (1.0 - zt)
-                        + (v01 * (1.0 - rt) + v11 * rt) * zt;
-    return result * taper;
+    return (v00 * (1.0 - rt) + v10 * rt) * (1.0 - zt)
+         + (v01 * (1.0 - rt) + v11 * rt) * zt;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +298,7 @@ __device__ inline double vol_taper(double r, const RenderParams& params) {
 __device__ inline bool vol_inside(double r, double z, const RenderParams& params) {
     if (r <= params.disk_r_horizon || r > params.vol_r_max) return false;
     const double H = vol_scale_height(r, params);
-    return fabs(z) < 4.0 * H;
+    return fabs(z) < 3.0 * H;
 }
 
 /// @brief Density in CGS [g/cm^3] at (r, z, phi).
