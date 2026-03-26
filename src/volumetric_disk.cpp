@@ -214,8 +214,8 @@ double VolumetricDisk::density(double r, double z, double phi) const {
     const double nx = r * std::cos(phi) / noise_scale_;
     const double ny = r * std::sin(phi) / noise_scale_;
     const double nz = z / noise_scale_;
-    const double n = noise_.evaluate_turbulent(nx, ny, nz);
-    return base * (1.0 + params_.turbulence * n);
+    const double n = noise_.evaluate_fbm(nx, ny, nz, params_.noise_octaves);
+    return std::max(0.0, base * (1.0 + params_.turbulence * n));
 }
 
 double VolumetricDisk::density_cgs(double r, double z, double phi) const {
@@ -627,7 +627,7 @@ void VolumetricDisk::normalize_density() {
     }
 
     // Set noise scale to ~2× scale height at peak-flux radius (avoids aliasing)
-    noise_scale_ = 2.0 * H_lut_[peak_idx];
+    noise_scale_ = (params_.noise_scale > 0.0) ? params_.noise_scale : 2.0 * H_lut_[peak_idx];
     if (noise_scale_ < 0.01) noise_scale_ = 0.01; // safety floor
 
     // Integrate rho_profile * dz at peak radius to get column integral

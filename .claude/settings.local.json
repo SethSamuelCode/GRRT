@@ -5,7 +5,10 @@
       "Bash(cmake --build build --config Release)",
       "Bash(cmake --build build --config Release --target test-volumetric)",
       "Bash(./build/Release/test-volumetric.exe)",
-      "Bash(./build/Release/test-opacity.exe 2>&1)"
+      "Bash(./build/Release/test-opacity.exe 2>&1)",
+      "mcp__plugin_serena_serena__read_file",
+      "mcp__plugin_serena_serena__activate_project",
+      "mcp__plugin_serena_serena__replace_content"
     ]
   }
 }

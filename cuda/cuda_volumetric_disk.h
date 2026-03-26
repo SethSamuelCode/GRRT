@@ -319,8 +319,8 @@ __device__ inline double vol_density_cgs(double r, double z, double phi,
     const double nx = r * cos(phi) / ns;
     const double ny = r * sin(phi) / ns;
     const double nz = z / ns;
-    const double n = cuda_simplex_noise_turbulent(nx, ny, nz);
-    return base * (1.0 + params.disk_turbulence * n);
+    const double n = cuda_simplex_noise_fbm(nx, ny, nz, params.disk_noise_octaves);
+    return fmax(0.0, base * (1.0 + params.disk_turbulence * n));
 }
 
 /// @brief Temperature at (r, z) from precomputed vertical profile LUT [K].
