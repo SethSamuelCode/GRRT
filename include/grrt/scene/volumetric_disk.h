@@ -107,6 +107,10 @@ public:
     double peak_temperature() const { return peak_temperature_; }
     double noise_scale() const { return noise_scale_; }
 
+    /// Atmosphere extent z_max(r) [geometric]. Interpolated from z_max_lut_.
+    double z_max_at(double r) const;
+    const std::vector<double>& z_max_lut() const { return z_max_lut_; }
+
 private:
     double mass_, spin_, r_outer_, peak_temperature_;
     double r_isco_, r_horizon_;
@@ -125,9 +129,10 @@ private:
     std::vector<double> T_eff_lut_;    ///< effective temperature T_eff(r) [K]
 
     // 2D vertical structure LUTs (n_r_ x n_z_)
-    int n_z_ = 64;
+    int n_z_ = 128;
     std::vector<double> rho_profile_lut_;  ///< rho(r,z)/rho_mid(r) [normalized]
     std::vector<double> T_profile_lut_;    ///< T(r,z) [K]
+    std::vector<double> z_max_lut_;       ///< atmosphere extent z_max(r) [geometric]
 
     // Opacity LUTs
     OpacityLUTs opacity_luts_;

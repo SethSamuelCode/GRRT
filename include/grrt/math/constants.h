@@ -23,6 +23,7 @@ inline constexpr double Ry         = 2.180e-11;        // erg, Rydberg energy (1
 // Derived
 inline constexpr double gamma_E    = 1.7811;           // exp(Euler-Mascheroni), for Gaunt factor
 inline constexpr double C_ff       = 3.69e8;           // CGS, free-free coefficient (R&L 5.18a)
+inline constexpr double a_rad      = 4.0 * sigma_SB / c_cgs;  // erg/(cm^3 K^4), radiation constant
 
 // Composition
 inline constexpr double X_hydrogen = 0.70;             // Hydrogen mass fraction

@@ -201,6 +201,10 @@ double VolumetricDisk::scale_height(double r) const {
     return interp_radial(H_lut_, r);
 }
 
+double VolumetricDisk::z_max_at(double r) const {
+    return interp_radial(z_max_lut_, r);
+}
+
 double VolumetricDisk::density(double r, double z, double phi) const {
     if (!inside_volume(r, z)) return 0.0;
     const double z_abs = std::abs(z);
