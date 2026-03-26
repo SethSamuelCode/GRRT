@@ -315,11 +315,13 @@ static __device__ __noinline__ AdaptiveResult rk4_adaptive_step(MetricType type,
         // Compute max error across spatial position (r, θ, φ) and all momentum
         // (mirrors CPU: skip t for position, use all 4 for momentum)
         double err = 0.0;
+        #pragma unroll
         for (int i = 1; i < 4; ++i) {  // position: skip t (index 0)
             double diff  = fabs(s_full.position[i] - s_half.position[i]);
             double scale = fabs(s_half.position[i]) + eps_scale;
             err = fmax(err, diff / scale);
         }
+        #pragma unroll
         for (int i = 0; i < 4; ++i) {  // all momentum components
             double diff  = fabs(s_full.momentum[i] - s_half.momentum[i]);
             double scale = fabs(s_half.momentum[i]) + eps_scale;

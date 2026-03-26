@@ -465,7 +465,12 @@ static __device__ __noinline__ void vol_raymarch(GeodesicState& state, Vec3& col
         // Hard exits
         if (r < params.disk_r_horizon) break;
         if (r > params.disk_r_outer) break;  // left the disk radially
-        if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
+        // Optical depth saturation: skip expensive radiative transfer body
+        // but keep stepping so the warp doesn't diverge on break.
+        if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) {
+            state = new_state;
+            continue;
+        }
 
         const double H = vol_scale_height(r, params);
         if (!vol_inside(r, z, params)) {
@@ -513,12 +518,17 @@ static __device__ __noinline__ void vol_raymarch(GeodesicState& state, Vec3& col
         // Proper distance along ray
         const double ds_proper = fabs(p_dot_u_emit) * fabs(ds);
 
+        // Electron scattering opacity (independent of frequency — hoist out of channel loop)
+        const double kes = vol_lookup_kappa_es(rho_cgs, T, params);
+
         // Per-channel radiative transfer
+        double kabs_green = 0.0;  // cache green channel kabs for step control
+        #pragma unroll
         for (int ch = 0; ch < 3; ch++) {
             const double nu_emit = fabs(g) * nu_obs[ch];
 
             const double kabs = vol_lookup_kappa_abs(nu_emit, rho_cgs, T, params);
-            const double kes = vol_lookup_kappa_es(rho_cgs, T, params);
+            if (ch == 1) kabs_green = kabs;  // save for step control below
             const double ktot = kabs + kes;
             const double epsilon = (ktot > 0.0) ? kabs / ktot : 1.0;
 
@@ -534,8 +544,8 @@ static __device__ __noinline__ void vol_raymarch(GeodesicState& state, Vec3& col
         }
 
         // Smooth adaptive step control: adjust ds so dtau ≈ DTAU_TARGET
-        const double alpha_tot = (vol_lookup_kappa_abs(fabs(g) * nu_obs[1], rho_cgs, T, params)
-                                + vol_lookup_kappa_es(rho_cgs, T, params)) * rho_cgs;
+        // Reuse green channel kabs and kes already computed above
+        const double alpha_tot = (kabs_green + kes) * rho_cgs;
         double ds_tau = (alpha_tot > 0.0)
                       ? DTAU_TARGET / alpha_tot
                       : ds * 2.0;
