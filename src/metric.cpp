@@ -29,4 +29,12 @@ Vec4 Metric::geodesic_force(const Vec4& x, const Vec4& velocity) const {
     return dp;
 }
 
+Metric::DerivResult Metric::compute_derivatives(const Vec4& x, const Vec4& p) const {
+    // Default: separate calls (no trig sharing)
+    Matrix4 g_inv = g_upper(x);
+    Vec4 dx = g_inv.contract(p);
+    Vec4 dp = geodesic_force(x, dx);
+    return {dx, dp};
+}
+
 } // namespace grrt

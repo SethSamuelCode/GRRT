@@ -5,16 +5,7 @@
 namespace grrt {
 
 GeodesicState RK4::derivatives(const Metric& metric, const GeodesicState& state) {
-    const Vec4& x = state.position;
-    const Vec4& p = state.momentum;
-
-    // dx^μ/dλ = g^μν p_ν  (raise momentum with inverse metric)
-    Matrix4 g_inv = metric.g_upper(x);
-    Vec4 dx = g_inv.contract(p);
-
-    // dp_μ/dλ = ½ ∂g_{αβ}/∂x^μ ẋ^α ẋ^β  (analytical when available)
-    Vec4 dp = metric.geodesic_force(x, dx);
-
+    auto [dx, dp] = metric.compute_derivatives(state.position, state.momentum);
     return {dx, dp};
 }
 

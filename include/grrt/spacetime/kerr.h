@@ -14,6 +14,7 @@ public:
     double horizon_radius() const override;
     double isco_radius() const override;
     Vec4 geodesic_force(const Vec4& x, const Vec4& velocity) const override;
+    DerivResult compute_derivatives(const Vec4& x, const Vec4& p) const override;
 
     double mass() const { return mass_; }
     double spin() const { return spin_; }

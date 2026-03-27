@@ -40,6 +40,13 @@ generate_export_header(grrt
     EXPORT_MACRO_NAME GRRT_EXPORT
 )
 
+# SIMD: enable AVX2 + FMA for vectorized math (C++ only, not CUDA)
+if(MSVC)
+    target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2 /fp:fast>)
+else()
+    target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma -ffast-math>)
+endif()
+
 # OpenMP (optional)
 find_package(OpenMP COMPONENTS CXX)
 if(OpenMP_CXX_FOUND)

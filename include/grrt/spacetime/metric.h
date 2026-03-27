@@ -25,6 +25,12 @@ public:
     // Geodesic force dp_μ/dλ = ½ ∂g_{αβ}/∂x^μ ẋ^α ẋ^β
     // Default: finite differences on g_lower. Override for analytical derivatives.
     virtual Vec4 geodesic_force(const Vec4& x, const Vec4& velocity) const;
+
+    // Fused derivative computation: computes both dx^μ/dλ and dp_μ/dλ in one call.
+    // Shares trig/metric intermediates between g_upper and geodesic_force.
+    // Default: calls g_upper + contract + geodesic_force separately.
+    struct DerivResult { Vec4 dx; Vec4 dp; };
+    virtual DerivResult compute_derivatives(const Vec4& x, const Vec4& p) const;
 };
 
 } // namespace grrt
