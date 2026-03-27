@@ -1,5 +1,6 @@
 #include "grrt/geodesic/geodesic_tracer.h"
 #include "grrt/geodesic/rk4.h"
+#include "grrt/spacetime/kerr.h"
 #include "grrt/scene/accretion_disk.h"
 #include "grrt/scene/volumetric_disk.h"
 #include "grrt/color/opacity.h"
@@ -12,7 +13,7 @@
 
 namespace grrt {
 
-GeodesicTracer::GeodesicTracer(const Metric& metric, const Integrator& integrator,
+GeodesicTracer::GeodesicTracer(const Kerr& metric, const RK4& integrator,
                                double observer_r, int max_steps, double r_escape,
                                double tolerance, const VolumetricDisk* vol_disk)
     : metric_(metric), integrator_(integrator),
@@ -25,9 +26,6 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
     const double r_horizon = metric_.horizon_radius();
     const double half_pi = std::numbers::pi / 2.0;
     Vec3 color;
-
-    // Try to use adaptive stepping if the integrator is RK4
-    const auto* rk4 = dynamic_cast<const RK4*>(&integrator_);
 
     // Initial step size — conservative, adapts quickly
     double dlambda = 0.01 * observer_r_;
@@ -47,13 +45,11 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
 
         prev = state;
 
-        // Adaptive step (or fixed fallback)
-        if (rk4) {
-            auto result = rk4->adaptive_step(metric_, state, dlambda, tolerance_);
+        // Adaptive RK4 step — concrete Kerr, no virtual dispatch
+        {
+            auto result = integrator_.adaptive_step_kerr(metric_, state, dlambda, tolerance_);
             state = result.state;
             dlambda = result.next_dlambda;
-        } else {
-            state = integrator_.step(metric_, state, 0.005 * r);
         }
 
         // Volumetric disk entry detection.  Three cases to catch:
@@ -167,7 +163,7 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
     bool been_inside = vol_disk_->inside_volume(r, z_start);
 
     while (step_count < MAX_STEPS) {
-        GeodesicState new_state = integrator_.step(metric_, state, ds);
+        GeodesicState new_state = integrator_.step_kerr(metric_, state, ds);
         step_count++;
 
 #ifndef NDEBUG

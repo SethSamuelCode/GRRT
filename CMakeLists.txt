@@ -40,11 +40,24 @@ generate_export_header(grrt
     EXPORT_MACRO_NAME GRRT_EXPORT
 )
 
-# SIMD: enable AVX2 + FMA for vectorized math (C++ only, not CUDA)
+# Aggressive optimisation (C++ only, not CUDA)
 if(MSVC)
-    target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2 /fp:fast>)
+    target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
+        /arch:AVX2 /fp:fast   # SIMD: AVX2 + FMA + relaxed float
+        /Oi                    # Replace calls with CPU intrinsics
+        /Ot                    # Favour speed over code size
+        /Ob3                   # Aggressive inlining (VS 2022+)
+        /GL                    # Whole-program optimisation (emit IR)
+    >)
+    target_link_options(grrt PRIVATE $<$<CONFIG:Release>:/LTCG>)   # Link-time code generation
 else()
-    target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma -ffast-math>)
+    target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
+        -mavx2 -mfma -ffast-math   # SIMD + relaxed float
+        -march=native              # Tune for this exact CPU
+        -flto                      # Link-time optimisation
+        -funroll-loops             # Unroll small loops
+    >)
+    target_link_options(grrt PRIVATE $<$<CONFIG:Release>:-flto>)
 endif()
 
 # OpenMP (optional)
@@ -70,6 +83,10 @@ endif()
 add_executable(grrt-cli cli/main.cpp)
 target_link_libraries(grrt-cli PRIVATE grrt)
 target_include_directories(grrt-cli PRIVATE third_party/)
+if(MSVC)
+    target_compile_options(grrt-cli PRIVATE /GL)
+    target_link_options(grrt-cli PRIVATE $<$<CONFIG:Release>:/LTCG>)
+endif()
 
 # Test executables
 add_executable(test-opacity tests/test_opacity.cpp)

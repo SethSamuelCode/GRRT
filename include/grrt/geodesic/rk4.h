@@ -2,28 +2,60 @@
 #define GRRT_RK4_H
 
 #include "grrt/geodesic/integrator.h"
+#include "grrt/spacetime/kerr.h"
 
 namespace grrt {
 
 class RK4 : public Integrator {
 public:
+    // Virtual override for generic Metric (backward compat, not on hot path)
     GeodesicState step(const Metric& metric,
                        const GeodesicState& state,
                        double dlambda) const override;
 
-    // Adaptive step with error control via step doubling.
-    // Handles retries internally — always returns an accepted state.
-    AdaptiveResult adaptive_step(const Metric& metric,
-                                 const GeodesicState& state,
-                                 double dlambda,
-                                 double tolerance) const;
+    // Concrete Kerr methods — force-inlined for the hot path
+#ifdef _MSC_VER
+    __forceinline
+#else
+    __attribute__((always_inline)) inline
+#endif
+    static GeodesicState derivatives_kerr(const Kerr& metric,
+                                          const GeodesicState& state) {
+        auto [dx, dp] = metric.compute_derivatives_inline(state.position, state.momentum);
+        return {dx, dp};
+    }
+
+#ifdef _MSC_VER
+    __forceinline
+#else
+    __attribute__((always_inline)) inline
+#endif
+    GeodesicState step_kerr(const Kerr& metric,
+                            const GeodesicState& state,
+                            double dl) const {
+        auto add = [](const GeodesicState& s, const GeodesicState& ds, double h) -> GeodesicState {
+            return {s.position + ds.position * h, s.momentum + ds.momentum * h};
+        };
+
+        GeodesicState k1 = derivatives_kerr(metric, state);
+        GeodesicState k2 = derivatives_kerr(metric, add(state, k1, dl * 0.5));
+        GeodesicState k3 = derivatives_kerr(metric, add(state, k2, dl * 0.5));
+        GeodesicState k4 = derivatives_kerr(metric, add(state, k3, dl));
+
+        Vec4 new_pos = state.position
+            + (k1.position + k2.position * 2.0 + k3.position * 2.0 + k4.position) * (dl / 6.0);
+        Vec4 new_mom = state.momentum
+            + (k1.momentum + k2.momentum * 2.0 + k3.momentum * 2.0 + k4.momentum) * (dl / 6.0);
+
+        return {new_pos, new_mom};
+    }
+
+    AdaptiveResult adaptive_step_kerr(const Kerr& metric,
+                                      const GeodesicState& state,
+                                      double dlambda,
+                                      double tolerance) const;
 
 private:
-    // Compute derivatives: (dx^μ/dλ, dp_μ/dλ)
-    static GeodesicState derivatives(const Metric& metric,
-                                     const GeodesicState& state);
-
-    // Finite-difference epsilon for metric derivatives
     static constexpr double fd_epsilon = 1e-6;
 };
 

@@ -8,6 +8,8 @@ namespace grrt {
 
 // Forward declarations
 class AccretionDisk;
+class Kerr;
+class RK4;
 class SpectrumLUT;
 class VolumetricDisk;
 
@@ -26,7 +28,7 @@ struct TraceResult {
 
 class GeodesicTracer {
 public:
-    GeodesicTracer(const Metric& metric, const Integrator& integrator,
+    GeodesicTracer(const Kerr& metric, const RK4& integrator,
                    double observer_r, int max_steps = 10000, double r_escape = 1000.0,
                    double tolerance = 1e-8,
                    const VolumetricDisk* vol_disk = nullptr);
@@ -36,8 +38,8 @@ public:
                       const SpectrumLUT* spectrum) const;
 
 private:
-    const Metric& metric_;
-    const Integrator& integrator_;
+    const Kerr& metric_;
+    const RK4& integrator_;
     double observer_r_;
     int max_steps_;
     double r_escape_;
