@@ -15,7 +15,8 @@ class Renderer {
 public:
     Renderer(const Camera& camera, const GeodesicTracer& tracer,
              const AccretionDisk* disk, const CelestialSphere* sphere,
-             const SpectrumLUT* spectrum, const ToneMapper& tonemapper);
+             const SpectrumLUT* spectrum, const ToneMapper& tonemapper,
+             int samples_per_pixel = 1);
 
     void render(float* framebuffer, int width, int height) const;
 
@@ -26,6 +27,7 @@ private:
     const CelestialSphere* sphere_;
     const SpectrumLUT* spectrum_;
     const ToneMapper& tonemapper_;
+    int spp_;  ///< Samples per pixel (1 = no AA)
 };
 
 } // namespace grrt

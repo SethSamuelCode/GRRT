@@ -63,10 +63,13 @@ void Camera::build_tetrad() {
 }
 
 GeodesicState Camera::ray_for_pixel(int i, int j) const {
-    // Screen angles
-    // Sample at pixel center (i+0.5, j+0.5) to avoid exact α=0 meridional plane
-    double alpha = (i + 0.5 - width_ / 2.0) * fov_ / width_;
-    double beta = (j + 0.5 - height_ / 2.0) * fov_ / width_;
+    return ray_for_pixel(i + 0.5, j + 0.5);
+}
+
+GeodesicState Camera::ray_for_pixel(double x, double y) const {
+    // Screen angles from fractional pixel coordinate
+    double alpha = (x - width_ / 2.0) * fov_ / width_;
+    double beta = (y - height_ / 2.0) * fov_ / width_;
 
     // Local 3-direction in tetrad frame
     double ca = std::cos(beta) * std::sin(alpha);

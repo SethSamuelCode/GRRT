@@ -125,10 +125,11 @@ GRRTContext* grrt_create(const GRRTParams* params) {
     }
 
     // Renderer
+    int spp = params->samples_per_pixel > 0 ? params->samples_per_pixel : 1;
     ctx->renderer = std::make_unique<grrt::Renderer>(
         *ctx->camera, *ctx->tracer,
         ctx->disk.get(), ctx->sphere.get(),
-        ctx->spectrum.get(), *ctx->tonemapper);
+        ctx->spectrum.get(), *ctx->tonemapper, spp);
 
     const char* metric_name = params->metric_type == GRRT_METRIC_KERR ? "kerr" : "schwarzschild";
     const char* backend_name = "cpu";

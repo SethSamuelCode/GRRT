@@ -12,8 +12,12 @@ public:
     Camera(const Metric& metric, double r_obs, double theta_obs, double phi_obs,
            double fov, int width, int height);
 
-    // Generate initial geodesic state for pixel (i, j)
+    // Generate initial geodesic state for pixel (i, j) at pixel center
     GeodesicState ray_for_pixel(int i, int j) const;
+
+    // Generate initial geodesic state for fractional pixel coordinate (x, y)
+    // where (0.5, 0.5) is the center of the top-left pixel
+    GeodesicState ray_for_pixel(double x, double y) const;
 
 private:
     const Metric& metric_;

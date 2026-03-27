@@ -34,6 +34,7 @@ static void print_usage() {
     std::println("  --background TYPE     black | stars (default: stars)");
     std::println("  --max-steps N         Max integration steps (default: 10000)");
     std::println("  --tolerance T         Integrator tolerance (default: 1e-8)");
+    std::println("  --samples N           Samples per pixel for anti-aliasing (default: 1)");
     std::println("  --threads N           CPU threads, 0=auto (default: 0)");
     std::println("  --backend TYPE        cpu | cuda (default: cpu)");
     std::println("  --validate            Render on both backends, compare results");
@@ -72,6 +73,7 @@ int main(int argc, char* argv[]) {
     params.disk_noise_octaves = 2;
     params.mass_solar = 0.0;
     params.eddington_fraction = 0.0;
+    params.samples_per_pixel = 1;
 
     std::string output_name = "output";
     std::string backend_str = "cpu";
@@ -143,6 +145,8 @@ int main(int argc, char* argv[]) {
             if (auto v = next()) params.integrator_max_steps = std::atoi(v);
         } else if (arg("--tolerance")) {
             if (auto v = next()) params.integrator_tolerance = std::atof(v);
+        } else if (arg("--samples")) {
+            if (auto v = next()) params.samples_per_pixel = std::atoi(v);
         } else if (arg("--threads")) {
             if (auto v = next()) params.thread_count = std::atoi(v);
         } else if (arg("--backend")) {
