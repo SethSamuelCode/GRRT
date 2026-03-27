@@ -11,7 +11,11 @@ extern "C" {
 GRRT_EXPORT GRRTContext* grrt_create(const GRRTParams* params);
 GRRT_EXPORT void grrt_destroy(GRRTContext* ctx);
 GRRT_EXPORT void grrt_update_params(GRRTContext* ctx, const GRRTParams* params);
+typedef void (*grrt_progress_fn)(float fraction, void* user_data);
+
 GRRT_EXPORT int grrt_render(GRRTContext* ctx, float* framebuffer);
+GRRT_EXPORT int grrt_render_cb(GRRTContext* ctx, float* framebuffer,
+                                grrt_progress_fn progress, void* user_data);
 GRRT_EXPORT int grrt_render_tile(GRRTContext* ctx, float* buffer,
                                   int x, int y, int tile_width, int tile_height);
 GRRT_EXPORT void grrt_cancel(GRRTContext* ctx);

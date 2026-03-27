@@ -8,6 +8,8 @@
 #include <string>
 #include <cstring>
 #include <numbers>
+#include <chrono>
+#include <cstdio>
 
 static void print_usage() {
     std::println("Usage: grrt-cli [options]");
@@ -251,9 +253,46 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Render to linear HDR
+    // Flush stdout so banner + create message appear before the progress bar
+    std::fflush(stdout);
+
+    // Render to linear HDR (with progress bar)
     std::vector<float> framebuffer(params.width * params.height * 4);
-    int result = grrt_render(ctx, framebuffer.data());
+
+    struct ProgressState {
+        std::chrono::steady_clock::time_point start;
+        float last_printed;
+    };
+    ProgressState pstate{std::chrono::steady_clock::now(), -1.0f};
+
+    auto progress_fn = [](float fraction, void* ud) {
+        constexpr int BAR_WIDTH = 40;
+        auto* ps = static_cast<ProgressState*>(ud);
+        // Throttle: only update every ~2% to avoid flooding stderr
+        if (fraction - ps->last_printed < 0.02f && fraction < 1.0f) return;
+        ps->last_printed = fraction;
+
+        int filled = static_cast<int>(fraction * BAR_WIDTH);
+        auto elapsed = std::chrono::steady_clock::now() - ps->start;
+        double secs = std::chrono::duration<double>(elapsed).count();
+
+        std::fprintf(stderr, "\r  [");
+        for (int i = 0; i < BAR_WIDTH; ++i)
+            std::fputc(i < filled ? '#' : '.', stderr);
+        std::fprintf(stderr, "] %3.0f%%  %.1fs", fraction * 100.0, secs);
+        std::fflush(stderr);
+    };
+
+    int result = grrt_render_cb(ctx, framebuffer.data(),
+                                progress_fn, &pstate);
+    // Final line
+    {
+        auto elapsed = std::chrono::steady_clock::now() - pstate.start;
+        double secs = std::chrono::duration<double>(elapsed).count();
+        std::fprintf(stderr, "\r  [");
+        for (int i = 0; i < 40; ++i) std::fputc('#', stderr);
+        std::fprintf(stderr, "] 100%%  %.1fs\n", secs);
+    }
 
     if (result == 0) {
         // 1. Raw linear HDR (for Blender / programmatic use)

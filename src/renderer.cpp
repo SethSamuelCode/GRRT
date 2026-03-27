@@ -24,13 +24,16 @@ Renderer::Renderer(const Camera& camera, const GeodesicTracer& tracer,
       spectrum_(spectrum), tonemapper_(tonemapper),
       spp_(samples_per_pixel < 1 ? 1 : samples_per_pixel) {}
 
-void Renderer::render(float* framebuffer, int width, int height) const {
+void Renderer::render(float* framebuffer, int width, int height,
+                      ProgressCallback progress_cb) const {
     // Stratified jittered sampling: divide pixel into sqrt(spp) x sqrt(spp) grid,
     // jitter within each cell. For non-square spp, use the closest square.
     const int grid = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(spp_))));
     const int actual_spp = grid * grid;
     const double inv_spp = 1.0 / actual_spp;
     const double cell = 1.0 / grid;
+
+    int rows_done = 0;
 
     #pragma omp parallel for schedule(dynamic)
     for (int j = 0; j < height; ++j) {
@@ -62,7 +65,17 @@ void Renderer::render(float* framebuffer, int width, int height) const {
             framebuffer[idx + 2] = static_cast<float>(accum[2] * inv_spp);
             framebuffer[idx + 3] = 1.0f;
         }
+
+        if (progress_cb) {
+            int done;
+            #pragma omp critical
+            { done = ++rows_done; }
+
+            progress_cb(static_cast<float>(done) / static_cast<float>(height));
+        }
     }
+
+    if (progress_cb) progress_cb(1.0f);
 }
 
 } // namespace grrt

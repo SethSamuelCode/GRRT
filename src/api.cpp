@@ -171,6 +171,11 @@ void grrt_update_params(GRRTContext* ctx, const GRRTParams* params) {
 }
 
 int grrt_render(GRRTContext* ctx, float* framebuffer) {
+    return grrt_render_cb(ctx, framebuffer, nullptr, nullptr);
+}
+
+int grrt_render_cb(GRRTContext* ctx, float* framebuffer,
+                   grrt_progress_fn progress, void* user_data) {
 #ifdef GRRT_HAS_CUDA
     if (ctx->cuda_ctx) {
         int result = cuda_render(ctx->cuda_ctx, &ctx->params, framebuffer);
@@ -182,7 +187,11 @@ int grrt_render(GRRTContext* ctx, float* framebuffer) {
         return 0;
     }
 #endif
-    ctx->renderer->render(framebuffer, ctx->params.width, ctx->params.height);
+    grrt::ProgressCallback cb;
+    if (progress) {
+        cb = [progress, user_data](float f) { progress(f, user_data); };
+    }
+    ctx->renderer->render(framebuffer, ctx->params.width, ctx->params.height, cb);
     std::println("grrt: rendered {}x{} frame (cpu)", ctx->params.width, ctx->params.height);
     return 0;
 }

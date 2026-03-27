@@ -4,12 +4,16 @@
 #include "grrt/camera/camera.h"
 #include "grrt/geodesic/geodesic_tracer.h"
 #include "grrt/render/tonemapper.h"
+#include <functional>
 
 namespace grrt {
 
 class AccretionDisk;
 class CelestialSphere;
 class SpectrumLUT;
+
+/// Progress callback: receives fraction in [0, 1].
+using ProgressCallback = std::function<void(float)>;
 
 class Renderer {
 public:
@@ -18,7 +22,8 @@ public:
              const SpectrumLUT* spectrum, const ToneMapper& tonemapper,
              int samples_per_pixel = 1);
 
-    void render(float* framebuffer, int width, int height) const;
+    void render(float* framebuffer, int width, int height,
+                ProgressCallback progress_cb = nullptr) const;
 
 private:
     const Camera& camera_;
@@ -27,7 +32,7 @@ private:
     const CelestialSphere* sphere_;
     const SpectrumLUT* spectrum_;
     const ToneMapper& tonemapper_;
-    int spp_;  ///< Samples per pixel (1 = no AA)
+    int spp_;
 };
 
 } // namespace grrt
