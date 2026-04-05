@@ -53,12 +53,22 @@ if(MSVC)
     target_link_options(grrt PRIVATE $<$<CONFIG:Release>:/LTCG>)   # Link-time code generation
 else()
     target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
-        -mavx2 -mfma -ffast-math   # SIMD + relaxed float
-        -march=native              # Tune for this exact CPU
-        -flto                      # Link-time optimisation
-        -funroll-loops             # Unroll small loops
+        -mavx2 -mfma -ffast-math        # SIMD + relaxed float
+        -march=native                    # Tune for this exact CPU
+        -flto                            # Link-time optimisation
+        -funroll-loops                   # Unroll small loops
+        -fno-semantic-interposition      # Allow inlining/devirt across DSO TUs
+        -fno-plt                         # Eliminate PLT trampolines for external calls
+        -falign-functions=32             # Align hot functions to 32-byte boundaries
+        -falign-loops=32                 # Align hot loops to 32-byte boundaries
+        -fprefetch-loop-arrays           # Software prefetch for array traversals
+        -fdata-sections                  # Dead-code stripping: one section per datum
+        -ffunction-sections              # Dead-code stripping: one section per function
     >)
-    target_link_options(grrt PRIVATE $<$<CONFIG:Release>:-flto>)
+    target_link_options(grrt PRIVATE
+        $<$<CONFIG:Release>:-flto>
+        -Wl,--gc-sections                # Strip unreferenced sections
+    )
 endif()
 
 # OpenMP (optional)
@@ -87,6 +97,24 @@ target_include_directories(grrt-cli PRIVATE third_party/)
 if(MSVC)
     target_compile_options(grrt-cli PRIVATE /GL)
     target_link_options(grrt-cli PRIVATE $<$<CONFIG:Release>:/LTCG>)
+else()
+    target_compile_options(grrt-cli PRIVATE
+        -mavx2 -mfma -ffast-math
+        -march=native
+        -flto
+        -funroll-loops
+        -fno-semantic-interposition
+        -fno-plt
+        -falign-functions=32
+        -falign-loops=32
+        -fprefetch-loop-arrays
+        -fdata-sections
+        -ffunction-sections
+    )
+    target_link_options(grrt-cli PRIVATE
+        $<$<CONFIG:Release>:-flto>
+        -Wl,--gc-sections
+    )
 endif()
 
 # Test executables
