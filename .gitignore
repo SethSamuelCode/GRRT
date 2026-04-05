@@ -2,3 +2,6 @@ build/
 **.hdr
 **.png
 **.xmp
+.claude/
+.serena/
+.superpowers/
