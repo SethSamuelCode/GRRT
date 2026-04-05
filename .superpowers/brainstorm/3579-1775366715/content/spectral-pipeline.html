@@ -1,0 +1,153 @@
+<h2>How Spectral Data is Derived & Stored</h2>
+<p class="subtitle">Follow a single ray from camera pixel through the volumetric disk to the output FITS cube</p>
+
+<div class="section">
+  <h3>Step 1: Ray Tracing (same as current)</h3>
+  <div class="mockup">
+    <div class="mockup-header">Geodesic Integration — unchanged</div>
+    <div class="mockup-body" style="padding: 24px; font-family: monospace; font-size: 14px;">
+      <div style="display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">
+        <div style="background: #1a1a2e; border: 2px solid #6c63ff; border-radius: 12px; padding: 16px; text-align: center; min-width: 120px;">
+          <div style="font-size: 24px; margin-bottom: 4px;">📷</div>
+          <div style="color: #a0a0ff;">Camera Pixel</div>
+          <div style="color: #666; font-size: 12px;">(i, j)</div>
+        </div>
+        <div style="color: #6c63ff; font-size: 24px;">→</div>
+        <div style="background: #1a1a2e; border: 2px solid #6c63ff; border-radius: 12px; padding: 16px; text-align: center; min-width: 140px;">
+          <div style="font-size: 24px; margin-bottom: 4px;">🌀</div>
+          <div style="color: #a0a0ff;">Geodesic Path</div>
+          <div style="color: #666; font-size: 12px;">RK4 through Kerr spacetime</div>
+        </div>
+        <div style="color: #6c63ff; font-size: 24px;">→</div>
+        <div style="background: #1a1a2e; border: 2px solid #ff6b6b; border-radius: 12px; padding: 16px; text-align: center; min-width: 160px;">
+          <div style="font-size: 24px; margin-bottom: 4px;">💿</div>
+          <div style="color: #ffa0a0;">Enters Volumetric Disk</div>
+          <div style="color: #666; font-size: 12px;">Begin ray-march</div>
+        </div>
+      </div>
+      <div style="color: #555; margin-top: 12px; text-align: center;">⬆ This part is identical to what you have now — no extra cost</div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Step 2: Ray-March Through Disk (the change)</h3>
+  <div class="mockup">
+    <div class="mockup-header">At each ray-march step — current vs spectral</div>
+    <div class="mockup-body" style="padding: 24px;">
+      <div class="split" style="display: flex; gap: 24px;">
+        <div style="flex: 1; background: #1a1a1a; border-radius: 8px; padding: 16px; border: 1px solid #333;">
+          <div style="color: #ff6b6b; font-weight: bold; margin-bottom: 12px; text-align: center;">CURRENT (RGB)</div>
+          <div style="font-family: monospace; font-size: 13px; line-height: 2;">
+            <div style="color: #aaa;">At step <span style="color: #ff6b6b;">s</span>:</div>
+            <div style="color: #ccc;">1. Get local T, ρ, redshift <span style="color: #ff6b6b;">g</span></div>
+            <div style="color: #ccc;">2. Compute blackbody RGB</div>
+            <div style="color: #888; padding-left: 16px;">→ integrate Planck × CIE over 380-780nm</div>
+            <div style="color: #ccc;">3. Apply redshift to RGB</div>
+            <div style="color: #ccc;">4. Accumulate into <span style="color: #ff6b6b;">3 channels</span></div>
+            <div style="color: #888; padding-left: 16px;">R += emission_R × (1 - opacity)</div>
+            <div style="color: #888; padding-left: 16px;">G += emission_G × (1 - opacity)</div>
+            <div style="color: #888; padding-left: 16px;">B += emission_B × (1 - opacity)</div>
+          </div>
+        </div>
+        <div style="flex: 1; background: #1a1a1a; border-radius: 8px; padding: 16px; border: 2px solid #4ecdc4;">
+          <div style="color: #4ecdc4; font-weight: bold; margin-bottom: 12px; text-align: center;">NEW (Spectral)</div>
+          <div style="font-family: monospace; font-size: 13px; line-height: 2;">
+            <div style="color: #aaa;">At step <span style="color: #4ecdc4;">s</span>:</div>
+            <div style="color: #ccc;">1. Get local T, ρ, redshift <span style="color: #4ecdc4;">g</span></div>
+            <div style="color: #ccc;">2. For each frequency bin <span style="color: #4ecdc4;">ν<sub>k</sub></span>:</div>
+            <div style="color: #888; padding-left: 16px;">→ B(ν<sub>k</sub>, T) = 2hν³/c² × 1/(e<sup>hν/kT</sup> - 1)</div>
+            <div style="color: #ccc;">3. Redshift each bin: <span style="color: #4ecdc4;">ν<sub>obs</sub> = g × ν<sub>emit</sub></span></div>
+            <div style="color: #ccc;">4. Accumulate into <span style="color: #4ecdc4;">N channels</span></div>
+            <div style="color: #888; padding-left: 16px;">I[k] += emission[k] × (1 - opacity[k])</div>
+            <div style="color: #888; padding-left: 16px; color: #4ecdc4;">for k = 0, 1, 2, ... N-1</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Step 3: Output — The Spectral Data Cube</h3>
+  <div class="mockup">
+    <div class="mockup-header">FITS file structure: 3D array</div>
+    <div class="mockup-body" style="padding: 24px; text-align: center;">
+      <!-- 3D cube visualization -->
+      <svg width="500" height="320" viewBox="0 0 500 320" style="margin: 0 auto; display: block;">
+        <!-- Back face (frequency axis) -->
+        <polygon points="180,20 460,20 460,200 180,200" fill="#1a1a2e" stroke="#4ecdc4" stroke-width="1.5" opacity="0.5"/>
+        <!-- Top face -->
+        <polygon points="60,60 180,20 460,20 340,60" fill="#1a1a2e" stroke="#6c63ff" stroke-width="1.5" opacity="0.4"/>
+        <!-- Front face (image plane) -->
+        <polygon points="60,60 340,60 340,240 60,240" fill="#1a1a2e" stroke="#ff6b6b" stroke-width="2" opacity="0.7"/>
+
+        <!-- Frequency slices -->
+        <line x1="120" y1="40" x2="120" y2="220" stroke="#4ecdc4" stroke-width="0.5" opacity="0.4"/>
+        <line x1="180" y1="27" x2="180" y2="207" stroke="#4ecdc4" stroke-width="0.5" opacity="0.4"/>
+        <line x1="240" y1="27" x2="240" y2="207" stroke="#4ecdc4" stroke-width="0.5" opacity="0.4"/>
+
+        <!-- Pixel grid on front face -->
+        <line x1="60" y1="105" x2="340" y2="105" stroke="#ff6b6b" stroke-width="0.3" opacity="0.5"/>
+        <line x1="60" y1="150" x2="340" y2="150" stroke="#ff6b6b" stroke-width="0.3" opacity="0.5"/>
+        <line x1="60" y1="195" x2="340" y2="195" stroke="#ff6b6b" stroke-width="0.3" opacity="0.5"/>
+        <line x1="130" y1="60" x2="130" y2="240" stroke="#ff6b6b" stroke-width="0.3" opacity="0.5"/>
+        <line x1="200" y1="60" x2="200" y2="240" stroke="#ff6b6b" stroke-width="0.3" opacity="0.5"/>
+        <line x1="270" y1="60" x2="270" y2="240" stroke="#ff6b6b" stroke-width="0.3" opacity="0.5"/>
+
+        <!-- Highlighted single pixel spectrum -->
+        <rect x="130" y="105" width="70" height="45" fill="#ff6b6b" opacity="0.3" stroke="#ff6b6b" stroke-width="2"/>
+        <line x1="165" y1="127" x2="285" y2="87" stroke="#ffcc00" stroke-width="2" stroke-dasharray="5,3"/>
+
+        <!-- Spectrum at that pixel -->
+        <rect x="300" y="70" width="160" height="80" fill="#0a0a15" stroke="#ffcc00" stroke-width="1.5" rx="4"/>
+        <text x="380" y="85" text-anchor="middle" fill="#ffcc00" font-size="10">Spectrum at pixel (i,j)</text>
+        <polyline points="310,140 320,138 330,130 340,110 350,95 360,100 370,115 380,125 390,130 400,133 410,136 420,138 430,139 440,140 450,140" fill="none" stroke="#4ecdc4" stroke-width="2"/>
+        <text x="310" y="135" fill="#666" font-size="8">radio</text>
+        <text x="350" y="90" fill="#666" font-size="8">X-ray</text>
+        <text x="440" y="135" fill="#666" font-size="8">γ</text>
+
+        <!-- Axis labels -->
+        <text x="200" y="260" text-anchor="middle" fill="#ff6b6b" font-size="14" font-weight="bold">Width (pixels)</text>
+        <text x="30" y="155" text-anchor="middle" fill="#ff6b6b" font-size="14" font-weight="bold" transform="rotate(-90, 30, 155)">Height</text>
+        <text x="420" y="17" text-anchor="middle" fill="#4ecdc4" font-size="14" font-weight="bold">Frequency bins (ν)</text>
+
+        <!-- Dimension annotations -->
+        <text x="200" y="280" text-anchor="middle" fill="#888" font-size="12">e.g. 1024 × 1024 × 100 bins = ~800 MB (float64)</text>
+      </svg>
+
+      <div style="display: flex; justify-content: center; gap: 30px; margin-top: 16px; font-size: 13px;">
+        <div><span style="color: #ff6b6b;">■</span> Image plane (x, y pixels)</div>
+        <div><span style="color: #4ecdc4;">■</span> Frequency axis (user-defined bins)</div>
+        <div><span style="color: #ffcc00;">■</span> Each pixel has a full spectrum</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Step 4: Post-Processing (external tools)</h3>
+  <div class="mockup">
+    <div class="mockup-header">What you do with the FITS cube</div>
+    <div class="mockup-body" style="padding: 24px;">
+      <div style="display: flex; gap: 16px; flex-wrap: wrap; justify-content: center;">
+        <div style="background: #1a1a1a; border-radius: 8px; padding: 16px; flex: 1; min-width: 180px; border-left: 3px solid #6c63ff;">
+          <div style="color: #6c63ff; font-weight: bold; margin-bottom: 8px;">DS9 / astropy</div>
+          <div style="color: #aaa; font-size: 13px;">Pick a slice → monochrome image at that frequency (like Option C)</div>
+        </div>
+        <div style="background: #1a1a1a; border-radius: 8px; padding: 16px; flex: 1; min-width: 180px; border-left: 3px solid #ff6b6b;">
+          <div style="color: #ff6b6b; font-weight: bold; margin-bottom: 8px;">False Color</div>
+          <div style="color: #aaa; font-size: 13px;">Map 3 bands → RGB channels (like NASA composites, Option B)</div>
+        </div>
+        <div style="background: #1a1a1a; border-radius: 8px; padding: 16px; flex: 1; min-width: 180px; border-left: 3px solid #4ecdc4;">
+          <div style="color: #4ecdc4; font-weight: bold; margin-bottom: 8px;">Blender Linear</div>
+          <div style="color: #aaa; font-size: 13px;">Integrate spectrum × CIE → linear RGB → EXR for Blender</div>
+        </div>
+        <div style="background: #1a1a1a; border-radius: 8px; padding: 16px; flex: 1; min-width: 180px; border-left: 3px solid #ffcc00;">
+          <div style="color: #ffcc00; font-weight: bold; margin-bottom: 8px;">PNG</div>
+          <div style="color: #aaa; font-size: 13px;">Tone-map any of the above → sRGB PNG</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
