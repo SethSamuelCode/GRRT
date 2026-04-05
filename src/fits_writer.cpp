@@ -107,14 +107,28 @@ void write_double_be(std::ofstream& out, double value) {
     out.write(reinterpret_cast<const char*>(bytes), 8);
 }
 
-/// Return true if the frequency bins have uniform spacing (within 0.01 % tolerance).
-bool is_uniform(const std::vector<double>& bins) {
+/// Return true if the frequency bins have uniform linear spacing (within 0.01%).
+bool is_uniform_linear(const std::vector<double>& bins) {
     if (bins.size() < 2) return true;
     const double step = bins[1] - bins[0];
     if (step == 0.0) return false;
     for (std::size_t i = 2; i < bins.size(); ++i) {
         const double delta = (bins[i] - bins[i - 1]) - step;
         if (std::abs(delta / step) > 1e-4) return false;
+    }
+    return true;
+}
+
+/// Return true if the frequency bins have uniform log10 spacing (within 0.01%).
+bool is_uniform_log(const std::vector<double>& bins) {
+    if (bins.size() < 2) return true;
+    if (bins[0] <= 0.0 || bins[1] <= 0.0) return false;
+    const double log_step = std::log10(bins[1]) - std::log10(bins[0]);
+    if (log_step == 0.0) return false;
+    for (std::size_t i = 2; i < bins.size(); ++i) {
+        if (bins[i] <= 0.0) return false;
+        const double delta = (std::log10(bins[i]) - std::log10(bins[i - 1])) - log_step;
+        if (std::abs(delta / log_step) > 1e-4) return false;
     }
     return true;
 }
@@ -158,23 +172,50 @@ void write_fits(const std::string&         path,
                                      "specific intensity"));
 
     // WCS for frequency axis (NAXIS3)
-    cards.push_back(fits_card_string("CTYPE3", "FREQ", "frequency axis"));
-    cards.push_back(fits_card_string("CUNIT3", "Hz",   "frequency units"));
-    cards.push_back(fits_card_double("CRPIX3", 1.0,
-                                     "reference pixel (1-based)"));
-
     if (!frequency_bins_hz.empty()) {
-        cards.push_back(fits_card_double("CRVAL3", frequency_bins_hz.front(),
-                                         "frequency at reference pixel (Hz)"));
-        if (is_uniform(frequency_bins_hz) && frequency_bins_hz.size() >= 2) {
+        if (is_uniform_linear(frequency_bins_hz) && frequency_bins_hz.size() >= 2) {
+            // Linear frequency axis
+            cards.push_back(fits_card_string("CTYPE3", "FREQ", "frequency"));
+            cards.push_back(fits_card_string("CUNIT3", "Hz",   "frequency unit"));
+            cards.push_back(fits_card_double("CRPIX3", 1.0, "reference pixel"));
+            cards.push_back(fits_card_double("CRVAL3", frequency_bins_hz.front(),
+                                             "frequency at ref pixel (Hz)"));
             const double step = frequency_bins_hz[1] - frequency_bins_hz[0];
             cards.push_back(fits_card_double("CDELT3", step,
-                                             "frequency step per pixel (Hz)"));
-        } else {
-            // Non-uniform bins: write individual FREQnnn keywords.
-            // FITS keyword names are max 8 chars; "FREQ" + up to 4 digits = 8.
+                                             "frequency step (Hz)"));
+        } else if (is_uniform_log(frequency_bins_hz) && frequency_bins_hz.size() >= 2) {
+            // Log-spaced: axis represents log10(freq in Hz).
+            // DS9 will label slices with the log10 values; the actual Hz
+            // values are also stored as FREQnnnn keywords for astropy.
+            const double log_min = std::log10(frequency_bins_hz.front());
+            const double log_step = std::log10(frequency_bins_hz[1])
+                                  - std::log10(frequency_bins_hz[0]);
+            cards.push_back(fits_card_string("CTYPE3", "FREQ-LOG",
+                                             "log10(frequency/Hz)"));
+            cards.push_back(fits_card_string("CUNIT3", "log(Hz)",
+                                             "log10 of frequency in Hz"));
+            cards.push_back(fits_card_double("CRPIX3", 1.0, "reference pixel"));
+            cards.push_back(fits_card_double("CRVAL3", log_min,
+                                             "log10(freq) at ref pixel"));
+            cards.push_back(fits_card_double("CDELT3", log_step,
+                                             "log10(freq) step per pixel"));
+            // Also store actual Hz values for programmatic access
             for (int k = 0; k < num_bins && k < static_cast<int>(frequency_bins_hz.size()); ++k) {
-                std::string kw = std::format("FREQ{:04d}", k + 1); // 1-based
+                std::string kw = std::format("FREQ{:04d}", k + 1);
+                cards.push_back(fits_card_double(kw, frequency_bins_hz[k],
+                                                 std::format("freq bin {} (Hz)", k + 1)));
+            }
+        } else {
+            // Non-uniform, non-log: use slice index as axis, store Hz as keywords
+            cards.push_back(fits_card_string("CTYPE3", "FREQ-TAB",
+                                             "frequency (see FREQnnnn keys)"));
+            cards.push_back(fits_card_string("CUNIT3", "Hz",
+                                             "frequency unit"));
+            cards.push_back(fits_card_double("CRPIX3", 1.0, "reference pixel"));
+            cards.push_back(fits_card_double("CRVAL3", 1.0, "slice index"));
+            cards.push_back(fits_card_double("CDELT3", 1.0, "slice index step"));
+            for (int k = 0; k < num_bins && k < static_cast<int>(frequency_bins_hz.size()); ++k) {
+                std::string kw = std::format("FREQ{:04d}", k + 1);
                 cards.push_back(fits_card_double(kw, frequency_bins_hz[k],
                                                  std::format("freq bin {} (Hz)", k + 1)));
             }

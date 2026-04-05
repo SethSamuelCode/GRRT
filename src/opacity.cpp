@@ -235,13 +235,16 @@ static double dplanck_nu_dT(double nu, double T) {
 // --- LUT construction ---
 
 OpacityLUTs build_opacity_luts(double rho_min, double rho_max,
-                                double T_min, double T_max) {
+                                double T_min, double T_max,
+                                double nu_min, double nu_max) {
     OpacityLUTs luts;
-    luts.n_nu = 20;
+    // Scale nu bins: ~10 per decade of frequency, minimum 20
+    double nu_decades = std::log10(nu_max) - std::log10(nu_min);
+    luts.n_nu = std::max(20, static_cast<int>(nu_decades * 10));
     luts.n_rho = 100;
     luts.n_T = 100;
-    luts.log_nu_min = std::log10(1e14);
-    luts.log_nu_max = std::log10(1e16);
+    luts.log_nu_min = std::log10(nu_min);
+    luts.log_nu_max = std::log10(nu_max);
     luts.log_rho_min = std::log10(rho_min);
     luts.log_rho_max = std::log10(rho_max);
     luts.log_T_min = std::log10(T_min);

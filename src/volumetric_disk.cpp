@@ -56,7 +56,8 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
 
     std::printf("[VolumetricDisk] Building opacity LUTs...\n");
     // Build opacity LUTs BEFORE density normalization (Section 0 of spec)
-    opacity_luts_ = build_opacity_luts(1e-18, 1e-6, 3000.0, 1e8);
+    opacity_luts_ = build_opacity_luts(1e-18, 1e-6, 3000.0, 1e8,
+                                       params_.opacity_nu_min, params_.opacity_nu_max);
 
     std::printf("[VolumetricDisk] Computing radial structure...\n");
     compute_radial_structure();

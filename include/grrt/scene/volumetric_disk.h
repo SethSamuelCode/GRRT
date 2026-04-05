@@ -17,6 +17,8 @@ struct VolumetricParams {
     double tau_mid    = 100.0;  ///< Midplane optical depth normalization at peak-flux radius
     double noise_scale  = 0.0;  ///< Noise feature size (0 = auto = 2*H at peak)
     int noise_octaves   = 2;    ///< fBm octave count
+    double opacity_nu_min = 1e14; ///< Opacity LUT frequency lower bound (Hz)
+    double opacity_nu_max = 1e16; ///< Opacity LUT frequency upper bound (Hz)
 };
 
 /// Volumetric accretion disk with Shakura-Sunyaev vertical structure,

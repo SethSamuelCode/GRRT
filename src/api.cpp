@@ -12,6 +12,7 @@
 #ifdef GRRT_HAS_CUDA
 #include "cuda_backend.h"
 #endif
+#include <algorithm>
 #include <memory>
 #include <print>
 #include <string>
@@ -105,6 +106,18 @@ GRRTContext* grrt_create(const GRRTParams* params) {
             vp.seed = static_cast<uint32_t>(params->disk_seed);
             vp.noise_scale = params->disk_noise_scale;
             vp.noise_octaves = params->disk_noise_octaves;
+            // Widen opacity LUT to cover user's spectral frequency range
+            if (params->num_frequency_bins > 0 && params->frequency_bins_hz) {
+                double nu_lo = params->frequency_bins_hz[0];
+                double nu_hi = params->frequency_bins_hz[0];
+                for (int i = 1; i < params->num_frequency_bins; ++i) {
+                    nu_lo = std::min(nu_lo, params->frequency_bins_hz[i]);
+                    nu_hi = std::max(nu_hi, params->frequency_bins_hz[i]);
+                }
+                // Add a margin for redshift (emitted freq = g * observed freq, g can be up to ~2)
+                vp.opacity_nu_min = nu_lo * 0.1;
+                vp.opacity_nu_max = nu_hi * 10.0;
+            }
             ctx->vol_disk = std::make_unique<grrt::VolumetricDisk>(
                 params->mass, params->spin,
                 params->disk_outer > 0 ? params->disk_outer : 30.0,

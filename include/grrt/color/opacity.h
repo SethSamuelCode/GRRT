@@ -46,7 +46,8 @@ struct OpacityLUTs {
 };
 
 GRRT_EXPORT OpacityLUTs build_opacity_luts(double rho_min, double rho_max,
-                                double T_min, double T_max);
+                                double T_min, double T_max,
+                                double nu_min = 1e14, double nu_max = 1e16);
 
 } // namespace grrt
 
