@@ -1,6 +1,7 @@
 # GR Ray Tracer
+This project was motivated by my love of black holes and a desire to build a physically accurate ray tracer. I have used Claude Code extensively in the project but I have an understanding of the underlying physics used.
 
-A general-relativistic ray tracer written in C++23. Traces null geodesics through Schwarzschild and Kerr spacetimes to render physically accurate black hole images, including accretion disk emission, gravitational lensing, and Doppler beaming. Outputs PNG/HDR images and multi-frequency FITS spectral cubes.
+This is my implementation of a general-relativistic ray tracer written in C++23. Traces null geodesics through Schwarzschild and Kerr spacetimes to render physically accurate black hole images, including accretion disk emission, gravitational lensing, and Doppler beaming. Outputs PNG/HDR images and multi-frequency FITS spectral cubes.
 
 <div align="center">
 
