@@ -2,6 +2,7 @@
 #include "stb_image_write.h"
 
 #include "grrt/api.h"
+#include "grrt/render/fits_writer.h"
 #include <print>
 #include <vector>
 #include <cmath>
@@ -42,6 +43,8 @@ static void print_usage() {
     std::println("  --validate            Render on both backends, compare results");
     std::println("  --output NAME         Output base name (default: output)");
     std::println("                        Produces NAME.png, NAME.hdr, NAME_linear.hdr");
+    std::println("  --frequencies LIST    Comma-separated frequencies in Hz (e.g., 1e9,1e14,1e18)");
+    std::println("  --freq-range MIN MAX N  Log-spaced range: min Hz, max Hz, number of bins");
     std::println("  --help                Show this help");
 }
 
@@ -82,6 +85,7 @@ int main(int argc, char* argv[]) {
     std::string output_name = "output";
     std::string backend_str = "cpu";
     bool validate = false;
+    std::vector<double> cli_freq_bins;
 
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -159,6 +163,33 @@ int main(int argc, char* argv[]) {
             validate = true;
         } else if (arg("--output")) {
             if (auto v = next()) output_name = v;
+        } else if (arg("--frequencies")) {
+            if (auto v = next()) {
+                std::string s(v);
+                size_t pos = 0;
+                while (pos < s.size()) {
+                    size_t comma = s.find(',', pos);
+                    if (comma == std::string::npos) comma = s.size();
+                    cli_freq_bins.push_back(std::atof(s.substr(pos, comma - pos).c_str()));
+                    pos = comma + 1;
+                }
+            }
+        } else if (arg("--freq-range")) {
+            const char* v_min = next();
+            const char* v_max = next();
+            const char* v_n = next();
+            if (v_min && v_max && v_n) {
+                double f_min = std::atof(v_min);
+                double f_max = std::atof(v_max);
+                int n = std::atoi(v_n);
+                if (n < 1) n = 1;
+                double log_min = std::log10(f_min);
+                double log_max = std::log10(f_max);
+                for (int k = 0; k < n; ++k) {
+                    double frac = (n > 1) ? static_cast<double>(k) / (n - 1) : 0.0;
+                    cli_freq_bins.push_back(std::pow(10.0, log_min + frac * (log_max - log_min)));
+                }
+            }
         } else {
             std::println(stderr, "Unknown argument: {}", argv[i]);
             print_usage();
@@ -171,6 +202,11 @@ int main(int argc, char* argv[]) {
         params.backend = GRRT_BACKEND_CUDA;
     } else {
         params.backend = GRRT_BACKEND_CPU;
+    }
+
+    if (!cli_freq_bins.empty()) {
+        params.num_frequency_bins = static_cast<int>(cli_freq_bins.size());
+        params.frequency_bins_hz = cli_freq_bins.data();
     }
 
     // Validation mode: render on both backends, compare, and exit
@@ -245,6 +281,7 @@ int main(int argc, char* argv[]) {
     std::string path_png = output_name + ".png";
     std::string path_hdr = output_name + ".hdr";
     std::string path_linear = output_name + "_linear.hdr";
+    std::string path_fits = output_name + ".fits";
 
     std::println("gr-raytracer CLI");
     std::println("================");
@@ -258,100 +295,161 @@ int main(int argc, char* argv[]) {
     // Flush stdout so banner + create message appear before the progress bar
     std::fflush(stdout);
 
-    // Render to linear HDR (with progress bar)
-    std::vector<float> framebuffer(params.width * params.height * 4);
+    int result = 0;
 
-    struct ProgressState {
-        std::chrono::steady_clock::time_point start;
-        float last_printed;
-    };
-    ProgressState pstate{std::chrono::steady_clock::now(), -1.0f};
+    if (!cli_freq_bins.empty()) {
+        // --- Spectral rendering path ---
+        grrt_set_frequency_bins(ctx, cli_freq_bins.data(),
+                                static_cast<int>(cli_freq_bins.size()));
 
-    auto progress_fn = [](float fraction, void* ud) {
-        constexpr int BAR_WIDTH = 40;
-        auto* ps = static_cast<ProgressState*>(ud);
-        // Throttle: only update every ~2% to avoid flooding stderr
-        if (fraction - ps->last_printed < 0.02f && fraction < 1.0f) return;
-        ps->last_printed = fraction;
+        int num_bins = static_cast<int>(cli_freq_bins.size());
+        std::vector<double> spectral_buffer(
+            static_cast<size_t>(params.width) * params.height * num_bins);
 
-        int filled = static_cast<int>(fraction * BAR_WIDTH);
-        auto elapsed = std::chrono::steady_clock::now() - ps->start;
-        double secs = std::chrono::duration<double>(elapsed).count();
+        // Progress bar (same pattern as existing)
+        struct ProgressState {
+            std::chrono::steady_clock::time_point start;
+            float last_printed;
+        };
+        ProgressState pstate{std::chrono::steady_clock::now(), -1.0f};
 
-        std::fprintf(stderr, "\r  [");
-        for (int i = 0; i < BAR_WIDTH; ++i)
-            std::fputc(i < filled ? '#' : '.', stderr);
-        std::fprintf(stderr, "] %3.0f%%  %.1fs", fraction * 100.0, secs);
-        std::fflush(stderr);
-    };
+        auto progress_fn = [](float fraction, void* ud) {
+            constexpr int BAR_WIDTH = 40;
+            auto* ps = static_cast<ProgressState*>(ud);
+            if (fraction - ps->last_printed < 0.02f && fraction < 1.0f) return;
+            ps->last_printed = fraction;
+            int filled = static_cast<int>(fraction * BAR_WIDTH);
+            auto elapsed = std::chrono::steady_clock::now() - ps->start;
+            double secs = std::chrono::duration<double>(elapsed).count();
+            std::fprintf(stderr, "\r  [");
+            for (int i = 0; i < BAR_WIDTH; ++i)
+                std::fputc(i < filled ? '#' : '.', stderr);
+            std::fprintf(stderr, "] %3.0f%%  %.1fs", fraction * 100.0, secs);
+            std::fflush(stderr);
+        };
 
-    int result = grrt_render_cb(ctx, framebuffer.data(),
-                                progress_fn, &pstate);
-    // Final line
-    {
-        auto elapsed = std::chrono::steady_clock::now() - pstate.start;
-        double secs = std::chrono::duration<double>(elapsed).count();
-        std::fprintf(stderr, "\r  [");
-        for (int i = 0; i < 40; ++i) std::fputc('#', stderr);
-        std::fprintf(stderr, "] 100%%  %.1fs\n", secs);
-    }
+        // NOTE: grrt_render_spectral doesn't take a progress callback yet,
+        // so we call the renderer directly through the C API without progress.
+        // The C API function handles the render.
+        result = grrt_render_spectral(ctx, spectral_buffer.data(),
+                                       params.width, params.height);
 
-    if (result == 0) {
-        // 1. Raw linear HDR (for Blender / programmatic use)
-        {
-            std::vector<float> hdr_rgb(params.width * params.height * 3);
-            for (int i = 0; i < params.width * params.height; ++i) {
-                hdr_rgb[i * 3 + 0] = framebuffer[i * 4 + 0];
-                hdr_rgb[i * 3 + 1] = framebuffer[i * 4 + 1];
-                hdr_rgb[i * 3 + 2] = framebuffer[i * 4 + 2];
-            }
-            stbi_write_hdr(path_linear.c_str(), params.width, params.height, 3, hdr_rgb.data());
-            std::println("Saved {}", path_linear);
+        // Print completion
+        std::fprintf(stderr, "\n");
+
+        if (result == 0) {
+            grrt::FITSMetadata meta{};
+            meta.spin = params.spin;
+            meta.mass = params.mass;
+            meta.observer_r = params.observer_r;
+            meta.observer_theta = params.observer_theta;
+            meta.fov = params.fov;
+            meta.samples_per_pixel = params.samples_per_pixel;
+
+            grrt::write_fits(path_fits, spectral_buffer.data(),
+                             params.width, params.height, num_bins,
+                             cli_freq_bins, meta);
+            std::println("Saved {}", path_fits);
+        } else {
+            std::println(stderr, "Spectral render failed: {}",
+                         grrt_error(ctx) ? grrt_error(ctx) : "unknown error");
         }
-
-        // 2. Normalized HDR (for darktable / post-processing)
-        {
-            double log_sum = 0.0;
-            int lit = 0;
-            for (int i = 0; i < params.width * params.height; ++i) {
-                int idx = i * 4;
-                double L = 0.2126 * framebuffer[idx] + 0.7152 * framebuffer[idx+1]
-                         + 0.0722 * framebuffer[idx+2];
-                if (L > 1e-10) {
-                    log_sum += std::log(1e-6 + L);
-                    ++lit;
-                }
-            }
-            double L_avg = (lit > 0) ? std::exp(log_sum / lit) : 1.0;
-            float scale = static_cast<float>(0.18 / L_avg);
-
-            std::vector<float> hdr_rgb(params.width * params.height * 3);
-            for (int i = 0; i < params.width * params.height; ++i) {
-                hdr_rgb[i * 3 + 0] = framebuffer[i * 4 + 0] * scale;
-                hdr_rgb[i * 3 + 1] = framebuffer[i * 4 + 1] * scale;
-                hdr_rgb[i * 3 + 2] = framebuffer[i * 4 + 2] * scale;
-            }
-            stbi_write_hdr(path_hdr.c_str(), params.width, params.height, 3, hdr_rgb.data());
-            std::println("Saved {}", path_hdr);
-        }
-
-        // 3. Tone-mapped PNG (quick preview)
-        grrt_tonemap(framebuffer.data(), params.width, params.height);
-
-        std::vector<unsigned char> pixels(params.width * params.height * 4);
-        for (int i = 0; i < params.width * params.height * 4; ++i) {
-            float v = framebuffer[i];
-            if (v < 0.0f) v = 0.0f;
-            if (v > 1.0f) v = 1.0f;
-            pixels[i] = static_cast<unsigned char>(v * 255.0f);
-        }
-
-        stbi_write_png(path_png.c_str(), params.width, params.height, 4,
-                       pixels.data(), params.width * 4);
-        std::println("Saved {}", path_png);
     } else {
-        std::println(stderr, "Render failed: {}", grrt_error(ctx));
-    }
+        // --- Existing RGB rendering path ---
+        std::vector<float> framebuffer(params.width * params.height * 4);
+
+        struct ProgressState {
+            std::chrono::steady_clock::time_point start;
+            float last_printed;
+        };
+        ProgressState pstate{std::chrono::steady_clock::now(), -1.0f};
+
+        auto progress_fn = [](float fraction, void* ud) {
+            constexpr int BAR_WIDTH = 40;
+            auto* ps = static_cast<ProgressState*>(ud);
+            // Throttle: only update every ~2% to avoid flooding stderr
+            if (fraction - ps->last_printed < 0.02f && fraction < 1.0f) return;
+            ps->last_printed = fraction;
+
+            int filled = static_cast<int>(fraction * BAR_WIDTH);
+            auto elapsed = std::chrono::steady_clock::now() - ps->start;
+            double secs = std::chrono::duration<double>(elapsed).count();
+
+            std::fprintf(stderr, "\r  [");
+            for (int i = 0; i < BAR_WIDTH; ++i)
+                std::fputc(i < filled ? '#' : '.', stderr);
+            std::fprintf(stderr, "] %3.0f%%  %.1fs", fraction * 100.0, secs);
+            std::fflush(stderr);
+        };
+
+        result = grrt_render_cb(ctx, framebuffer.data(),
+                                    progress_fn, &pstate);
+        // Final line
+        {
+            auto elapsed = std::chrono::steady_clock::now() - pstate.start;
+            double secs = std::chrono::duration<double>(elapsed).count();
+            std::fprintf(stderr, "\r  [");
+            for (int i = 0; i < 40; ++i) std::fputc('#', stderr);
+            std::fprintf(stderr, "] 100%%  %.1fs\n", secs);
+        }
+
+        if (result == 0) {
+            // 1. Raw linear HDR (for Blender / programmatic use)
+            {
+                std::vector<float> hdr_rgb(params.width * params.height * 3);
+                for (int i = 0; i < params.width * params.height; ++i) {
+                    hdr_rgb[i * 3 + 0] = framebuffer[i * 4 + 0];
+                    hdr_rgb[i * 3 + 1] = framebuffer[i * 4 + 1];
+                    hdr_rgb[i * 3 + 2] = framebuffer[i * 4 + 2];
+                }
+                stbi_write_hdr(path_linear.c_str(), params.width, params.height, 3, hdr_rgb.data());
+                std::println("Saved {}", path_linear);
+            }
+
+            // 2. Normalized HDR (for darktable / post-processing)
+            {
+                double log_sum = 0.0;
+                int lit = 0;
+                for (int i = 0; i < params.width * params.height; ++i) {
+                    int idx = i * 4;
+                    double L = 0.2126 * framebuffer[idx] + 0.7152 * framebuffer[idx+1]
+                             + 0.0722 * framebuffer[idx+2];
+                    if (L > 1e-10) {
+                        log_sum += std::log(1e-6 + L);
+                        ++lit;
+                    }
+                }
+                double L_avg = (lit > 0) ? std::exp(log_sum / lit) : 1.0;
+                float scale = static_cast<float>(0.18 / L_avg);
+
+                std::vector<float> hdr_rgb(params.width * params.height * 3);
+                for (int i = 0; i < params.width * params.height; ++i) {
+                    hdr_rgb[i * 3 + 0] = framebuffer[i * 4 + 0] * scale;
+                    hdr_rgb[i * 3 + 1] = framebuffer[i * 4 + 1] * scale;
+                    hdr_rgb[i * 3 + 2] = framebuffer[i * 4 + 2] * scale;
+                }
+                stbi_write_hdr(path_hdr.c_str(), params.width, params.height, 3, hdr_rgb.data());
+                std::println("Saved {}", path_hdr);
+            }
+
+            // 3. Tone-mapped PNG (quick preview)
+            grrt_tonemap(framebuffer.data(), params.width, params.height);
+
+            std::vector<unsigned char> pixels(params.width * params.height * 4);
+            for (int i = 0; i < params.width * params.height * 4; ++i) {
+                float v = framebuffer[i];
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                pixels[i] = static_cast<unsigned char>(v * 255.0f);
+            }
+
+            stbi_write_png(path_png.c_str(), params.width, params.height, 4,
+                           pixels.data(), params.width * 4);
+            std::println("Saved {}", path_png);
+        } else {
+            std::println(stderr, "Render failed: {}", grrt_error(ctx));
+        }
+    } // end if spectral / else RGB
 
     grrt_destroy(ctx);
     return result;

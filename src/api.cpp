@@ -15,6 +15,7 @@
 #include <memory>
 #include <print>
 #include <string>
+#include <vector>
 
 static thread_local std::string g_last_error;
 
@@ -34,6 +35,7 @@ struct GRRTContext {
     CudaRenderContext* cuda_ctx = nullptr;
 #endif
     std::string error_msg;
+    std::vector<double> frequency_bins;
 };
 
 GRRTContext* grrt_create(const GRRTParams* params) {
@@ -228,6 +230,30 @@ int grrt_cuda_available(void) {
 
 const char* grrt_last_error(void) {
     return g_last_error.empty() ? nullptr : g_last_error.c_str();
+}
+
+void grrt_set_frequency_bins(GRRTContext* ctx,
+                              const double* frequencies_hz,
+                              int num_bins) {
+    if (num_bins > 0 && frequencies_hz) {
+        ctx->frequency_bins.assign(frequencies_hz, frequencies_hz + num_bins);
+    } else {
+        ctx->frequency_bins.clear();
+    }
+}
+
+int grrt_render_spectral(GRRTContext* ctx, double* spectral_buffer,
+                          int width, int height) {
+    if (ctx->frequency_bins.empty()) {
+        ctx->error_msg = "No frequency bins set -- call grrt_set_frequency_bins first";
+        return -1;
+    }
+
+    ctx->renderer->render_spectral(spectral_buffer, width, height,
+                                    ctx->frequency_bins);
+    std::println("grrt: rendered {}x{} spectral frame ({} bins, cpu)",
+                 width, height, ctx->frequency_bins.size());
+    return 0;
 }
 
 void grrt_tonemap(float* framebuffer, int width, int height) {

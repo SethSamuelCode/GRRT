@@ -5,6 +5,7 @@
 #include "grrt/geodesic/geodesic_tracer.h"
 #include "grrt/render/tonemapper.h"
 #include <functional>
+#include <vector>
 
 namespace grrt {
 
@@ -24,6 +25,10 @@ public:
 
     void render(float* framebuffer, int width, int height,
                 ProgressCallback progress_cb = nullptr) const;
+
+    void render_spectral(double* spectral_buffer, int width, int height,
+                         const std::vector<double>& frequency_bins,
+                         ProgressCallback progress_cb = nullptr) const;
 
 private:
     const Camera& camera_;

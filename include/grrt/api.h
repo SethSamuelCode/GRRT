@@ -27,6 +27,13 @@ GRRT_EXPORT const char* grrt_last_error(void);
 // Apply auto-exposure tone mapping to a linear HDR framebuffer (RGBA float, in-place)
 GRRT_EXPORT void grrt_tonemap(float* framebuffer, int width, int height);
 
+// Spectral rendering
+GRRT_EXPORT void grrt_set_frequency_bins(GRRTContext* ctx,
+                                          const double* frequencies_hz,
+                                          int num_bins);
+GRRT_EXPORT int grrt_render_spectral(GRRTContext* ctx, double* spectral_buffer,
+                                      int width, int height);
+
 #ifdef __cplusplus
 }
 #endif

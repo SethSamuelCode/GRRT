@@ -2,8 +2,10 @@
 #include "grrt/scene/accretion_disk.h"
 #include "grrt/scene/celestial_sphere.h"
 #include "grrt/color/spectrum.h"
+#include "grrt/geodesic/geodesic_tracer.h"
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace grrt {
 
@@ -71,6 +73,58 @@ void Renderer::render(float* framebuffer, int width, int height,
             #pragma omp critical
             { done = ++rows_done; }
 
+            progress_cb(static_cast<float>(done) / static_cast<float>(height));
+        }
+    }
+
+    if (progress_cb) progress_cb(1.0f);
+}
+
+void Renderer::render_spectral(double* spectral_buffer, int width, int height,
+                                const std::vector<double>& frequency_bins,
+                                ProgressCallback progress_cb) const {
+    const int num_bins = static_cast<int>(frequency_bins.size());
+    const int grid = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(spp_))));
+    const int actual_spp = grid * grid;
+    const double inv_spp = 1.0 / actual_spp;
+    const double cell = 1.0 / grid;
+
+    int rows_done = 0;
+
+    #pragma omp parallel for schedule(dynamic)
+    for (int j = 0; j < height; ++j) {
+        std::vector<double> accum(num_bins, 0.0);
+
+        for (int i = 0; i < width; ++i) {
+            std::fill(accum.begin(), accum.end(), 0.0);
+
+            for (int sy = 0; sy < grid; ++sy) {
+                for (int sx = 0; sx < grid; ++sx) {
+                    const int s = sy * grid + sx;
+                    const double jx = pixel_hash(i, j, s, 0);
+                    const double jy = pixel_hash(i, j, s, 1);
+                    const double px = i + (sx + jx) * cell;
+                    const double py = j + (sy + jy) * cell;
+
+                    GeodesicState state = camera_.ray_for_pixel(px, py);
+                    SpectralTraceResult result = tracer_.trace_spectral(state, frequency_bins);
+
+                    for (int k = 0; k < num_bins; ++k) {
+                        accum[k] += result.spectral_intensity[k];
+                    }
+                }
+            }
+
+            const int base = (j * width + i) * num_bins;
+            for (int k = 0; k < num_bins; ++k) {
+                spectral_buffer[base + k] = accum[k] * inv_spp;
+            }
+        }
+
+        if (progress_cb) {
+            int done;
+            #pragma omp critical
+            { done = ++rows_done; }
             progress_cb(static_cast<float>(done) / static_cast<float>(height));
         }
     }
