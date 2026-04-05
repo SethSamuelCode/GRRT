@@ -37,6 +37,15 @@ GRRT_EXPORT int grrt_render_spectral_cb(GRRTContext* ctx, double* spectral_buffe
                                          int width, int height,
                                          grrt_progress_fn progress, void* user_data);
 
+// Streaming spectral render — renders and writes directly to a FITS file
+// one row at a time.  Never allocates the full cube in RAM.
+// Returns 0 on success, -1 on error (call grrt_error() for details).
+GRRT_EXPORT int grrt_render_spectral_to_fits_cb(GRRTContext* ctx,
+                                                 const char* output_path,
+                                                 int width, int height,
+                                                 grrt_progress_fn progress,
+                                                 void* user_data);
+
 #ifdef __cplusplus
 }
 #endif

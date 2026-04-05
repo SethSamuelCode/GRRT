@@ -1,4 +1,5 @@
 #include "grrt/api.h"
+#include "grrt/render/fits_writer.h"
 #include "grrt/spacetime/kerr.h"
 #include "grrt/geodesic/rk4.h"
 #include "grrt/geodesic/geodesic_tracer.h"
@@ -276,6 +277,57 @@ int grrt_render_spectral_cb(GRRTContext* ctx, double* spectral_buffer,
                                     ctx->frequency_bins, cb);
     std::println("grrt: rendered {}x{} spectral frame ({} bins, cpu)",
                  width, height, ctx->frequency_bins.size());
+    return 0;
+}
+
+int grrt_render_spectral_to_fits_cb(GRRTContext* ctx,
+                                     const char* output_path,
+                                     int width, int height,
+                                     grrt_progress_fn progress, void* user_data) {
+    if (ctx->frequency_bins.empty()) {
+        ctx->error_msg = "No frequency bins set -- call grrt_set_frequency_bins first";
+        return -1;
+    }
+    if (!output_path || output_path[0] == '\0') {
+        ctx->error_msg = "grrt_render_spectral_to_fits_cb: output_path is null or empty";
+        return -1;
+    }
+
+    grrt::FITSMetadata meta{};
+    meta.spin              = ctx->params.spin;
+    meta.mass              = ctx->params.mass > 0.0 ? ctx->params.mass : 1.0;
+    meta.observer_r        = ctx->params.observer_r > 0.0 ? ctx->params.observer_r : 50.0;
+    meta.observer_theta    = ctx->params.observer_theta > 0.0 ? ctx->params.observer_theta : 1.396;
+    meta.fov               = ctx->params.fov > 0.0 ? ctx->params.fov : 1.047;
+    meta.samples_per_pixel = ctx->params.samples_per_pixel > 0 ? ctx->params.samples_per_pixel : 1;
+
+    try {
+        grrt::FITSStreamWriter writer(output_path,
+                                      width, height,
+                                      static_cast<int>(ctx->frequency_bins.size()),
+                                      ctx->frequency_bins,
+                                      meta);
+
+        grrt::ProgressCallback cb;
+        if (progress) {
+            cb = [progress, user_data](float f) { progress(f, user_data); };
+        }
+
+        ctx->renderer->render_spectral_streaming(
+            width, height, ctx->frequency_bins,
+            [&writer](int j, const double* row_data) {
+                writer.write_row(j, row_data);
+            },
+            cb);
+
+        writer.finalize();
+    } catch (const std::exception& e) {
+        ctx->error_msg = e.what();
+        return -1;
+    }
+
+    std::println("grrt: streamed {}x{} spectral frame ({} bins) to '{}'",
+                 width, height, ctx->frequency_bins.size(), output_path);
     return 0;
 }
 

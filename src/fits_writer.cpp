@@ -13,6 +13,7 @@
 #include <cstring>
 #include <format>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -136,26 +137,19 @@ bool is_uniform_log(const std::vector<double>& bins) {
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// Public API
+// Internal helpers shared by write_fits() and FITSStreamWriter
 // ---------------------------------------------------------------------------
 
-void write_fits(const std::string&         path,
-                const double*              data,
-                int                        width,
-                int                        height,
-                int                        num_bins,
-                const std::vector<double>& frequency_bins_hz,
-                const FITSMetadata&        metadata) {
+namespace {
 
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error(
-            std::format("grrt::write_fits: cannot open '{}' for writing", path));
-    }
-
-    // -----------------------------------------------------------------------
-    // Build the header cards
-    // -----------------------------------------------------------------------
+/// Build all 80-char header cards for a spectral data cube (up to and
+/// including the END card).  May be called from both write_fits() and
+/// FITSStreamWriter to avoid duplicating the card-generation logic.
+std::vector<std::string> build_header_cards(
+        int width, int height, int num_bins,
+        const std::vector<double>& frequency_bins_hz,
+        const FITSMetadata&        metadata)
+{
     std::vector<std::string> cards;
     cards.reserve(64);
 
@@ -174,7 +168,6 @@ void write_fits(const std::string&         path,
     // WCS for frequency axis (NAXIS3)
     if (!frequency_bins_hz.empty()) {
         if (is_uniform_linear(frequency_bins_hz) && frequency_bins_hz.size() >= 2) {
-            // Linear frequency axis
             cards.push_back(fits_card_string("CTYPE3", "FREQ", "frequency"));
             cards.push_back(fits_card_string("CUNIT3", "Hz",   "frequency unit"));
             cards.push_back(fits_card_double("CRPIX3", 1.0, "reference pixel"));
@@ -184,10 +177,7 @@ void write_fits(const std::string&         path,
             cards.push_back(fits_card_double("CDELT3", step,
                                              "frequency step (Hz)"));
         } else if (is_uniform_log(frequency_bins_hz) && frequency_bins_hz.size() >= 2) {
-            // Log-spaced: axis represents log10(freq in Hz).
-            // DS9 will label slices with the log10 values; the actual Hz
-            // values are also stored as FREQnnnn keywords for astropy.
-            const double log_min = std::log10(frequency_bins_hz.front());
+            const double log_min  = std::log10(frequency_bins_hz.front());
             const double log_step = std::log10(frequency_bins_hz[1])
                                   - std::log10(frequency_bins_hz[0]);
             cards.push_back(fits_card_string("CTYPE3", "FREQ-LOG",
@@ -199,14 +189,12 @@ void write_fits(const std::string&         path,
                                              "log10(freq) at ref pixel"));
             cards.push_back(fits_card_double("CDELT3", log_step,
                                              "log10(freq) step per pixel"));
-            // Also store actual Hz values for programmatic access
             for (int k = 0; k < num_bins && k < static_cast<int>(frequency_bins_hz.size()); ++k) {
                 std::string kw = std::format("FREQ{:04d}", k + 1);
                 cards.push_back(fits_card_double(kw, frequency_bins_hz[k],
                                                  std::format("freq bin {} (Hz)", k + 1)));
             }
         } else {
-            // Non-uniform, non-log: use slice index as axis, store Hz as keywords
             cards.push_back(fits_card_string("CTYPE3", "FREQ-TAB",
                                              "frequency (see FREQnnnn keys)"));
             cards.push_back(fits_card_string("CUNIT3", "Hz",
@@ -240,12 +228,17 @@ void write_fits(const std::string&         path,
     cards.push_back(fits_card_string("ORIGIN", "grrt",
                                      "GR ray tracer (github: gr_ray_tracer)"));
 
-    // END card — exactly 80 spaces after "END"
+    // END card — exactly 80 chars
     cards.push_back(pad_to("END", CARD_LEN));
 
-    // -----------------------------------------------------------------------
-    // Write header blocks (pad to multiple of 2880 bytes with spaces)
-    // -----------------------------------------------------------------------
+    return cards;
+}
+
+/// Write pre-built header cards to @p out, padding to the next full 2880-byte
+/// FITS block with space characters.  Does not check stream state on exit.
+void write_header_to_stream(std::ofstream& out,
+                             const std::vector<std::string>& cards)
+{
     const std::size_t num_cards = cards.size();
     const std::size_t full_blocks =
         (num_cards + CARDS_PER_BLOCK - 1) / CARDS_PER_BLOCK;
@@ -254,11 +247,34 @@ void write_fits(const std::string&         path,
     for (const auto& card : cards) {
         out.write(card.data(), CARD_LEN);
     }
-    // Pad remaining cards in the last block with spaces
     const std::string blank_card(CARD_LEN, ' ');
     for (std::size_t i = num_cards; i < total_header_cards; ++i) {
         out.write(blank_card.data(), CARD_LEN);
     }
+}
+
+} // anonymous namespace (second block — implementation helpers)
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+void write_fits(const std::string&         path,
+                const double*              data,
+                int                        width,
+                int                        height,
+                int                        num_bins,
+                const std::vector<double>& frequency_bins_hz,
+                const FITSMetadata&        metadata) {
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error(
+            std::format("grrt::write_fits: cannot open '{}' for writing", path));
+    }
+
+    auto cards = build_header_cards(width, height, num_bins, frequency_bins_hz, metadata);
+    write_header_to_stream(out, cards);
 
     // -----------------------------------------------------------------------
     // Write data in FITS axis order: k (NAXIS3) outer, j (NAXIS2) middle,
@@ -290,6 +306,101 @@ void write_fits(const std::string&         path,
         throw std::runtime_error(
             std::format("grrt::write_fits: write error on '{}'", path));
     }
+}
+
+// ---------------------------------------------------------------------------
+// FITSStreamWriter
+// ---------------------------------------------------------------------------
+
+FITSStreamWriter::FITSStreamWriter(const std::string&         path,
+                                   int                        width,
+                                   int                        height,
+                                   int                        num_bins,
+                                   const std::vector<double>& frequency_bins_hz,
+                                   const FITSMetadata&        metadata)
+    : width_(width), height_(height), num_bins_(num_bins)
+{
+    out_.open(path, std::ios::binary | std::ios::trunc);
+    if (!out_) {
+        throw std::runtime_error(
+            std::format("grrt::FITSStreamWriter: cannot open '{}' for writing", path));
+    }
+
+    auto cards = build_header_cards(width, height, num_bins, frequency_bins_hz, metadata);
+    write_header_to_stream(out_, cards);
+
+    data_start_ = out_.tellp();
+
+    // Pre-extend the file to its final size so that each write_row() call can
+    // seek directly to the correct byte offset.  On NTFS and most Linux
+    // filesystems this creates a sparse file:  unwritten regions read as the
+    // IEEE 754 representation of 0.0 (all-zero bytes), which is a physically
+    // sensible default intensity for un-rendered rows.
+    const std::size_t data_bytes =
+        static_cast<std::size_t>(width) * height * num_bins * 8;
+    const std::size_t remainder = data_bytes % BLOCK_LEN;
+    const std::size_t padded_data_bytes =
+        (remainder != 0) ? data_bytes + (BLOCK_LEN - remainder) : data_bytes;
+
+    if (padded_data_bytes > 0) {
+        out_.seekp(static_cast<std::streamoff>(padded_data_bytes) - 1, std::ios::cur);
+        out_.put('\0');
+    }
+
+    if (!out_) {
+        throw std::runtime_error(
+            std::format("grrt::FITSStreamWriter: failed to pre-extend '{}'", path));
+    }
+}
+
+void FITSStreamWriter::write_row(int j, const double* row_data) {
+    // row_data layout: row_data[i * num_bins_ + k] = intensity at pixel i, freq bin k.
+    //
+    // FITS data layout (axis order: k outermost, then fits_row, then i innermost):
+    //   byte offset from data_start_ for (k, fits_row, i=0) =
+    //       (k * height_ * width_ + fits_row * width_) * 8
+    //
+    // Renderer row 0 is the top; FITS pixel (1,1) is the bottom.
+    // So fits_row = height_ - 1 - j.
+
+    const int fits_row = height_ - 1 - j;
+
+    // Encode row_data for one frequency plane into big-endian bytes.
+    // Reusing a per-call stack buffer avoids heap allocation per call.
+    std::vector<uint8_t> line_be(static_cast<std::size_t>(width_) * 8);
+
+    std::lock_guard<std::mutex> lk(mutex_);
+
+    for (int k = 0; k < num_bins_; ++k) {
+        // Build big-endian buffer for this row × freq bin
+        for (int i = 0; i < width_; ++i) {
+            const double   v    = row_data[i * num_bins_ + k];
+            uint64_t       bits = 0;
+            std::memcpy(&bits, &v, sizeof(bits));
+            const std::size_t off = static_cast<std::size_t>(i) * 8;
+            for (int b = 7; b >= 0; --b) {
+                line_be[off + (7 - b)] = static_cast<uint8_t>(bits >> (b * 8));
+            }
+        }
+
+        // Seek to the correct position in the pre-extended file
+        const std::streamoff plane_offset =
+            static_cast<std::streamoff>(k) * height_ * width_ * 8;
+        const std::streamoff row_offset =
+            static_cast<std::streamoff>(fits_row) * width_ * 8;
+        out_.seekp(data_start_ + plane_offset + row_offset);
+        out_.write(reinterpret_cast<const char*>(line_be.data()),
+                   static_cast<std::streamsize>(line_be.size()));
+    }
+}
+
+void FITSStreamWriter::finalize() {
+    out_.flush();
+    if (!out_) {
+        throw std::runtime_error(
+            "grrt::FITSStreamWriter: write error during finalize");
+    }
+    out_.close();
 }
 
 } // namespace grrt

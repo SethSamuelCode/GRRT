@@ -2,6 +2,8 @@
 #define GRRT_FITS_WRITER_H
 
 #include "grrt_export.h"
+#include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -40,6 +42,53 @@ GRRT_EXPORT void write_fits(const std::string&         path,
                             int                        num_bins,
                             const std::vector<double>& frequency_bins_hz,
                             const FITSMetadata&        metadata);
+
+/// Streaming FITS writer for large spectral cubes.
+///
+/// Opens the output file immediately, writes the FITS header, and
+/// pre-extends the file to its final size.  Individual rows are written
+/// in-place via write_row() as they are produced by the renderer, so
+/// the entire cube never needs to reside in RAM simultaneously.
+///
+/// Memory cost during a render:  O(width × num_bins × num_threads)
+/// rather than O(width × height × num_bins).
+///
+/// Thread-safety: write_row() is protected by an internal mutex and may
+/// be called concurrently from multiple OpenMP threads.
+class GRRT_EXPORT FITSStreamWriter {
+public:
+    /// Open @p path, write the FITS header, and pre-extend the file.
+    /// @throws std::runtime_error if the file cannot be opened or written.
+    FITSStreamWriter(const std::string&         path,
+                     int                        width,
+                     int                        height,
+                     int                        num_bins,
+                     const std::vector<double>& frequency_bins_hz,
+                     const FITSMetadata&        metadata);
+
+    FITSStreamWriter(const FITSStreamWriter&)            = delete;
+    FITSStreamWriter& operator=(const FITSStreamWriter&) = delete;
+
+    /// Write one rendered image row.
+    ///
+    /// @param j        Row index in renderer coordinates (0 = top).
+    /// @param row_data Pointer to width × num_bins doubles, layout
+    ///                 row_data[i * num_bins + k] = intensity at pixel i, freq bin k.
+    /// Thread-safe; the internal mutex serialises concurrent calls.
+    void write_row(int j, const double* row_data);
+
+    /// Flush and close the output file.
+    /// @throws std::runtime_error on a write error.
+    void finalize();
+
+private:
+    std::ofstream    out_;
+    int              width_;
+    int              height_;
+    int              num_bins_;
+    std::streampos   data_start_;   ///< Byte offset of first data byte after header
+    std::mutex       mutex_;
+};
 
 } // namespace grrt
 

@@ -2,7 +2,6 @@
 #include "stb_image_write.h"
 
 #include "grrt/api.h"
-#include "grrt/render/fits_writer.h"
 #include <print>
 #include <vector>
 #include <cmath>
@@ -298,13 +297,9 @@ int main(int argc, char* argv[]) {
     int result = 0;
 
     if (!cli_freq_bins.empty()) {
-        // --- Spectral rendering path ---
+        // --- Spectral rendering path (streaming — no full-cube RAM allocation) ---
         grrt_set_frequency_bins(ctx, cli_freq_bins.data(),
                                 static_cast<int>(cli_freq_bins.size()));
-
-        int num_bins = static_cast<int>(cli_freq_bins.size());
-        std::vector<double> spectral_buffer(
-            static_cast<size_t>(params.width) * params.height * num_bins);
 
         // Progress bar (same pattern as existing)
         struct ProgressState {
@@ -328,9 +323,9 @@ int main(int argc, char* argv[]) {
             std::fflush(stderr);
         };
 
-        result = grrt_render_spectral_cb(ctx, spectral_buffer.data(),
-                                          params.width, params.height,
-                                          progress_fn, &pstate);
+        result = grrt_render_spectral_to_fits_cb(ctx, path_fits.c_str(),
+                                                  params.width, params.height,
+                                                  progress_fn, &pstate);
 
         // Final progress bar
         {
@@ -342,17 +337,6 @@ int main(int argc, char* argv[]) {
         }
 
         if (result == 0) {
-            grrt::FITSMetadata meta{};
-            meta.spin = params.spin;
-            meta.mass = params.mass;
-            meta.observer_r = params.observer_r;
-            meta.observer_theta = params.observer_theta;
-            meta.fov = params.fov;
-            meta.samples_per_pixel = params.samples_per_pixel;
-
-            grrt::write_fits(path_fits, spectral_buffer.data(),
-                             params.width, params.height, num_bins,
-                             cli_freq_bins, meta);
             std::println("Saved {}", path_fits);
         } else {
             std::println(stderr, "Spectral render failed: {}",

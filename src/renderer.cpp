@@ -132,4 +132,63 @@ void Renderer::render_spectral(double* spectral_buffer, int width, int height,
     if (progress_cb) progress_cb(1.0f);
 }
 
+void Renderer::render_spectral_streaming(int width, int height,
+                                          const std::vector<double>& frequency_bins,
+                                          RowCallback row_cb,
+                                          ProgressCallback progress_cb) const {
+    const int num_bins  = static_cast<int>(frequency_bins.size());
+    const int grid      = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(spp_))));
+    const int actual_spp = grid * grid;
+    const double inv_spp = 1.0 / actual_spp;
+    const double cell    = 1.0 / grid;
+
+    int rows_done = 0;
+
+    #pragma omp parallel for schedule(dynamic)
+    for (int j = 0; j < height; ++j) {
+        // Per-thread accum and row output buffers — stack-allocated relative
+        // to the OMP thread, so no false sharing between threads.
+        std::vector<double> accum(num_bins, 0.0);
+        std::vector<double> row_buf(static_cast<std::size_t>(width) * num_bins, 0.0);
+
+        for (int i = 0; i < width; ++i) {
+            std::fill(accum.begin(), accum.end(), 0.0);
+
+            for (int sy = 0; sy < grid; ++sy) {
+                for (int sx = 0; sx < grid; ++sx) {
+                    const int s = sy * grid + sx;
+                    const double jx = pixel_hash(i, j, s, 0);
+                    const double jy = pixel_hash(i, j, s, 1);
+                    const double px = i + (sx + jx) * cell;
+                    const double py = j + (sy + jy) * cell;
+
+                    GeodesicState state = camera_.ray_for_pixel(px, py);
+                    SpectralTraceResult result = tracer_.trace_spectral(state, frequency_bins);
+
+                    for (int k = 0; k < num_bins; ++k) {
+                        accum[k] += result.spectral_intensity[k];
+                    }
+                }
+            }
+
+            for (int k = 0; k < num_bins; ++k) {
+                row_buf[i * num_bins + k] = accum[k] * inv_spp;
+            }
+        }
+
+        // row_cb handles its own serialisation (FITSStreamWriter::write_row
+        // is mutex-protected), so we do not need omp critical here.
+        row_cb(j, row_buf.data());
+
+        if (progress_cb) {
+            int done;
+            #pragma omp critical
+            { done = ++rows_done; }
+            progress_cb(static_cast<float>(done) / static_cast<float>(height));
+        }
+    }
+
+    if (progress_cb) progress_cb(1.0f);
+}
+
 } // namespace grrt

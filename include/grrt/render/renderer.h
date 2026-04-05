@@ -30,6 +30,16 @@ public:
                          const std::vector<double>& frequency_bins,
                          ProgressCallback progress_cb = nullptr) const;
 
+    /// Streaming spectral render — invokes @p row_cb(j, row_data) for each
+    /// completed row instead of writing into a flat buffer.  row_data points
+    /// to width × num_bins doubles with layout row_data[i*num_bins+k].
+    /// row_cb must be thread-safe; it is called from OpenMP worker threads.
+    using RowCallback = std::function<void(int j, const double* row_data)>;
+    void render_spectral_streaming(int width, int height,
+                                   const std::vector<double>& frequency_bins,
+                                   RowCallback row_cb,
+                                   ProgressCallback progress_cb = nullptr) const;
+
 private:
     const Camera& camera_;
     const GeodesicTracer& tracer_;
