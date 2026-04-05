@@ -3,6 +3,7 @@
 
 #include "grrt/math/vec4.h"
 #include "grrt/spacetime/metric.h"
+#include "grrt_export.h"
 
 namespace grrt {
 

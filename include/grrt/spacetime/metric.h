@@ -3,10 +3,11 @@
 
 #include "grrt/math/matrix4.h"
 #include "grrt/math/vec4.h"
+#include "grrt_export.h"
 
 namespace grrt {
 
-class Metric {
+class GRRT_EXPORT Metric {
 public:
     virtual ~Metric() = default;
 

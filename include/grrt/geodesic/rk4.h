@@ -3,10 +3,11 @@
 
 #include "grrt/geodesic/integrator.h"
 #include "grrt/spacetime/kerr.h"
+#include "grrt_export.h"
 
 namespace grrt {
 
-class RK4 : public Integrator {
+class GRRT_EXPORT RK4 : public Integrator {
 public:
     // Virtual override for generic Metric (backward compat, not on hot path)
     GeodesicState step(const Metric& metric,

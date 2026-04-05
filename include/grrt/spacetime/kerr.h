@@ -3,11 +3,12 @@
 
 #include "grrt/spacetime/metric.h"
 #include "grrt/math/fast_trig.h"
+#include "grrt_export.h"
 #include <cmath>
 
 namespace grrt {
 
-class Kerr : public Metric {
+class GRRT_EXPORT Kerr : public Metric {
 public:
     Kerr(double mass, double spin);
 

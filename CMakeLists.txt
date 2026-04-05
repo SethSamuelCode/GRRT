@@ -95,6 +95,9 @@ target_link_libraries(test-opacity PRIVATE grrt)
 add_executable(test-volumetric tests/test_volumetric.cpp)
 target_link_libraries(test-volumetric PRIVATE grrt)
 
+add_executable(test-spectral tests/test_spectral.cpp)
+target_link_libraries(test-spectral PRIVATE grrt)
+
 if(GRRT_ENABLE_CUDA)
     add_executable(grrt-cuda-test cuda/tests/test_cuda.cu)
     target_include_directories(grrt-cuda-test PRIVATE include/ cuda/ ${CMAKE_BINARY_DIR}/include)

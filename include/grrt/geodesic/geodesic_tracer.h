@@ -3,6 +3,8 @@
 
 #include "grrt/geodesic/integrator.h"
 #include "grrt/math/vec3.h"
+#include "grrt_export.h"
+#include <vector>
 
 namespace grrt {
 
@@ -26,7 +28,14 @@ struct TraceResult {
     Vec4 final_momentum;
 };
 
-class GeodesicTracer {
+struct SpectralTraceResult {
+    RayTermination termination;
+    std::vector<double> spectral_intensity;  // Per-bin observed intensity [erg/s/cm²/Hz/sr]
+    Vec4 final_position;
+    Vec4 final_momentum;
+};
+
+class GRRT_EXPORT GeodesicTracer {
 public:
     GeodesicTracer(const Kerr& metric, const RK4& integrator,
                    double observer_r, int max_steps = 10000, double r_escape = 1000.0,
@@ -36,6 +45,9 @@ public:
     TraceResult trace(GeodesicState state,
                       const AccretionDisk* disk,
                       const SpectrumLUT* spectrum) const;
+
+    SpectralTraceResult trace_spectral(GeodesicState state,
+                                       const std::vector<double>& frequency_bins) const;
 
 private:
     const Kerr& metric_;
@@ -48,6 +60,11 @@ private:
     const VolumetricDisk* vol_disk_ = nullptr;
 
     void raymarch_volumetric(GeodesicState& state, Vec3& color) const;
+
+    void raymarch_volumetric_spectral(GeodesicState& state,
+                                      const std::vector<double>& nu_obs,
+                                      std::vector<double>& J,
+                                      std::vector<double>& tau_acc) const;
 };
 
 } // namespace grrt

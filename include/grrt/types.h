@@ -58,6 +58,9 @@ typedef struct {
     int samples_per_pixel;
     int thread_count;
     GRRTBackend backend;
+
+    int num_frequency_bins;          /* 0 = legacy RGB mode (default) */
+    const double* frequency_bins_hz; /* Array of observer-frame frequencies in Hz */
 } GRRTParams;
 
 typedef struct GRRTContext GRRTContext;

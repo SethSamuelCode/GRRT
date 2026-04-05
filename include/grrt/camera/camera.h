@@ -4,10 +4,11 @@
 #include "grrt/math/vec4.h"
 #include "grrt/spacetime/metric.h"
 #include "grrt/geodesic/integrator.h"
+#include "grrt_export.h"
 
 namespace grrt {
 
-class Camera {
+class GRRT_EXPORT Camera {
 public:
     Camera(const Metric& metric, double r_obs, double theta_obs, double phi_obs,
            double fov, int width, int height);

@@ -76,6 +76,8 @@ int main(int argc, char* argv[]) {
     params.mass_solar = 0.0;
     params.eddington_fraction = 0.0;
     params.samples_per_pixel = 1;
+    params.num_frequency_bins = 0;
+    params.frequency_bins_hz = nullptr;
 
     std::string output_name = "output";
     std::string backend_str = "cpu";
