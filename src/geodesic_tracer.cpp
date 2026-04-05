@@ -45,6 +45,36 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
 
         prev = state;
 
+        // Clamp step size when near the volumetric disk so that grazing
+        // rays cannot overshoot the entire disk volume in a single step.
+        // Cost: one derivatives_kerr() call per step when near — negligible
+        // vs the 8+ metric evaluations inside the adaptive RK4.
+        if (vol_disk_) {
+            const double theta = state.position[2];
+            const double z = r * std::cos(theta);
+            if (r >= vol_disk_->r_horizon() * 0.9
+                && r <= vol_disk_->r_max() * 1.5) {
+                const double H = vol_disk_->scale_height(r);
+                const double zm = vol_disk_->z_max_at(r);
+                // Within 6 scale heights of the disk surface?
+                if (std::abs(z) < zm + 6.0 * H) {
+                    // Estimate dz/dlambda from the geodesic derivatives
+                    auto deriv = RK4::derivatives_kerr(metric_, state);
+                    const double dr_dl = deriv.position[1];
+                    const double dtheta_dl = deriv.position[2];
+                    // dz/dl = cos(theta)*dr/dl - r*sin(theta)*dtheta/dl
+                    const double dz_dl = std::abs(
+                        std::cos(theta) * dr_dl - r * std::sin(theta) * dtheta_dl);
+                    if (dz_dl > 1e-20) {
+                        // Limit step so z moves at most H/4; floor at H/64
+                        // so near-tangential rays (tiny dz_dl) aren't ignored.
+                        const double dl_max = std::max(0.25 * H / dz_dl, H / 64.0);
+                        dlambda = std::min(dlambda, dl_max);
+                    }
+                }
+            }
+        }
+
         // Adaptive RK4 step — concrete Kerr, no virtual dispatch
         {
             auto result = integrator_.adaptive_step_kerr(metric_, state, dlambda, tolerance_);
@@ -74,12 +104,15 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
                                        && std::abs(d_prev - d_new) > 1e-12;
             const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
             // Check if the minimum |z| along the step could have been inside
-            // the disk.  Conservative: if either endpoint is within 6H, the
-            // ray may have grazed the volume.
+            // the disk.  Conservative: if either endpoint is within 3H of the
+            // disk surface, the ray may have grazed the volume.
             const double zm_new = vol_disk_->z_max_at(r_new);
             const double H_new = vol_disk_->scale_height(r_new);
-            const bool near_disk = (std::abs(z_new) < zm_new + H_new
-                                 || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + vol_disk_->scale_height(r_prev))
+            const double H_prev = vol_disk_->scale_height(r_prev);
+            // Trigger zone: 2H beyond disk surface. Raymarcher exits at 3H,
+            // giving a 1H gap that prevents immediate re-entry.
+            const bool near_disk = (std::abs(z_new) < zm_new + 2.0 * H_new
+                                 || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + 2.0 * H_prev)
                                 && r_new >= vol_disk_->r_horizon()
                                 && r_new <= vol_disk_->r_max();
             const bool should_raymarch = crossed_midplane || inside_now || near_disk;
@@ -195,9 +228,12 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
         const double H = vol_disk_->scale_height(r);
         if (!vol_disk_->inside_volume(r, z)) {
             // Only exit when leaving after having been inside the volume,
-            // and we're well beyond the disk surface.
+            // and we're at 3H beyond the disk surface. This is wider than
+            // the outer loop's 2H near_disk trigger, giving a 1H gap that
+            // prevents the outer loop from immediately re-invoking the
+            // raymarcher after this exit.
             const double zm = vol_disk_->z_max_at(r);
-            if (been_inside && std::abs(z) > zm + H) break;
+            if (been_inside && std::abs(z) > zm + 3.0 * H) break;
             // Still approaching or close — use coarse steps when far,
             // fine steps when near the disk surface.
             if (!been_inside) {
@@ -280,6 +316,142 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
     }
 }
 
+TraceResult GeodesicTracer::trace_debug(GeodesicState state,
+                                        const AccretionDisk* disk,
+                                        const SpectrumLUT* spectrum) const {
+    const double r_horizon = metric_.horizon_radius();
+    const double half_pi = std::numbers::pi / 2.0;
+    Vec3 color;
+    double dlambda = 0.01 * observer_r_;
+    GeodesicState prev = state;
+
+    std::printf("=== DEBUG PIXEL TRACE ===\n");
+    std::printf("  r0=%.4f theta0=%.6f phi0=%.4f\n",
+        state.position[1], state.position[2], state.position[3]);
+    std::printf("  p0=(%+.4e %+.4e %+.4e %+.4e)\n",
+        state.momentum[0], state.momentum[1], state.momentum[2], state.momentum[3]);
+    if (vol_disk_) {
+        std::printf("  disk: r_in=%.3f r_out=%.3f r_isco=%.3f\n",
+            vol_disk_->r_horizon(), vol_disk_->r_max(), vol_disk_->r_isco());
+    }
+    std::printf("%-6s %-10s %-10s %-10s %-12s %-8s %-8s %-6s\n",
+        "step", "r", "theta", "z", "dlambda", "H", "zm", "event");
+    std::printf("%.6s %.10s %.10s %.10s %.12s %.8s %.8s %.6s\n",
+        "------","----------","----------","----------","------------","--------","--------","------");
+
+    for (int step = 0; step < max_steps_; ++step) {
+        const double r = state.position[1];
+        if (r < r_horizon + horizon_epsilon_) {
+            std::printf("%-6d %-10.4f  -> HORIZON\n", step, r);
+            return {RayTermination::Horizon, color, state.position, state.momentum};
+        }
+        if (r > r_escape_) {
+            std::printf("%-6d %-10.4f  -> ESCAPED\n", step, r);
+            return {RayTermination::Escaped, color, state.position, state.momentum};
+        }
+
+        prev = state;
+
+        // Step-size clamping near disk (same logic as trace())
+        if (vol_disk_) {
+            const double theta = state.position[2];
+            const double z = r * std::cos(theta);
+            if (r >= vol_disk_->r_horizon() * 0.9 && r <= vol_disk_->r_max() * 1.5) {
+                const double H = vol_disk_->scale_height(r);
+                const double zm = vol_disk_->z_max_at(r);
+                if (std::abs(z) < zm + 6.0 * H) {
+                    auto deriv = RK4::derivatives_kerr(metric_, state);
+                    const double dz_dl = std::abs(
+                        std::cos(theta) * deriv.position[1]
+                        - r * std::sin(theta) * deriv.position[2]);
+                    if (dz_dl > 1e-20) {
+                        const double dl_max = std::max(0.25 * H / dz_dl, H / 64.0);
+                        dlambda = std::min(dlambda, dl_max);
+                    }
+                }
+            }
+        }
+
+        auto result = integrator_.adaptive_step_kerr(metric_, state, dlambda, tolerance_);
+        state = result.state;
+        dlambda = result.next_dlambda;
+
+        const double theta_new = state.position[2];
+        const double r_new = state.position[1];
+        const double z_new = r_new * std::cos(theta_new);
+        const double z_prev2 = prev.position[1] * std::cos(prev.position[2]);
+
+        const char* event = "  ";
+        bool should_raymarch = false;
+
+        if (vol_disk_) {
+            const double d_prev = prev.position[2] - half_pi;
+            const double d_new = theta_new - half_pi;
+            const bool crossed = (d_prev * d_new < 0.0) && std::abs(d_prev - d_new) > 1e-12;
+            const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
+            const double zm_new = vol_disk_->z_max_at(r_new);
+            const double H_new = vol_disk_->scale_height(r_new);
+            const double H_prev2 = vol_disk_->scale_height(prev.position[1]);
+            const bool near = (std::abs(z_new) < zm_new + 2.0 * H_new
+                            || std::abs(z_prev2) < vol_disk_->z_max_at(prev.position[1]) + 2.0 * H_prev2)
+                           && r_new >= vol_disk_->r_horizon() && r_new <= vol_disk_->r_max();
+            should_raymarch = crossed || inside_now || near;
+
+            if (crossed)     event = "CROSS";
+            else if (inside_now) event = "INSIDE";
+            else if (near)   event = "NEAR";
+
+            const double H = vol_disk_->scale_height(r_new);
+            const double zm = vol_disk_->z_max_at(r_new);
+            std::printf("%-6d %-10.4f %-10.6f %-10.4f %-12.4e %-8.4f %-8.4f %s\n",
+                step, r_new, theta_new, z_new, dlambda, H, zm, event);
+        } else {
+            const double H = 0.0, zm = 0.0;
+            std::printf("%-6d %-10.4f %-10.6f %-10.4f %-12.4e %-8s %-8s %s\n",
+                step, r_new, theta_new, z_new, dlambda, "-", "-", event);
+        }
+
+        if (should_raymarch && vol_disk_) {
+            const double r_lo = std::min(prev.position[1], r_new);
+            const double r_hi = std::max(prev.position[1], r_new);
+            if (r_hi >= vol_disk_->r_horizon() && r_lo <= vol_disk_->r_max()) {
+                GeodesicState entry = prev;
+                const double re = entry.position[1];
+                if (re >= vol_disk_->r_horizon() * 0.9 && re <= vol_disk_->r_max() * 1.5) {
+                    std::printf("  -> RAYMARCH entry r=%.4f z=%.4f\n", re,
+                        re * std::cos(entry.position[2]));
+                    raymarch_volumetric(entry, color);
+                    std::printf("  -> RAYMARCH exit  color=(%.4e %.4e %.4e)\n",
+                        color[0], color[1], color[2]);
+                    state = entry;
+                    continue;
+                }
+            }
+        }
+
+        if (!vol_disk_ && disk && spectrum) {
+            const double d_prev = prev.position[2] - half_pi;
+            const double d_new = theta_new - half_pi;
+            if (d_prev * d_new < 0.0 && std::abs(d_prev - d_new) > 1e-12) {
+                const double frac = -d_prev / (d_new - d_prev);
+                const double r_cross = prev.position[1] + frac * (r_new - prev.position[1]);
+                if (r_cross >= disk->r_inner() && r_cross <= disk->r_outer()) {
+                    Vec4 p_cross;
+                    for (int mu = 0; mu < 4; ++mu)
+                        p_cross[mu] = prev.momentum[mu] + frac * (state.momentum[mu] - prev.momentum[mu]);
+                    Vec3 em = disk->emission(r_cross, p_cross, observer_r_, *spectrum);
+                    std::printf("  -> THIN DISK HIT r_cross=%.4f emit=(%.4e %.4e %.4e)\n",
+                        r_cross, em[0], em[1], em[2]);
+                    color += em;
+                }
+            }
+        }
+    }
+
+    std::printf("  -> MAX STEPS  color=(%.4e %.4e %.4e)\n", color[0], color[1], color[2]);
+    return {RayTermination::MaxSteps, color, state.position, state.momentum};
+}
+
 SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
                                                    const std::vector<double>& frequency_bins) const {
     const int num_bins = static_cast<int>(frequency_bins.size());
@@ -313,6 +485,28 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
 
         prev = state;
 
+        // Clamp step size near the volumetric disk (same as trace())
+        {
+            const double theta = state.position[2];
+            const double z = r * std::cos(theta);
+            if (r >= vol_disk_->r_horizon() * 0.9
+                && r <= vol_disk_->r_max() * 1.5) {
+                const double H = vol_disk_->scale_height(r);
+                const double zm = vol_disk_->z_max_at(r);
+                if (std::abs(z) < zm + 6.0 * H) {
+                    auto deriv = RK4::derivatives_kerr(metric_, state);
+                    const double dr_dl = deriv.position[1];
+                    const double dtheta_dl = deriv.position[2];
+                    const double dz_dl = std::abs(
+                        std::cos(theta) * dr_dl - r * std::sin(theta) * dtheta_dl);
+                    if (dz_dl > 1e-20) {
+                        const double dl_max = std::max(0.25 * H / dz_dl, H / 64.0);
+                        dlambda = std::min(dlambda, dl_max);
+                    }
+                }
+            }
+        }
+
         {
             auto result = integrator_.adaptive_step_kerr(metric_, state, dlambda, tolerance_);
             state = result.state;
@@ -335,8 +529,9 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
             const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
             const double zm_new = vol_disk_->z_max_at(r_new);
             const double H_new = vol_disk_->scale_height(r_new);
-            const bool near_disk = (std::abs(z_new) < zm_new + H_new
-                                 || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + vol_disk_->scale_height(r_prev))
+            const double H_prev_s = vol_disk_->scale_height(r_prev);
+            const bool near_disk = (std::abs(z_new) < zm_new + 2.0 * H_new
+                                 || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + 2.0 * H_prev_s)
                                 && r_new >= vol_disk_->r_horizon()
                                 && r_new <= vol_disk_->r_max();
             const bool should_raymarch = crossed_midplane || inside_now || near_disk;
@@ -431,7 +626,7 @@ void GeodesicTracer::raymarch_volumetric_spectral(GeodesicState& state,
         const double H = vol_disk_->scale_height(r);
         if (!vol_disk_->inside_volume(r, z)) {
             const double zm = vol_disk_->z_max_at(r);
-            if (been_inside && std::abs(z) > zm + H) break;
+            if (been_inside && std::abs(z) > zm + 3.0 * H) break;
             if (!been_inside) {
                 ds = std::min(std::abs(z) / 8.0, H * 2.0);
                 ds = std::max(ds, H / 64.0);

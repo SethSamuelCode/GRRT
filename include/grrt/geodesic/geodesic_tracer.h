@@ -46,6 +46,11 @@ public:
                       const AccretionDisk* disk,
                       const SpectrumLUT* spectrum) const;
 
+    /// Like trace() but prints per-step diagnostics to stdout for debugging.
+    TraceResult trace_debug(GeodesicState state,
+                            const AccretionDisk* disk,
+                            const SpectrumLUT* spectrum) const;
+
     SpectralTraceResult trace_spectral(GeodesicState state,
                                        const std::vector<double>& frequency_bins) const;
 
