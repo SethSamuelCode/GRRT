@@ -2,7 +2,7 @@
 
 A general-relativistic ray tracer written in C++23. Traces null geodesics through Schwarzschild and Kerr spacetimes to render physically accurate black hole images, including accretion disk emission, gravitational lensing, and Doppler beaming. Outputs PNG/HDR images and multi-frequency FITS spectral cubes.
 
-![Kerr black hole render](cuda_kerr.png)
+![Kerr black hole render](Image_for_github.png)
 
 ---
 
