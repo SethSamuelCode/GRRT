@@ -328,14 +328,18 @@ int main(int argc, char* argv[]) {
             std::fflush(stderr);
         };
 
-        // NOTE: grrt_render_spectral doesn't take a progress callback yet,
-        // so we call the renderer directly through the C API without progress.
-        // The C API function handles the render.
-        result = grrt_render_spectral(ctx, spectral_buffer.data(),
-                                       params.width, params.height);
+        result = grrt_render_spectral_cb(ctx, spectral_buffer.data(),
+                                          params.width, params.height,
+                                          progress_fn, &pstate);
 
-        // Print completion
-        std::fprintf(stderr, "\n");
+        // Final progress bar
+        {
+            auto elapsed = std::chrono::steady_clock::now() - pstate.start;
+            double secs = std::chrono::duration<double>(elapsed).count();
+            std::fprintf(stderr, "\r  [");
+            for (int i = 0; i < 40; ++i) std::fputc('#', stderr);
+            std::fprintf(stderr, "] 100%%  %.1fs\n", secs);
+        }
 
         if (result == 0) {
             grrt::FITSMetadata meta{};

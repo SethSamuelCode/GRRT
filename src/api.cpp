@@ -244,13 +244,23 @@ void grrt_set_frequency_bins(GRRTContext* ctx,
 
 int grrt_render_spectral(GRRTContext* ctx, double* spectral_buffer,
                           int width, int height) {
+    return grrt_render_spectral_cb(ctx, spectral_buffer, width, height, nullptr, nullptr);
+}
+
+int grrt_render_spectral_cb(GRRTContext* ctx, double* spectral_buffer,
+                              int width, int height,
+                              grrt_progress_fn progress, void* user_data) {
     if (ctx->frequency_bins.empty()) {
         ctx->error_msg = "No frequency bins set -- call grrt_set_frequency_bins first";
         return -1;
     }
 
+    grrt::ProgressCallback cb;
+    if (progress) {
+        cb = [progress, user_data](float f) { progress(f, user_data); };
+    }
     ctx->renderer->render_spectral(spectral_buffer, width, height,
-                                    ctx->frequency_bins);
+                                    ctx->frequency_bins, cb);
     std::println("grrt: rendered {}x{} spectral frame ({} bins, cpu)",
                  width, height, ctx->frequency_bins.size());
     return 0;

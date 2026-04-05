@@ -223,8 +223,10 @@ void write_fits(const std::string&         path,
     // Write data in FITS axis order: k (NAXIS3) outer, j (NAXIS2) middle,
     // i (NAXIS1) inner.  Source layout: data[(j*width + i)*num_bins + k].
     // -----------------------------------------------------------------------
+    // FITS pixel (1,1) is bottom-left; renderer row 0 is top.
+    // Write rows in reverse order so the image is right-side-up in DS9.
     for (int k = 0; k < num_bins; ++k) {
-        for (int j = 0; j < height; ++j) {
+        for (int j = height - 1; j >= 0; --j) {
             for (int i = 0; i < width; ++i) {
                 const double v = data[(j * width + i) * num_bins + k];
                 write_double_be(out, v);

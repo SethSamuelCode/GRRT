@@ -33,6 +33,9 @@ GRRT_EXPORT void grrt_set_frequency_bins(GRRTContext* ctx,
                                           int num_bins);
 GRRT_EXPORT int grrt_render_spectral(GRRTContext* ctx, double* spectral_buffer,
                                       int width, int height);
+GRRT_EXPORT int grrt_render_spectral_cb(GRRTContext* ctx, double* spectral_buffer,
+                                         int width, int height,
+                                         grrt_progress_fn progress, void* user_data);
 
 #ifdef __cplusplus
 }
