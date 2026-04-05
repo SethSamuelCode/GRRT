@@ -65,6 +65,14 @@ else()
         -fdata-sections                  # Dead-code stripping: one section per datum
         -ffunction-sections              # Dead-code stripping: one section per function
     >)
+    # GCC-only flags (Clang does not support these)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
+            -fipa-pta                        # Interprocedural pointer analysis
+            -fdevirtualize-at-ltrans         # Extra devirtualization pass at LTO link time
+            -fvect-cost-model=unlimited      # Force vectorization regardless of cost model
+        >)
+    endif()
     target_link_options(grrt PRIVATE
         $<$<CONFIG:Release>:-flto>
         -Wl,--gc-sections                # Strip unreferenced sections
@@ -111,6 +119,14 @@ else()
         -fdata-sections
         -ffunction-sections
     )
+    # GCC-only flags (Clang does not support these)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(grrt-cli PRIVATE
+            -fipa-pta
+            -fdevirtualize-at-ltrans
+            -fvect-cost-model=unlimited
+        )
+    endif()
     target_link_options(grrt-cli PRIVATE
         $<$<CONFIG:Release>:-flto>
         -Wl,--gc-sections
