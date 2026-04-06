@@ -30,6 +30,11 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
     // Initial step size — conservative, adapts quickly
     double dlambda = 0.01 * observer_r_;
 
+    // Persistent specific-intensity accumulator across raymarch calls.
+    // Prevents double-counting when opacity saturation leaves the exit state
+    // near z=0 and the outer loop immediately re-triggers the raymarcher.
+    double running_J[3] = {0.0, 0.0, 0.0};
+
     GeodesicState prev = state;
 
     for (int step = 0; step < max_steps_; ++step) {
@@ -132,7 +137,7 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
                 const double re = entry.position[1];
                 if (re >= vol_disk_->r_horizon() * 0.9
                     && re <= vol_disk_->r_max() * 1.5) {
-                    raymarch_volumetric(entry, color);
+                    raymarch_volumetric(entry, color, running_J);
                     state = entry;
                     continue;
                 }
@@ -167,15 +172,19 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
     return {RayTermination::MaxSteps, color, state.position, state.momentum};
 }
 
-void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) const {
+void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color, double J_rgb[3]) const {
     using namespace constants;
     const auto& luts = vol_disk_->opacity_luts();
 
     // Three RGB channels at 450nm, 550nm, 650nm
     constexpr double nu_obs[3] = {c_cgs / 450e-7, c_cgs / 550e-7, c_cgs / 650e-7};
 
-    // Invariant J per channel
-    double J[3] = {0.0, 0.0, 0.0};
+    // Invariant J per channel — initialised from caller's running value so
+    // repeated calls for the same physical volume (opacity saturation near
+    // z=0) contribute negligible new emission rather than double-counting.
+    // J_start records the value on entry; we only add the delta to color.
+    const double J_start[3] = {J_rgb[0], J_rgb[1], J_rgb[2]};
+    double J[3] = {J_rgb[0], J_rgb[1], J_rgb[2]};
 
     // Observer p·u (static observer at observer_r_)
     // In geometric units with M=1, g_tt = -(1 - 2M/r)
@@ -310,9 +319,15 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color) cons
         state = new_state;
     }
 
-    // Recover observed intensity: I_obs = J * nu_obs^3
+    // Persist J back to caller so the next call for the same transit starts
+    // from the saturated state rather than from zero.
+    J_rgb[0] = J[0]; J_rgb[1] = J[1]; J_rgb[2] = J[2];
+
+    // Only contribute the NEW emission gathered this call (delta J).
+    // Starting J from the persistent value already captured all prior emission;
+    // adding delta prevents re-counting the same volume on repeated calls.
     for (int ch = 0; ch < 3; ch++) {
-        color[ch] += J[ch] * nu_obs[ch] * nu_obs[ch] * nu_obs[ch];
+        color[ch] += (J[ch] - J_start[ch]) * nu_obs[ch] * nu_obs[ch] * nu_obs[ch];
     }
 }
 
@@ -323,6 +338,7 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
     const double half_pi = std::numbers::pi / 2.0;
     Vec3 color;
     double dlambda = 0.01 * observer_r_;
+    double running_J[3] = {0.0, 0.0, 0.0};
     GeodesicState prev = state;
 
     std::printf("=== DEBUG PIXEL TRACE ===\n");
@@ -420,7 +436,7 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
                 if (re >= vol_disk_->r_horizon() * 0.9 && re <= vol_disk_->r_max() * 1.5) {
                     std::printf("  -> RAYMARCH entry r=%.4f z=%.4f\n", re,
                         re * std::cos(entry.position[2]));
-                    raymarch_volumetric(entry, color);
+                    raymarch_volumetric(entry, color, running_J);
                     std::printf("  -> RAYMARCH exit  color=(%.4e %.4e %.4e)\n",
                         color[0], color[1], color[2]);
                     state = entry;
