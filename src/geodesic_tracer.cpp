@@ -94,9 +94,10 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
             }
         }
 
-        // Adaptive RK4 step — concrete Kerr, no virtual dispatch
+        // Adaptive Dormand-Prince 4(5) — 7 derivative evaluations
+        // instead of 12 for step-doubling RK4, with PI step control.
         {
-            auto result = integrator_.adaptive_step_kerr(metric_, state, dlambda, tolerance_);
+            auto result = integrator_.adaptive_step_kerr_dp45(metric_, state, dlambda, tolerance_);
             state = result.state;
             dlambda = result.next_dlambda;
         }
@@ -402,7 +403,7 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
             }
         }
 
-        auto result = integrator_.adaptive_step_kerr(metric_, state, dlambda, tolerance_);
+        auto result = integrator_.adaptive_step_kerr_dp45(metric_, state, dlambda, tolerance_);
         state = result.state;
         dlambda = result.next_dlambda;
 
@@ -548,7 +549,7 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
         }
 
         {
-            auto result = integrator_.adaptive_step_kerr(metric_, state, dlambda, tolerance_);
+            auto result = integrator_.adaptive_step_kerr_dp45(metric_, state, dlambda, tolerance_);
             state = result.state;
             dlambda = result.next_dlambda;
         }

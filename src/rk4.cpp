@@ -79,4 +79,60 @@ AdaptiveResult RK4::adaptive_step_kerr(const Kerr& metric, const GeodesicState& 
     return {s_half, dl};
 }
 
+// ---------- Dormand-Prince 4(5) adaptive controller ----------
+// 7 derivative evaluations per attempt (6 stages + 1 FSAL) vs 12 for
+// step-doubling RK4.  Smooth PI step-size control replaces the old
+// conservative "double or stay" logic.
+
+AdaptiveResult RK4::adaptive_step_kerr_dp45(const Kerr& metric,
+                                             const GeodesicState& state,
+                                             double dlambda,
+                                             double tolerance) const {
+    constexpr double dl_min = 1e-6;
+    constexpr int max_retries = 20;
+    // PI controller constants (standard for RK45):
+    //   safety factor 0.9, exponent 0.2 = 1/(p+1) for p=4
+    constexpr double safety = 0.9;
+    constexpr double p_exp = 0.2;       // 1/5
+    constexpr double grow_max = 5.0;    // max step growth factor
+    constexpr double shrink_max = 0.2;  // max step shrink factor (don't shrink below 1/5)
+
+    double dl = dlambda;
+
+    for (int retry = 0; retry < max_retries; ++retry) {
+        auto result = step_kerr_rkdp45(metric, state, dl);
+
+        if (result.error_norm <= tolerance) {
+            // Accepted — compute next step size via PI controller.
+            double factor = (result.error_norm > 1e-30)
+                          ? safety * std::pow(tolerance / result.error_norm, p_exp)
+                          : grow_max;
+            factor = std::clamp(factor, 1.0, grow_max);  // only grow on accept
+            double next_dl = dl * factor;
+
+            // Cap to geometric scale: don't overshoot in curved regions
+            double r = std::abs(result.y5.position[1]);
+            next_dl = std::min(next_dl, 5.0 * std::max(r, 1.0));
+
+            return {result.y5, next_dl};
+        }
+
+        // Rejected — shrink step and retry.
+        double factor = safety * std::pow(tolerance / result.error_norm, p_exp);
+        factor = std::clamp(factor, shrink_max, 1.0);
+        dl *= factor;
+
+        if (dl < dl_min) {
+            // Step too small — accept whatever we have.
+            double r = std::abs(result.y5.position[1]);
+            double next_dl = std::min(dl_min, 5.0 * std::max(r, 1.0));
+            return {result.y5, next_dl};
+        }
+    }
+
+    // Exhausted retries — take the last result.
+    auto result = step_kerr_rkdp45(metric, state, dl);
+    return {result.y5, dl};
+}
+
 } // namespace grrt

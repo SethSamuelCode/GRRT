@@ -1,0 +1,71 @@
+GRRT CPU Profile Results
+========================
+Date: 2025-04-06
+Resolution: 960x540, 1 spp
+Metric: Kerr (a=0.998), observer at r=50
+Mode: --disk-volumetric --backend cpu
+Wall time: 3.6s
+CPU: (check system — OpenMP multi-threaded)
+
+=== GRRT Profile (CPU-time summed across all threads) ===
+Traces: 518400  (130.7 us avg,  67747 ms total CPU-time)
+  Outer loop (RK4+clamper+detect):   64687 ms  ( 95.5%)
+    Steps: 122657380  (237 avg/trace)
+  Raymarch (volumetric disk):          3060 ms  (  4.5%)
+    Entries: 304935  (0.59 per trace)
+    Total steps: 7617964  (25 per entry)
+    Physics steps: 3414335  (11 per entry)
+    --- Cycle breakdown (rdtsc) ---
+    RK2 geodesic:       20.6%
+    Physics (rho/v/kappa/RT):  79.4%
+=======================================================
+
+Analysis
+--------
+The DOMINANT bottleneck is the outer geodesic integration loop, which
+accounts for 95.5% of all CPU time.
+
+Each trace averages 237 adaptive RK4 steps. Each adaptive step does
+step-doubling error control: one full step + two half steps = 3x step_kerr
+= 12 calls to derivatives_kerr (Christoffel symbol computation) per
+adaptive step.
+
+Total metric evaluations per frame:
+  518400 traces × 237 steps × 12 derivatives = ~1.47 billion
+
+The volumetric raymarcher is only 4.5% of total time. Within it:
+  - Physics (density, velocity, opacity LUTs, radiative transfer): 79.4%
+  - RK2 geodesic steps: 20.6%
+  - Only 0.59 raymarch entries per trace (most rays miss the disk)
+  - Average 25 steps per raymarch entry, 11 of which do physics
+
+Optimization Targets (in priority order)
+-----------------------------------------
+1. OUTER LOOP — adaptive_step_kerr (95.5% of time)
+   - Reduce step count: larger steps far from the black hole (r >> 10M)
+     where spacetime is nearly flat. Current adaptive tolerance may be
+     overly conservative for far-field.
+   - Cheaper adaptive scheme: RK2 step-doubling (4 derivatives instead
+     of 12 per adaptive step) or embedded RK methods (e.g. RK45
+     Dormand-Prince, error estimate for free — 6 derivatives total).
+   - Analytic geodesics for Schwarzschild (exact elliptic integrals) —
+     not applicable to Kerr.
+   - Carter constant integration: for Kerr, use conserved quantities
+     (E, L, Q) to reduce the ODE system or predict when midplane
+     crossings occur without stepping.
+   - Fast far-field: switch to straight-line propagation beyond some
+     r_flat where curvature is negligible, only enter full GR integration
+     when r < r_flat.
+
+2. RAYMARCH PHYSICS (3.6% of total time)
+   - density_cgs() internally re-calls scale_height(r) and z_max_at(r)
+     which are already computed in the raymarcher. A version accepting
+     pre-computed H/zm would eliminate redundant interp_radial calls.
+   - Noise (FBM, 2 octaves) in density — could reduce to 1 octave or
+     remove in preview mode.
+
+3. LOAD IMBALANCE
+   - Disk-hitting pixels (near equator) are ~100x more expensive than
+     sky pixels. OpenMP schedule(guided) helps but is not optimal.
+     A work-stealing queue or tiled approach with priority for disk
+     pixels would improve thread utilization.
