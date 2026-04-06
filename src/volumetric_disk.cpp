@@ -153,7 +153,10 @@ double VolumetricDisk::taper(double r) const {
 bool VolumetricDisk::inside_volume(double r, double z) const {
     if (r <= r_horizon_ || r > r_outer_) return false;
     const double zm = z_max_at(r);
-    return std::abs(z) < zm;
+    const double H  = scale_height(r);
+    // Include a soft-edge zone of 1.5H above the photosphere so the
+    // raymarcher accumulates the exponentially-tapered atmosphere there.
+    return std::abs(z) < zm + 1.5 * H;
 }
 
 // ============================================================================
@@ -223,12 +226,26 @@ double VolumetricDisk::z_max_at(double r) const {
 }
 
 double VolumetricDisk::density(double r, double z, double phi) const {
-    if (!inside_volume(r, z)) return 0.0;
+    if (r <= r_horizon_ || r > r_outer_) return 0.0;
     const double z_abs = std::abs(z);
-    const double rho_mid = interp_radial(rho_mid_lut_, r);
-    const double rho_norm = interp_2d(rho_profile_lut_, r, z_abs);
-    const double H = scale_height(r);
-    const double base = rho_mid * rho_norm * rho_scale_ * taper(r);
+    const double zm = z_max_at(r);
+    const double H  = scale_height(r);
+
+    // Smooth edge: above the photosphere (z_max) taper density to zero over
+    // 1.5 scale heights with a Gaussian profile.  This removes the hard
+    // binary boundary that caused staircase artifacts at grazing angles.
+    double edge_factor = 1.0;
+    double z_lookup = z_abs;
+    if (z_abs >= zm) {
+        const double dz = z_abs - zm;
+        if (dz >= 1.5 * H) return 0.0;
+        edge_factor = std::exp(-2.0 * (dz / H) * (dz / H));
+        z_lookup = zm * 0.9999;  // clamp to just inside the LUT range
+    }
+
+    const double rho_mid  = interp_radial(rho_mid_lut_, r);
+    const double rho_norm = interp_2d(rho_profile_lut_, r, z_lookup);
+    const double base = rho_mid * rho_norm * rho_scale_ * taper(r) * edge_factor;
     // Turbulent noise (Section 1.5)
     // Sample in Cartesian-like coordinates scaled to a fixed reference length
     // to avoid aliasing when r/H is huge (r/H can exceed 1000 in outer disk).
@@ -245,8 +262,14 @@ double VolumetricDisk::density_cgs(double r, double z, double phi) const {
 }
 
 double VolumetricDisk::temperature(double r, double z) const {
-    if (!inside_volume(r, z)) return 0.0;
-    return interp_2d(T_profile_lut_, r, std::abs(z));
+    if (r <= r_horizon_ || r > r_outer_) return 0.0;
+    const double z_abs = std::abs(z);
+    const double zm = z_max_at(r);
+    const double H  = scale_height(r);
+    if (z_abs >= zm + 1.5 * H) return 0.0;
+    // In the soft-edge zone use the surface temperature (z clamped to zm).
+    const double z_lookup = std::min(z_abs, zm * 0.9999);
+    return interp_2d(T_profile_lut_, r, z_lookup);
 }
 
 // ============================================================================

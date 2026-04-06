@@ -27,6 +27,10 @@ GRRT_EXPORT const char* grrt_last_error(void);
 // Apply auto-exposure tone mapping to a linear HDR framebuffer (RGBA float, in-place)
 GRRT_EXPORT void grrt_tonemap(float* framebuffer, int width, int height);
 
+// Trace a single pixel and print per-step diagnostics to stdout.
+// px, py are integer pixel coordinates (0-based, origin top-left).
+GRRT_EXPORT void grrt_debug_pixel(GRRTContext* ctx, int px, int py);
+
 // Spectral rendering
 GRRT_EXPORT void grrt_set_frequency_bins(GRRTContext* ctx,
                                           const double* frequencies_hz,

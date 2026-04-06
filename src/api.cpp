@@ -335,3 +335,14 @@ void grrt_tonemap(float* framebuffer, int width, int height) {
     grrt::ToneMapper tonemapper;
     tonemapper.apply_all(framebuffer, width, height);
 }
+
+void grrt_debug_pixel(GRRTContext* ctx, int px, int py) {
+    if (!ctx || !ctx->camera || !ctx->tracer) {
+        std::printf("grrt_debug_pixel: context not ready\n");
+        return;
+    }
+    std::printf("Debugging pixel (%d, %d) in %dx%d image\n",
+        px, py, ctx->params.width, ctx->params.height);
+    grrt::GeodesicState state = ctx->camera->ray_for_pixel(px, py);
+    ctx->tracer->trace_debug(state, ctx->disk.get(), ctx->spectrum.get());
+}

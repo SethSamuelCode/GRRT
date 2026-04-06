@@ -46,6 +46,11 @@ public:
                       const AccretionDisk* disk,
                       const SpectrumLUT* spectrum) const;
 
+    /// Like trace() but prints per-step diagnostics to stdout for debugging.
+    TraceResult trace_debug(GeodesicState state,
+                            const AccretionDisk* disk,
+                            const SpectrumLUT* spectrum) const;
+
     SpectralTraceResult trace_spectral(GeodesicState state,
                                        const std::vector<double>& frequency_bins) const;
 
@@ -59,11 +64,13 @@ private:
     double horizon_epsilon_ = 0.01;
     const VolumetricDisk* vol_disk_ = nullptr;
 
-    void raymarch_volumetric(GeodesicState& state, Vec3& color) const;
+    void raymarch_volumetric(GeodesicState& state, Vec3& color,
+                             double J_rgb[3], double T_rgb[3]) const;
 
     void raymarch_volumetric_spectral(GeodesicState& state,
                                       const std::vector<double>& nu_obs,
                                       std::vector<double>& J,
+                                      std::vector<double>& T_trans,
                                       std::vector<double>& tau_acc) const;
 };
 

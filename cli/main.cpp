@@ -40,6 +40,7 @@ static void print_usage() {
     std::println("  --threads N           CPU threads, 0=auto (default: 0)");
     std::println("  --backend TYPE        cpu | cuda (default: cpu)");
     std::println("  --validate            Render on both backends, compare results");
+    std::println("  --debug-pixel X Y     Trace one pixel and dump per-step diagnostics to stdout");
     std::println("  --output NAME         Output base name (default: output)");
     std::println("                        Produces NAME.png, NAME.hdr, NAME_linear.hdr");
     std::println("  --frequencies LIST    Comma-separated frequencies in Hz (e.g., 1e9,1e14,1e18)");
@@ -84,6 +85,7 @@ int main(int argc, char* argv[]) {
     std::string output_name = "output";
     std::string backend_str = "cpu";
     bool validate = false;
+    int debug_px = -1, debug_py = -1;
     std::vector<double> cli_freq_bins;
 
     // Parse arguments
@@ -160,6 +162,10 @@ int main(int argc, char* argv[]) {
             if (auto v = next()) backend_str = v;
         } else if (arg("--validate")) {
             validate = true;
+        } else if (arg("--debug-pixel")) {
+            const char* vx = next();
+            const char* vy = next();
+            if (vx && vy) { debug_px = std::atoi(vx); debug_py = std::atoi(vy); }
         } else if (arg("--output")) {
             if (auto v = next()) output_name = v;
         } else if (arg("--frequencies")) {
@@ -289,6 +295,13 @@ int main(int argc, char* argv[]) {
     if (!ctx) {
         std::println(stderr, "Failed to create render context");
         return 1;
+    }
+
+    // Debug single pixel mode — trace and exit without rendering
+    if (debug_px >= 0 && debug_py >= 0) {
+        grrt_debug_pixel(ctx, debug_px, debug_py);
+        grrt_destroy(ctx);
+        return 0;
     }
 
     // Flush stdout so banner + create message appear before the progress bar
