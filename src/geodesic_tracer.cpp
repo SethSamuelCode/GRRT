@@ -30,10 +30,22 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
     // Initial step size — conservative, adapts quickly
     double dlambda = 0.01 * observer_r_;
 
-    // Persistent specific-intensity accumulator across raymarch calls.
-    // Prevents double-counting when opacity saturation leaves the exit state
-    // near z=0 and the outer loop immediately re-triggers the raymarcher.
+    // Persistent radiative transfer state across raymarch calls.
+    // J = accumulated invariant specific intensity (backward formula).
+    // T = remaining transmission (1 = fully transparent, 0 = opaque).
+    // Persisting both prevents double-counting on re-entry and ensures
+    // correct front-to-back ordering (front disk occludes back disk).
     double running_J[3] = {0.0, 0.0, 0.0};
+    double running_T[3] = {1.0, 1.0, 1.0};
+
+    // Finalize volumetric contribution: convert invariant J to observed color.
+    constexpr double nu_rgb[3] = {constants::c_cgs / 450e-7,
+                                  constants::c_cgs / 550e-7,
+                                  constants::c_cgs / 650e-7};
+    auto finalize_vol_color = [&]() {
+        for (int ch = 0; ch < 3; ++ch)
+            color[ch] += running_J[ch] * nu_rgb[ch] * nu_rgb[ch] * nu_rgb[ch];
+    };
 
     GeodesicState prev = state;
 
@@ -42,9 +54,11 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
 
         // Check termination
         if (r < r_horizon + horizon_epsilon_) {
+            finalize_vol_color();
             return {RayTermination::Horizon, color, state.position, state.momentum};
         }
         if (r > r_escape_) {
+            finalize_vol_color();
             return {RayTermination::Escaped, color, state.position, state.momentum};
         }
 
@@ -137,7 +151,7 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
                 const double re = entry.position[1];
                 if (re >= vol_disk_->r_horizon() * 0.9
                     && re <= vol_disk_->r_max() * 1.5) {
-                    raymarch_volumetric(entry, color, running_J);
+                    raymarch_volumetric(entry, color, running_J, running_T);
                     state = entry;
                     continue;
                 }
@@ -169,22 +183,25 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
         }
     }
 
+    finalize_vol_color();
     return {RayTermination::MaxSteps, color, state.position, state.momentum};
 }
 
-void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color, double J_rgb[3]) const {
+void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color,
+                                          double J_rgb[3], double T_rgb[3]) const {
     using namespace constants;
     const auto& luts = vol_disk_->opacity_luts();
 
     // Three RGB channels at 450nm, 550nm, 650nm
     constexpr double nu_obs[3] = {c_cgs / 450e-7, c_cgs / 550e-7, c_cgs / 650e-7};
 
-    // Invariant J per channel — initialised from caller's running value so
-    // repeated calls for the same physical volume (opacity saturation near
-    // z=0) contribute negligible new emission rather than double-counting.
-    // J_start records the value on entry; we only add the delta to color.
-    const double J_start[3] = {J_rgb[0], J_rgb[1], J_rgb[2]};
+    // Backward radiative transfer accumulation:
+    //   J += T * S * (1 - exp(-dtau))   (new emission, attenuated by material in front)
+    //   T *= exp(-dtau)                  (transmission decreases)
+    // Persisted across calls so repeated re-entries and separate transits
+    // (front disk → back disk) are composited with correct occlusion.
     double J[3] = {J_rgb[0], J_rgb[1], J_rgb[2]};
+    double T[3] = {T_rgb[0], T_rgb[1], T_rgb[2]};
 
     // Observer p·u (static observer at observer_r_)
     // In geometric units with M=1, g_tt = -(1 - 2M/r)
@@ -201,7 +218,6 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color, doub
     int step_count = 0;
     constexpr int MAX_STEPS = 4096;
     constexpr double DTAU_TARGET = 0.05;  // target optical depth per step
-    double tau_acc[3] = {0.0, 0.0, 0.0};
     bool been_inside = vol_disk_->inside_volume(r, z_start);
 
     while (step_count < MAX_STEPS) {
@@ -232,7 +248,8 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color, doub
         // Hard exits
         if (r < vol_disk_->r_horizon()) break;
         if (r > vol_disk_->r_max()) break;  // left the disk radially
-        if (tau_acc[0] > 10.0 && tau_acc[1] > 10.0 && tau_acc[2] > 10.0) break;
+        // Exit when cumulative transmission is negligible (opaque).
+        if (T[0] < 1e-6 && T[1] < 1e-6 && T[2] < 1e-6) break;
 
         const double H = vol_disk_->scale_height(r);
         if (!vol_disk_->inside_volume(r, z)) {
@@ -258,13 +275,13 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color, doub
 
         // Look up local state
         const double rho_cgs = vol_disk_->density_cgs(r, z, phi);
-        const double T = vol_disk_->temperature(r, std::abs(z));
-        if (rho_cgs <= 0.0 || T <= 0.0) {
+        const double T_local = vol_disk_->temperature(r, std::abs(z));
+        if (rho_cgs <= 0.0 || T_local <= 0.0) {
             state = new_state;
             continue;
         }
 
-        const double T_turb = T; // Simplified for now
+        const double T_turb = T_local;
 
         // Compute redshift g = (p·u)_emit / (p·u)_obs
         double ut_emit = 0.0, ur_emit = 0.0, uphi_emit = 0.0;
@@ -294,14 +311,16 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color, doub
             const double epsilon = (ktot > 0.0) ? kabs / ktot : 1.0;
 
             const double dtau = ktot * rho_cgs * ds_proper;
-            tau_acc[ch] += dtau;
 
             // Invariant source: S = epsilon * B_nu(nu_emit, T) / nu_emit^3
             const double Bnu = planck_nu(nu_emit, T_turb);
             const double S = epsilon * Bnu / (nu_emit * nu_emit * nu_emit);
 
             const double exp_dtau = std::exp(-dtau);
-            J[ch] = J[ch] * exp_dtau + S * (1.0 - exp_dtau);
+            // Backward accumulation: new emission weighted by what's
+            // already in front (T), then reduce transmission.
+            J[ch] += T[ch] * S * (1.0 - exp_dtau);
+            T[ch] *= exp_dtau;
         }
 
         // Smooth adaptive step control: adjust ds so dtau ≈ DTAU_TARGET
@@ -319,16 +338,9 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color, doub
         state = new_state;
     }
 
-    // Persist J back to caller so the next call for the same transit starts
-    // from the saturated state rather than from zero.
+    // Persist J and T back to caller for correct compositing across calls.
     J_rgb[0] = J[0]; J_rgb[1] = J[1]; J_rgb[2] = J[2];
-
-    // Only contribute the NEW emission gathered this call (delta J).
-    // Starting J from the persistent value already captured all prior emission;
-    // adding delta prevents re-counting the same volume on repeated calls.
-    for (int ch = 0; ch < 3; ch++) {
-        color[ch] += (J[ch] - J_start[ch]) * nu_obs[ch] * nu_obs[ch] * nu_obs[ch];
-    }
+    T_rgb[0] = T[0]; T_rgb[1] = T[1]; T_rgb[2] = T[2];
 }
 
 TraceResult GeodesicTracer::trace_debug(GeodesicState state,
@@ -339,6 +351,14 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
     Vec3 color;
     double dlambda = 0.01 * observer_r_;
     double running_J[3] = {0.0, 0.0, 0.0};
+    double running_T[3] = {1.0, 1.0, 1.0};
+    constexpr double nu_rgb[3] = {constants::c_cgs / 450e-7,
+                                  constants::c_cgs / 550e-7,
+                                  constants::c_cgs / 650e-7};
+    auto finalize_vol_color = [&]() {
+        for (int ch = 0; ch < 3; ++ch)
+            color[ch] += running_J[ch] * nu_rgb[ch] * nu_rgb[ch] * nu_rgb[ch];
+    };
     GeodesicState prev = state;
 
     std::printf("=== DEBUG PIXEL TRACE ===\n");
@@ -359,10 +379,12 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
         const double r = state.position[1];
         if (r < r_horizon + horizon_epsilon_) {
             std::printf("%-6d %-10.4f  -> HORIZON\n", step, r);
+            finalize_vol_color();
             return {RayTermination::Horizon, color, state.position, state.momentum};
         }
         if (r > r_escape_) {
             std::printf("%-6d %-10.4f  -> ESCAPED\n", step, r);
+            finalize_vol_color();
             return {RayTermination::Escaped, color, state.position, state.momentum};
         }
 
@@ -436,9 +458,13 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
                 if (re >= vol_disk_->r_horizon() * 0.9 && re <= vol_disk_->r_max() * 1.5) {
                     std::printf("  -> RAYMARCH entry r=%.4f z=%.4f\n", re,
                         re * std::cos(entry.position[2]));
-                    raymarch_volumetric(entry, color, running_J);
+                    raymarch_volumetric(entry, color, running_J, running_T);
+                    // Compute current observed color from J
+                    Vec3 cur_color;
+                    for (int ch = 0; ch < 3; ++ch)
+                        cur_color[ch] = running_J[ch] * nu_rgb[ch] * nu_rgb[ch] * nu_rgb[ch];
                     std::printf("  -> RAYMARCH exit  color=(%.4e %.4e %.4e)\n",
-                        color[0], color[1], color[2]);
+                        cur_color[0], cur_color[1], cur_color[2]);
                     state = entry;
                     continue;
                 }
@@ -465,6 +491,7 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
     }
 
     std::printf("  -> MAX STEPS  color=(%.4e %.4e %.4e)\n", color[0], color[1], color[2]);
+    finalize_vol_color();
     return {RayTermination::MaxSteps, color, state.position, state.momentum};
 }
 
@@ -481,6 +508,7 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
     }
 
     std::vector<double> J(num_bins, 0.0);
+    std::vector<double> T_trans(num_bins, 1.0);
     std::vector<double> tau_acc(num_bins, 0.0);
 
     double dlambda = 0.01 * observer_r_;
@@ -560,7 +588,7 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
                     const double re = entry.position[1];
                     if (re >= vol_disk_->r_horizon() * 0.9
                         && re <= vol_disk_->r_max() * 1.5) {
-                        raymarch_volumetric_spectral(entry, frequency_bins, J, tau_acc);
+                        raymarch_volumetric_spectral(entry, frequency_bins, J, T_trans, tau_acc);
                         state = entry;
                         continue;
                     }
@@ -580,6 +608,7 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
 void GeodesicTracer::raymarch_volumetric_spectral(GeodesicState& state,
                                                    const std::vector<double>& nu_obs,
                                                    std::vector<double>& J,
+                                                   std::vector<double>& T_trans,
                                                    std::vector<double>& tau_acc) const {
     using namespace constants;
     const auto& luts = vol_disk_->opacity_luts();
@@ -697,7 +726,10 @@ void GeodesicTracer::raymarch_volumetric_spectral(GeodesicState& state,
             const double S = epsilon * Bnu / (nu_emit * nu_emit * nu_emit);
 
             const double exp_dtau = std::exp(-dtau);
-            J[ch] = J[ch] * exp_dtau + S * (1.0 - exp_dtau);
+            // Backward accumulation: emission weighted by accumulated
+            // transmission from material already in front.
+            J[ch] += T_trans[ch] * S * (1.0 - exp_dtau);
+            T_trans[ch] *= exp_dtau;
         }
 
         // Adaptive step control using median frequency bin
