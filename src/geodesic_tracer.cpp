@@ -237,11 +237,11 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color,
         const double phi = new_state.position[3];
         const double z = r * std::cos(theta);
 
-        // Hard exits
-        if (r < vol_disk_->r_horizon()) break;
-        if (r > vol_disk_->r_max()) break;  // left the disk radially
+        // Hard exits — always advance state so the outer loop makes progress.
+        if (r < vol_disk_->r_horizon()) { state = new_state; break; }
+        if (r > vol_disk_->r_max())     { state = new_state; break; }
         // Exit when cumulative transmission is negligible (opaque).
-        if (T[0] < 1e-6 && T[1] < 1e-6 && T[2] < 1e-6) break;
+        if (T[0] < 1e-6 && T[1] < 1e-6 && T[2] < 1e-6) { state = new_state; break; }
 
         const double H = vol_disk_->scale_height(r);
         if (!vol_disk_->inside_volume(r, z)) {
@@ -251,7 +251,7 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color,
             // prevents the outer loop from immediately re-invoking the
             // raymarcher after this exit.
             const double zm = vol_disk_->z_max_at(r);
-            if (been_inside && std::abs(z) > zm + 3.0 * H) break;
+            if (been_inside && std::abs(z) > zm + 3.0 * H) { state = new_state; break; }
             // Still approaching or close — use coarse steps when far,
             // fine steps when near the disk surface.
             if (!been_inside) {
@@ -651,9 +651,9 @@ void GeodesicTracer::raymarch_volumetric_spectral(GeodesicState& state,
         const double phi = new_state.position[3];
         const double z = r * std::cos(theta);
 
-        // Hard exits
-        if (r < vol_disk_->r_horizon()) break;
-        if (r > vol_disk_->r_max()) break;
+        // Hard exits — always advance state so the outer loop makes progress.
+        if (r < vol_disk_->r_horizon()) { state = new_state; break; }
+        if (r > vol_disk_->r_max())     { state = new_state; break; }
 
         // Early exit when all bins are optically thick
         {
@@ -661,13 +661,13 @@ void GeodesicTracer::raymarch_volumetric_spectral(GeodesicState& state,
             for (int ch = 0; ch < num_bins; ++ch) {
                 if (tau_acc[ch] <= 10.0) { all_thick = false; break; }
             }
-            if (all_thick) break;
+            if (all_thick) { state = new_state; break; }
         }
 
         const double H = vol_disk_->scale_height(r);
         if (!vol_disk_->inside_volume(r, z)) {
             const double zm = vol_disk_->z_max_at(r);
-            if (been_inside && std::abs(z) > zm + 3.0 * H) break;
+            if (been_inside && std::abs(z) > zm + 3.0 * H) { state = new_state; break; }
             if (!been_inside) {
                 ds = std::min(std::abs(z) / 8.0, H * 2.0);
                 ds = std::max(ds, H / 64.0);
