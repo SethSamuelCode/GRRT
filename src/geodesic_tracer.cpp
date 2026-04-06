@@ -110,53 +110,45 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
         //     by checking if either endpoint's |z| is within 3H of the
         //     midplane at the endpoint's r.
         if (vol_disk_) {
-            const double theta_prev = prev.position[2];
-            const double theta_new = state.position[2];
-            const double d_prev = theta_prev - half_pi;
-            const double d_new = theta_new - half_pi;
-            const double r_new = state.position[1];
-            const double r_prev = prev.position[1];
+            // Skip all disk interaction if fully opaque — nothing more can contribute.
+            const bool opaque = (running_T[0] < 1e-6 && running_T[1] < 1e-6 && running_T[2] < 1e-6);
+            if (!opaque) {
+                const double theta_prev = prev.position[2];
+                const double theta_new = state.position[2];
+                const double d_prev = theta_prev - half_pi;
+                const double d_new = theta_new - half_pi;
+                const double r_new = state.position[1];
+                const double r_prev = prev.position[1];
 
-            const double z_new = r_new * std::cos(theta_new);
-            const double z_prev = r_prev * std::cos(theta_prev);
-            const bool crossed_midplane = (d_prev * d_new < 0.0)
-                                       && std::abs(d_prev - d_new) > 1e-12;
-            const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
-            // Check if the minimum |z| along the step could have been inside
-            // the disk.  Conservative: if either endpoint is within 3H of the
-            // disk surface, the ray may have grazed the volume.
-            const double zm_new = vol_disk_->z_max_at(r_new);
-            const double H_new = vol_disk_->scale_height(r_new);
-            const double H_prev = vol_disk_->scale_height(r_prev);
-            // Trigger zone: 2H beyond disk surface. Raymarcher exits at 3H,
-            // giving a 1H gap that prevents immediate re-entry.
-            const bool near_disk = (std::abs(z_new) < zm_new + 2.0 * H_new
-                                 || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + 2.0 * H_prev)
-                                && r_new >= vol_disk_->r_horizon()
-                                && r_new <= vol_disk_->r_max();
-            const bool should_raymarch = crossed_midplane || inside_now || near_disk;
+                const double z_new = r_new * std::cos(theta_new);
+                const double z_prev = r_prev * std::cos(theta_prev);
+                const bool crossed_midplane = (d_prev * d_new < 0.0)
+                                           && std::abs(d_prev - d_new) > 1e-12;
+                const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
+                const double zm_new = vol_disk_->z_max_at(r_new);
+                const double H_new = vol_disk_->scale_height(r_new);
+                const double H_prev = vol_disk_->scale_height(r_prev);
+                const bool near_disk = (std::abs(z_new) < zm_new + 2.0 * H_new
+                                     || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + 2.0 * H_prev)
+                                    && r_new >= vol_disk_->r_horizon()
+                                    && r_new <= vol_disk_->r_max();
+                const bool should_raymarch = crossed_midplane || inside_now || near_disk;
 
-            if (should_raymarch) {
-                // Radial bounds: the step's radial range must overlap the disk.
-                const double r_lo = std::min(r_prev, r_new);
-                const double r_hi = std::max(r_prev, r_new);
-                if (r_hi < vol_disk_->r_horizon() || r_lo > vol_disk_->r_max())
-                    goto skip_vol;
-
-                // Always use the pre-step state — it has correct momentum
-                // from the adaptive integrator.  The raymarcher handles
-                // approaching the disk from above with fast coarse steps,
-                // then switches to fine steps once inside the volume.
-                GeodesicState entry = prev;
-                const double re = entry.position[1];
-                if (re >= vol_disk_->r_horizon() * 0.9
-                    && re <= vol_disk_->r_max() * 1.5) {
-                    raymarch_volumetric(entry, color, running_J, running_T);
-                    state = entry;
-                    continue;
+                if (should_raymarch) {
+                    const double r_lo = std::min(r_prev, r_new);
+                    const double r_hi = std::max(r_prev, r_new);
+                    if (r_hi >= vol_disk_->r_horizon() && r_lo <= vol_disk_->r_max()) {
+                        GeodesicState entry = prev;
+                        const double re = entry.position[1];
+                        if (re >= vol_disk_->r_horizon() * 0.9
+                            && re <= vol_disk_->r_max() * 1.5) {
+                            raymarch_volumetric(entry, color, running_J, running_T);
+                            state = entry;
+                            continue;
+                        }
+                    }
                 }
             }
-            skip_vol:;
         }
 
         // Check for disk crossing (θ crosses π/2) — thin disk only
@@ -423,21 +415,25 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
         bool should_raymarch = false;
 
         if (vol_disk_) {
-            const double d_prev = prev.position[2] - half_pi;
-            const double d_new = theta_new - half_pi;
-            const bool crossed = (d_prev * d_new < 0.0) && std::abs(d_prev - d_new) > 1e-12;
-            const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
-            const double zm_new = vol_disk_->z_max_at(r_new);
-            const double H_new = vol_disk_->scale_height(r_new);
-            const double H_prev2 = vol_disk_->scale_height(prev.position[1]);
-            const bool near = (std::abs(z_new) < zm_new + 2.0 * H_new
-                            || std::abs(z_prev2) < vol_disk_->z_max_at(prev.position[1]) + 2.0 * H_prev2)
-                           && r_new >= vol_disk_->r_horizon() && r_new <= vol_disk_->r_max();
-            should_raymarch = crossed || inside_now || near;
+            // Skip all disk interaction if fully opaque — nothing more can contribute.
+            const bool opaque = (running_T[0] < 1e-6 && running_T[1] < 1e-6 && running_T[2] < 1e-6);
+            if (!opaque) {
+                const double d_prev = prev.position[2] - half_pi;
+                const double d_new = theta_new - half_pi;
+                const bool crossed = (d_prev * d_new < 0.0) && std::abs(d_prev - d_new) > 1e-12;
+                const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
+                const double zm_new = vol_disk_->z_max_at(r_new);
+                const double H_new = vol_disk_->scale_height(r_new);
+                const double H_prev2 = vol_disk_->scale_height(prev.position[1]);
+                const bool near = (std::abs(z_new) < zm_new + 2.0 * H_new
+                                || std::abs(z_prev2) < vol_disk_->z_max_at(prev.position[1]) + 2.0 * H_prev2)
+                               && r_new >= vol_disk_->r_horizon() && r_new <= vol_disk_->r_max();
+                should_raymarch = crossed || inside_now || near;
 
-            if (crossed)     event = "CROSS";
-            else if (inside_now) event = "INSIDE";
-            else if (near)   event = "NEAR";
+                if (crossed)     event = "CROSS";
+                else if (inside_now) event = "INSIDE";
+                else if (near)   event = "NEAR";
+            }
 
             const double H = vol_disk_->scale_height(r_new);
             const double zm = vol_disk_->z_max_at(r_new);
