@@ -11,6 +11,14 @@
 #include <chrono>
 #include <cstdio>
 
+#ifdef _WIN32
+  #include <io.h>
+  static bool stdin_is_tty() { return _isatty(_fileno(stdin)) != 0; }
+#else
+  #include <unistd.h>
+  static bool stdin_is_tty() { return isatty(fileno(stdin)) != 0; }
+#endif
+
 static void print_usage() {
     std::println("Usage: grrt-cli [options]");
     std::println("  --width N             Image width (default: 1024)");
@@ -40,6 +48,8 @@ static void print_usage() {
     std::println("  --threads N           CPU threads, 0=auto (default: 0)");
     std::println("  --backend TYPE        cpu | cuda (default: cpu)");
     std::println("  --validate            Render on both backends, compare results");
+    std::println("  --force               Skip safety prompt; render despite construction warnings");
+    std::println("  --strict              Skip prompt; abort on Promptable/Severe construction warning");
     std::println("  --debug-pixel X Y     Trace one pixel and dump per-step diagnostics to stdout");
     std::println("  --output NAME         Output base name (default: output)");
     std::println("                        Produces NAME.png, NAME.hdr, NAME_linear.hdr");
@@ -85,6 +95,8 @@ int main(int argc, char* argv[]) {
     std::string output_name = "output";
     std::string backend_str = "cpu";
     bool validate = false;
+    bool force_flag = false;
+    bool strict_flag = false;
     int debug_px = -1, debug_py = -1;
     std::vector<double> cli_freq_bins;
 
@@ -162,6 +174,10 @@ int main(int argc, char* argv[]) {
             if (auto v = next()) backend_str = v;
         } else if (arg("--validate")) {
             validate = true;
+        } else if (arg("--force")) {
+            force_flag = true;
+        } else if (arg("--strict")) {
+            strict_flag = true;
         } else if (arg("--debug-pixel")) {
             const char* vx = next();
             const char* vy = next();
