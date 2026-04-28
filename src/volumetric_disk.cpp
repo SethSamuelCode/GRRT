@@ -71,6 +71,8 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
     std::printf("[VolumetricDisk] Computing radial structure...\n");
     compute_radial_structure();
 
+    compute_plunging_region_decay();
+
     apply_outer_radial_taper();
 
     std::printf("[VolumetricDisk] Computing vertical profiles...\n");
@@ -409,16 +411,11 @@ void VolumetricDisk::compute_radial_structure() {
         // Omega_z^2 for this radius
         double Omz2 = omega_z_sq(r);
 
-        // For r < r_isco, Omega_z^2 can go to zero/negative. Freeze H.
+        // For r < r_isco, Omega_z^2 can go to zero/negative.
+        // Placeholder; real values set by compute_plunging_region_decay()
         if (r < r_isco_ || Omz2 <= 0.0) {
-            H_lut_[i] = (H_isco > 0.0) ? H_isco : 0.01 * mass_;
-            // rho_mid inside ISCO: use same proportionality as ISCO value
-            // (will be further modulated by taper)
-            if (i > 0 && rho_mid_lut_[isco_idx >= 0 ? isco_idx : i - 1] > 0.0) {
-                rho_mid_lut_[i] = rho_mid_lut_[isco_idx >= 0 ? isco_idx : i - 1];
-            } else {
-                rho_mid_lut_[i] = 1.0; // placeholder, will be normalized
-            }
+            H_lut_[i]       = 0.01 * mass_;
+            rho_mid_lut_[i] = 0.0;
             continue;
         }
 
@@ -470,14 +467,29 @@ void VolumetricDisk::compute_radial_structure() {
         }
     }
 
-    // Backfill H for bins inside ISCO
-    if (H_isco > 0.0) {
-        for (int i = 0; i < n_r_; ++i) {
-            const double r = r_min_ + (r_outer_ - r_min_) * i / (n_r_ - 1);
-            if (r < r_isco_) {
-                H_lut_[i] = H_isco;
-            }
-        }
+}
+
+// ============================================================================
+// compute_plunging_region_decay()
+// ============================================================================
+
+void VolumetricDisk::compute_plunging_region_decay() {
+    int isco_idx = -1;
+    for (int i = 0; i < n_r_; ++i) {
+        const double r = r_min_ + (r_outer_ - r_min_) * i / (n_r_ - 1);
+        if (r >= r_isco_) { isco_idx = i; break; }
+    }
+    if (isco_idx <= 0) return;
+
+    const double H_isco       = H_lut_[isco_idx];
+    const double rho_mid_isco = rho_mid_lut_[isco_idx];
+    const double p            = params_.plunging_h_decay_exponent;
+
+    for (int i = 0; i < isco_idx; ++i) {
+        const double r = r_min_ + (r_outer_ - r_min_) * i / (n_r_ - 1);
+        const double t = taper(r);
+        H_lut_[i]       = H_isco * std::pow(std::max(t, 1e-30), p);
+        rho_mid_lut_[i] = rho_mid_isco * t;
     }
 }
 

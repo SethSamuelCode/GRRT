@@ -234,6 +234,32 @@ void test_outer_radial_taper() {
                 rho_inside, rho_mid_taper, rho_near_edge);
 }
 
+void test_h_continuous_across_isco() {
+    std::printf("\n=== H(r) continuous across ISCO ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 0.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    const double r_isco = disk.r_isco();
+    const double H_below = disk.scale_height(r_isco * 0.95);
+    const double H_at    = disk.scale_height(r_isco);
+    const double H_above = disk.scale_height(r_isco * 1.05);
+
+    // After spec §1c: H decays continuously inside ISCO; H_below should be < H_at,
+    // not equal (which would indicate frozen-H).
+    if (std::abs(H_below - H_at) / std::max(H_at, 1e-30) < 0.01) {
+        std::printf("  FAIL: H frozen across ISCO (H_below=%.4f vs H_at=%.4f)\n",
+                    H_below, H_at);
+        failures++; return;
+    }
+    if (H_below > H_at) {
+        std::printf("  FAIL: H_below (%.4f) > H_at (%.4f); should decay\n", H_below, H_at);
+        failures++; return;
+    }
+    std::printf("  PASS: H_below=%.4f < H_at=%.4f < H_above=%.4f\n",
+                H_below, H_at, H_above);
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -247,6 +273,7 @@ int main() {
     test_photosphere_extends_to_negligible();
     test_density_smooth_across_zmax();
     test_outer_radial_taper();
+    test_h_continuous_across_isco();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

@@ -207,6 +207,7 @@ private:
     // --- Construction helpers ---
     void build_flux_lut(std::vector<double>& flux, double& flux_max) const;
     void compute_radial_structure();
+    void compute_plunging_region_decay();
     void apply_outer_radial_taper();
     void compute_vertical_profiles();
     void normalize_density();
