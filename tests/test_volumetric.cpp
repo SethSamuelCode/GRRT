@@ -1,6 +1,7 @@
 #include "grrt/scene/volumetric_disk.h"
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 
 int failures = 0;
 
@@ -128,6 +129,46 @@ void dump_vertical_profile() {
     }
 }
 
+void test_photosphere_extends_to_negligible() {
+    std::printf("\n=== Photosphere LUT extends to rho < 1e-15 ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 0.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    // Spec §1a: the ODE convergence floor (CONV_FLOOR) must be low enough that
+    // rho_z[n_z-1] (the last LUT cell, normalized so rho_z[0]=1) is truly
+    // negligible.  With the old floor of 1e-15, the cell was pinned exactly at
+    // 1e-15 — not strictly less.  After lowering RHO_FLOOR to 1e-18 the cell
+    // drops below 1e-15 as the ODE drives it to machine-zero.
+    //
+    // We access the raw LUT to measure the boundary cell directly, avoiding
+    // the density() cross-column interpolation artefact that can inflate the
+    // value when the neighbouring column has a larger z_max.
+
+    const int nr  = disk.radial_bins();
+    const int nz  = disk.vertical_bins();
+    const auto& lut = disk.density_profile_lut();
+
+    // Locate the LUT bin closest to r = 6 M (peak-flux region, a_star=0.998).
+    const double ri_f = (6.0 - disk.r_min()) / (disk.r_max() - disk.r_min())
+                        * (nr - 1);
+    const int ri = std::clamp(static_cast<int>(ri_f), 0, nr - 1);
+
+    // rho_z[0] = 1.0 by construction; last cell should be < old RHO_FLOOR = 1e-15.
+    const double rho_boundary = lut[static_cast<std::size_t>(ri) * nz + (nz - 1)];
+    const double rho_mid_val  = lut[static_cast<std::size_t>(ri) * nz];  // = 1.0
+
+    std::printf("  ri=%d  rho_z[0]=%.4e  rho_z[nz-1]=%.4e  (expect < 1e-15)\n",
+                ri, rho_mid_val, rho_boundary);
+    // FAIL if pinned at the old RHO_FLOOR (>= 1e-15); PASS once it drops below.
+    if (rho_boundary >= 1e-15) {
+        std::printf("  FAIL: boundary cell pinned at old RHO_FLOOR (>= 1e-15)\n");
+        failures++;
+    } else {
+        std::printf("  PASS\n");
+    }
+}
+
 // We'll only test smoothstep indirectly through the outer-taper task. For this
 // task, just sanity-check that the disk constructs cleanly (regression guard).
 void test_smoothstep_regression() {
@@ -146,6 +187,7 @@ int main() {
     test_severity_enum_values();
     test_smoothstep_regression();
     dump_vertical_profile();
+    test_photosphere_extends_to_negligible();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

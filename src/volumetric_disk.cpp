@@ -517,9 +517,9 @@ VolumetricDisk::ColumnSolution VolumetricDisk::solve_column(
 {
     using namespace constants;
 
-    constexpr double Z_MAX_CAP_FACTOR = 20.0;   // keep the existing 20·H cap for now
-    constexpr double CONV_FLOOR       = 1e-10;  // existing convergence threshold
-    constexpr double RHO_FLOOR        = 1e-15;  // RK4 numerical floor
+    constexpr double Z_MAX_CAP_FACTOR = 30.0;   // (was 20.0)
+    constexpr double CONV_FLOOR       = 1e-15;  // (was 1e-10)
+    constexpr double RHO_FLOOR        = 1e-18;  // (was 1e-15)
     constexpr int    MAX_OUTER_ITERS  = 8;
 
     ColumnSolution out;
