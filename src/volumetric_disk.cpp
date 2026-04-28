@@ -167,12 +167,10 @@ double VolumetricDisk::taper(double r) const {
 // ============================================================================
 
 bool VolumetricDisk::inside_volume(double r, double z) const {
-    if (r <= r_horizon_ || r > r_outer_) return false;
+    if (r <= r_horizon_ || r > r_outer_ + 0.5 * outer_taper_width_) return false;
     const double zm = z_max_at(r);
     const double H  = scale_height(r);
-    // Include a soft-edge zone of 1.5H above the photosphere so the
-    // raymarcher accumulates the exponentially-tapered atmosphere there.
-    return std::abs(z) < zm + 1.5 * H;
+    return std::abs(z) < zm + 0.5 * H;
 }
 
 // ============================================================================

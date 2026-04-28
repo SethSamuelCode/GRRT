@@ -337,6 +337,27 @@ void test_density_lognormal_mean() {
     }
 }
 
+void test_inside_volume_tight_margin() {
+    std::printf("\n=== inside_volume margin = 0.5·H ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 0.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    const double r = 6.0;
+    const double H = disk.scale_height(r);
+    const double zm = disk.z_max_at(r);
+
+    // Just inside the new margin (zm + 0.4·H) → inside
+    if (!disk.inside_volume(r, zm + 0.4 * H)) {
+        std::printf("  FAIL: zm+0.4H should be inside\n"); failures++; return;
+    }
+    // Just outside the new margin (zm + 0.6·H) → outside
+    if (disk.inside_volume(r, zm + 0.6 * H)) {
+        std::printf("  FAIL: zm+0.6H should be outside\n"); failures++; return;
+    }
+    std::printf("  PASS\n");
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -354,6 +375,7 @@ int main() {
     test_sigma_s_phys_in_range();
     test_density_strictly_positive_inside_volume();
     test_density_lognormal_mean();
+    test_inside_volume_tight_margin();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
