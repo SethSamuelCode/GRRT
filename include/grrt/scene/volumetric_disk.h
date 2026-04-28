@@ -159,8 +159,9 @@ public:
 private:
     double mass_, spin_, r_outer_, peak_temperature_;
     double r_isco_, r_horizon_;
-    double r_min_;         ///< Inner bound (slightly outside horizon)
-    double taper_width_;   ///< Gaussian taper width inside ISCO
+    double r_min_;              ///< Inner bound (slightly outside horizon)
+    double taper_width_;        ///< Gaussian taper width inside ISCO
+    double outer_taper_width_ = 0.0;   ///< Resolved width of the outer radial taper [M]
     VolumetricParams params_;
     SimplexNoise3D noise_;
 
@@ -206,6 +207,7 @@ private:
     // --- Construction helpers ---
     void build_flux_lut(std::vector<double>& flux, double& flux_max) const;
     void compute_radial_structure();
+    void apply_outer_radial_taper();
     void compute_vertical_profiles();
     void normalize_density();
 

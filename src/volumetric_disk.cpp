@@ -71,6 +71,8 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
     std::printf("[VolumetricDisk] Computing radial structure...\n");
     compute_radial_structure();
 
+    apply_outer_radial_taper();
+
     std::printf("[VolumetricDisk] Computing vertical profiles...\n");
     compute_vertical_profiles();
 
@@ -476,6 +478,34 @@ void VolumetricDisk::compute_radial_structure() {
                 H_lut_[i] = H_isco;
             }
         }
+    }
+}
+
+// ============================================================================
+// apply_outer_radial_taper()
+// ============================================================================
+
+void VolumetricDisk::apply_outer_radial_taper() {
+    double width = (params_.outer_taper_width > 0.0)
+                 ? params_.outer_taper_width
+                 : 2.0 * H_lut_.back();
+
+    const double max_allowed = (r_outer_ - r_min_) - 0.1 * r_outer_;
+    if (width > max_allowed && max_allowed > 0.0) {
+        emit(WarningSeverity::Warning, "outer_taper_clamped",
+             "outer_taper_width clamped to fit disk extent");
+        width = max_allowed;
+    }
+    outer_taper_width_ = width;
+
+    if (width <= 0.0) return;
+    const double r_taper_start = r_outer_ - width;
+
+    for (int i = 0; i < n_r_; ++i) {
+        const double r = r_min_ + (r_outer_ - r_min_) * i / (n_r_ - 1);
+        if (r < r_taper_start) continue;
+        const double factor = 1.0 - smoothstep(r_taper_start, r_outer_, r);
+        rho_mid_lut_[i] *= factor;
     }
 }
 

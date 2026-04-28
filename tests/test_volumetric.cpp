@@ -208,6 +208,32 @@ void test_density_smooth_across_zmax() {
                 rho_below);
 }
 
+void test_outer_radial_taper() {
+    std::printf("\n=== Outer radial taper (smoothstep, not cliff) ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 0.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    const double r_outer = 30.0;
+    const double H_outer = disk.scale_height(r_outer);
+    const double dr_out  = 2.0 * H_outer;
+
+    // Sample density at: well inside, mid-taper, just inside r_outer
+    const double rho_inside    = disk.density(r_outer - 4.0 * H_outer, 0.0, 0.0);
+    const double rho_mid_taper = disk.density(r_outer - 1.0 * H_outer, 0.0, 0.0);
+    const double rho_near_edge = disk.density(r_outer - 0.05 * H_outer, 0.0, 0.0);
+
+    if (!(rho_inside > rho_mid_taper && rho_mid_taper > rho_near_edge)) {
+        std::printf("  FAIL: expected monotonic decay across taper zone\n");
+        std::printf("    rho_inside=%.4e rho_mid=%.4e rho_edge=%.4e\n",
+                    rho_inside, rho_mid_taper, rho_near_edge);
+        failures++;
+        return;
+    }
+    std::printf("  PASS: rho_inside=%.2e > rho_mid=%.2e > rho_edge=%.2e\n",
+                rho_inside, rho_mid_taper, rho_near_edge);
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -220,6 +246,7 @@ int main() {
     dump_vertical_profile();
     test_photosphere_extends_to_negligible();
     test_density_smooth_across_zmax();
+    test_outer_radial_taper();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
