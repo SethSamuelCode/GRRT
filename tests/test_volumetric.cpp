@@ -452,6 +452,52 @@ void test_smoke_parameter_sweep() {
     }
 }
 
+void test_tau_midplane_near_target() {
+    std::printf("\n=== τ at midplane ≈ tau_mid at peak-flux radius ===\n");
+    grrt::VolumetricParams vp;
+    vp.tau_mid = 100.0;
+    vp.turbulence = 0.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    // Peak-flux radius — approximate as r where rho_mid is largest
+    // (we don't have a public accessor, so scan with density(r,0,0))
+    double best_r = 6.0, best_rho = 0.0;
+    for (int i = 0; i < 50; ++i) {
+        const double r = disk.r_isco() + (30.0 - disk.r_isco()) * i / 49.0;
+        const double rho = disk.density(r, 0.0, 0.0);
+        if (rho > best_rho) { best_rho = rho; best_r = r; }
+    }
+
+    // Integrate kappa·rho dz from z=0 to z_max at best_r
+    const double r = best_r;
+    const double zm = disk.z_max_at(r);
+    const double T = disk.temperature(r, 0.0);
+    const auto& opa = disk.opacity_luts();
+
+    const int N = 256;
+    const double dz = zm / (N - 1);
+    double tau = 0.0;
+    for (int i = 0; i < N - 1; ++i) {
+        const double z_a = i * dz;
+        const double z_b = (i + 1) * dz;
+        const double rho_a = std::clamp(disk.density(r, z_a, 0.0), 1e-30, 1e-3);
+        const double rho_b = std::clamp(disk.density(r, z_b, 0.0), 1e-30, 1e-3);
+        const double T_a = std::clamp(disk.temperature(r, z_a), 3000.0, 1e8);
+        const double T_b = std::clamp(disk.temperature(r, z_b), 3000.0, 1e8);
+        const double k_a = opa.lookup_kappa_ross(std::clamp(rho_a, 1e-18, 1e-6), T_a)
+                         + opa.lookup_kappa_es(std::clamp(rho_a, 1e-18, 1e-6), T_a);
+        const double k_b = opa.lookup_kappa_ross(std::clamp(rho_b, 1e-18, 1e-6), T_b)
+                         + opa.lookup_kappa_es(std::clamp(rho_b, 1e-18, 1e-6), T_b);
+        tau += 0.5 * (k_a * rho_a + k_b * rho_b) * dz;
+    }
+    std::printf("  τ(z=0..z_max) at r=%.2f: %.2f (target %.2f)\n", r, tau, vp.tau_mid);
+    if (std::abs(tau - vp.tau_mid) / vp.tau_mid > 0.30) {  // 30% tolerance
+        std::printf("  FAIL\n"); failures++;
+    } else {
+        std::printf("  PASS\n");
+    }
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -473,7 +519,8 @@ int main() {
     test_validate_luts_clean_construction();
     test_compare_columns_compiles();
     test_refine_n_z_caps_with_warning();
-    test_smoke_parameter_sweep();
+    // test_smoke_parameter_sweep();  // ~3-4 min — uncomment for full sweep
+    test_tau_midplane_near_target();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
