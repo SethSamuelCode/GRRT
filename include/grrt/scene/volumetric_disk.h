@@ -191,6 +191,18 @@ private:
     std::vector<ConstructionWarning> warnings_;
     void emit(WarningSeverity sev, std::string code, std::string message);
 
+    struct ColumnSolution {
+        double z_max = 0.0;
+        std::vector<double> rho_z;   // size n_z, normalized so rho_z[0] = 1
+        std::vector<double> T_z;     // size n_z, in Kelvin
+        double max_delta = 0.0;  ///< Final iteration-to-iteration relative density delta
+    };
+
+    /// Solve the hydrostatic-equilibrium ODE for one radial column at a given vertical
+    /// resolution. Iteratively extends z_max until rho(z_max) < CONV_FLOOR or hits cap.
+    ColumnSolution solve_column(double r, double H, double T_eff,
+                                 double rho_mid_proportional, int n_z) const;
+
     // --- Construction helpers ---
     void build_flux_lut(std::vector<double>& flux, double& flux_max) const;
     void compute_radial_structure();
