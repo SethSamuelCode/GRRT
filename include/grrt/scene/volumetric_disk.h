@@ -223,6 +223,8 @@ private:
     void normalize_density();
     void compute_sigma_s_phys();
 
+    bool validate_luts();
+
     // --- LUT interpolation helpers ---
     double interp_radial(const std::vector<double>& lut, double r) const;
     double interp_2d(const std::vector<double>& lut, double r, double z_abs) const;

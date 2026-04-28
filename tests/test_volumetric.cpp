@@ -76,20 +76,17 @@ void test_volume_bounds() {
 }
 
 void test_warnings_initially_empty() {
-    std::printf("\n=== Warnings initially empty ===\n");
+    std::printf("\n=== Warnings: no Severe on clean construction ===\n");
     grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7);
-    if (!disk.warnings().empty()) {
-        std::printf("  FAIL: expected empty warnings on a normal construction, got %zu\n",
-                    disk.warnings().size());
-        failures++;
-    } else {
-        std::printf("  PASS\n");
+    int severe = 0;
+    for (const auto& w : disk.warnings()) {
+        if (w.severity == grrt::WarningSeverity::Severe) ++severe;
     }
-    if (disk.promptable_count() != 0) {
-        std::printf("  FAIL: expected promptable_count=0\n");
+    if (severe > 0) {
+        std::printf("  FAIL: %d Severe warnings on clean construction\n", severe);
         failures++;
     } else {
-        std::printf("  PASS: promptable_count=0\n");
+        std::printf("  PASS: no Severe warnings (%zu total)\n", disk.warnings().size());
     }
 }
 
@@ -358,6 +355,24 @@ void test_inside_volume_tight_margin() {
     std::printf("  PASS\n");
 }
 
+void test_validate_luts_clean_construction() {
+    std::printf("\n=== validate_luts: clean construction has no Severe ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 1.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    int severe = 0;
+    for (const auto& w : disk.warnings()) {
+        if (w.severity == grrt::WarningSeverity::Severe) ++severe;
+    }
+    if (severe > 0) {
+        std::printf("  FAIL: %d Severe warnings on clean construction\n", severe);
+        failures++;
+    } else {
+        std::printf("  PASS: no Severe warnings\n");
+    }
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -376,6 +391,7 @@ int main() {
     test_density_strictly_positive_inside_volume();
     test_density_lognormal_mean();
     test_inside_volume_tight_margin();
+    test_validate_luts_clean_construction();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

@@ -84,6 +84,8 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
 
     compute_sigma_s_phys();
 
+    validate_luts();
+
     std::printf("[VolumetricDisk] Construction complete. r_isco=%.4f r_horizon=%.4f\n",
                 r_isco_, r_horizon_);
 }
@@ -894,6 +896,63 @@ void VolumetricDisk::compute_sigma_s_phys() {
                 sigma_s_phys_, b,
                 std::isfinite(beta) ? beta : 0.0,
                 used_default ? ", default" : "");
+}
+
+bool VolumetricDisk::validate_luts() {
+    bool ok = true;
+    int severe_cells = 0;
+
+    for (int i = 0; i < n_r_; ++i) {
+        if (!std::isfinite(H_lut_[i]) || H_lut_[i] <= 0.0) { ++severe_cells; ok = false; }
+        if (!std::isfinite(rho_mid_lut_[i]) || rho_mid_lut_[i] < 0.0) { ++severe_cells; ok = false; }
+        if (!std::isfinite(T_eff_lut_[i]) || T_eff_lut_[i] < 0.0) { ++severe_cells; ok = false; }
+        if (!std::isfinite(z_max_lut_[i]) || z_max_lut_[i] <= 0.0) { ++severe_cells; ok = false; }
+        for (int zi = 0; zi < n_z_; ++zi) {
+            const double rho = rho_profile_lut_[i * n_z_ + zi];
+            const double T   = T_profile_lut_[i * n_z_ + zi];
+            if (!std::isfinite(rho) || rho < 0.0) { ++severe_cells; ok = false; }
+            if (!std::isfinite(T)   || T   < 0.0) { ++severe_cells; ok = false; }
+        }
+    }
+    if (severe_cells > 0) {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "validate_luts: %d non-finite or negative cells", severe_cells);
+        emit(WarningSeverity::Severe, "validate_failed", buf);
+    }
+
+    // Smoothness: H jumps
+    for (int i = 1; i < n_r_; ++i) {
+        if (H_lut_[i] > 0.0 && H_lut_[i-1] > 0.0) {
+            const double jump = std::abs(H_lut_[i] - H_lut_[i-1])
+                              / std::max(H_lut_[i-1], 1e-30);
+            if (jump > 0.5) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "H jump %.2f at i=%d, smoothness violated", jump, i);
+                emit(WarningSeverity::Promptable, "h_jump", buf);
+                break;  // one warning per construction
+            }
+        }
+    }
+
+    // Outer-taper monotonicity
+    if (outer_taper_width_ > 0.0) {
+        const double r_taper_start = r_outer_ - outer_taper_width_;
+        bool monotone = true;
+        for (int i = 1; i < n_r_; ++i) {
+            const double r = r_min_ + (r_outer_ - r_min_) * i / (n_r_ - 1);
+            if (r >= r_taper_start && rho_mid_lut_[i] > rho_mid_lut_[i-1] * 1.001) {
+                monotone = false; break;
+            }
+        }
+        if (!monotone) {
+            emit(WarningSeverity::Warning, "outer_taper_non_monotone",
+                 "rho_mid is not monotonic in the outer-taper zone");
+        }
+    }
+
+    return ok;
 }
 
 void VolumetricDisk::emit(WarningSeverity sev, std::string code, std::string message) {
