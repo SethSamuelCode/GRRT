@@ -5,6 +5,9 @@
 #include "grrt/spacetime/kerr.h"
 #include "grrt_export.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace grrt {
 
 class GRRT_EXPORT RK4 : public Integrator {
