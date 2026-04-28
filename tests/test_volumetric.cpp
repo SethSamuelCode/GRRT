@@ -177,6 +177,37 @@ void test_smoothstep_regression() {
     std::printf("  PASS: construction completed\n");
 }
 
+void test_density_smooth_across_zmax() {
+    std::printf("\n=== Density smooth across z_max ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 0.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    const double r = 6.0;
+    const double zm = disk.z_max_at(r);
+
+    // Sample density just below and just above z_max — they should be similar
+    // (both are tiny, but the ratio between them should be smooth, not a cliff).
+    const double rho_below = disk.density(r, zm * 0.99, 0.0);
+    const double rho_above = disk.density(r, zm * 1.01, 0.0);
+
+    // After spec §1a: above z_max, density should be exactly 0 (LUT-defined).
+    // The cliff at zm itself is irrelevant because the LUT already has ρ < 1e-15 there.
+    if (rho_above != 0.0) {
+        std::printf("  FAIL: rho(z>z_max) should be exactly 0, got %.4e\n", rho_above);
+        failures++; return;
+    }
+    // The smoothness criterion: rho_below should be small (LUT extended past photosphere)
+    const double rho_mid = disk.density(r, 0.0, 0.0);
+    if (rho_below / rho_mid > 1e-10) {
+        std::printf("  FAIL: rho_below z_max too large (%.4e of midplane)\n",
+                    rho_below / rho_mid);
+        failures++; return;
+    }
+    std::printf("  PASS: rho_below=%.2e (small), rho_above=0 (cliff is in LUT, smooth)\n",
+                rho_below);
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -188,6 +219,7 @@ int main() {
     test_smoothstep_regression();
     dump_vertical_profile();
     test_photosphere_extends_to_negligible();
+    test_density_smooth_across_zmax();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

@@ -238,30 +238,21 @@ double VolumetricDisk::density(double r, double z, double phi) const {
     if (r <= r_horizon_ || r > r_outer_) return 0.0;
     const double z_abs = std::abs(z);
     const double zm = z_max_at(r);
-    const double H  = scale_height(r);
-
-    // Smooth edge: above the photosphere (z_max) taper density to zero over
-    // 1.5 scale heights with a Gaussian profile.  This removes the hard
-    // binary boundary that caused staircase artifacts at grazing angles.
-    double edge_factor = 1.0;
-    double z_lookup = z_abs;
-    if (z_abs >= zm) {
-        const double dz = z_abs - zm;
-        if (dz >= 1.5 * H) return 0.0;
-        edge_factor = std::exp(-2.0 * (dz / H) * (dz / H));
-        z_lookup = zm * 0.9999;  // clamp to just inside the LUT range
-    }
+    if (z_abs >= zm) return 0.0;                  // LUT now goes to true zero
 
     const double rho_mid  = interp_radial(rho_mid_lut_, r);
-    const double rho_norm = interp_2d(rho_profile_lut_, r, z_lookup);
-    const double base = rho_mid * rho_norm * rho_scale_ * taper(r) * edge_factor;
-    // Turbulent noise (Section 1.5)
-    // Sample in Cartesian-like coordinates scaled to a fixed reference length
-    // to avoid aliasing when r/H is huge (r/H can exceed 1000 in outer disk).
-    const double nx = r * std::cos(phi) / noise_scale_;
-    const double ny = r * std::sin(phi) / noise_scale_;
-    const double nz = z / noise_scale_;
-    const double n = noise_.evaluate_fbm(nx, ny, nz, params_.noise_octaves);
+    const double rho_norm = interp_2d(rho_profile_lut_, r, z_abs);
+    const double base     = rho_mid * rho_norm * rho_scale_ * taper(r);
+
+    // Noise composition (replaced in Task 11 with log-normal form);
+    // for now keep the existing additive form using params_.noise_scale (or auto):
+    const double L = (params_.noise_scale > 0.0)
+                   ? params_.noise_scale
+                   : noise_scale_;
+    const double nx = r * std::cos(phi) / L;
+    const double ny = r * std::sin(phi) / L;
+    const double nz = z / L;
+    const double n  = noise_.evaluate_fbm(nx, ny, nz, params_.noise_octaves);
     return std::max(0.0, base * (1.0 + params_.turbulence * n));
 }
 
@@ -274,11 +265,8 @@ double VolumetricDisk::temperature(double r, double z) const {
     if (r <= r_horizon_ || r > r_outer_) return 0.0;
     const double z_abs = std::abs(z);
     const double zm = z_max_at(r);
-    const double H  = scale_height(r);
-    if (z_abs >= zm + 1.5 * H) return 0.0;
-    // In the soft-edge zone use the surface temperature (z clamped to zm).
-    const double z_lookup = std::min(z_abs, zm * 0.9999);
-    return interp_2d(T_profile_lut_, r, z_lookup);
+    if (z_abs >= zm) return 0.0;
+    return interp_2d(T_profile_lut_, r, z_abs);
 }
 
 // ============================================================================
