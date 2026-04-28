@@ -25,8 +25,10 @@ void test_construction() {
 }
 
 void test_density_profile() {
-    std::printf("\n=== Density profile ===\n");
-    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7);
+    std::printf("\n=== Density profile (no noise) ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 0.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
     double r = 10.0;
     double H = disk.scale_height(r);
     double rho_mid = disk.density(r, 0.0, 0.0);
@@ -277,6 +279,64 @@ void test_sigma_s_phys_in_range() {
     std::printf("  PASS\n");
 }
 
+void test_density_strictly_positive_inside_volume() {
+    std::printf("\n=== Density strictly positive inside volume ===\n");
+    grrt::VolumetricParams vp;
+    vp.alpha = 0.1;
+    vp.turbulence = 1.0;  // pure-physical noise active
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    int fails = 0;
+    const int N = 200;
+    for (int i = 0; i < N; ++i) {
+        const double r   = 4.0 + 20.0 * (i / static_cast<double>(N));
+        const double H   = disk.scale_height(r);
+        const double zm  = disk.z_max_at(r);
+        const double z   = (zm * 0.99) * (-1.0 + 2.0 * (i % 13) / 12.0);
+        const double phi = i * 0.314;
+        const double rho = disk.density(r, z, phi);
+        if (rho <= 0.0) { fails++; }
+    }
+    if (fails > 0) {
+        std::printf("  FAIL: %d/%d samples returned rho <= 0\n", fails, N);
+        failures++;
+    } else {
+        std::printf("  PASS: all %d samples positive\n", N);
+    }
+}
+
+void test_density_lognormal_mean() {
+    std::printf("\n=== Density mean over phi ≈ rho_smooth · exp(σ²/2) ===\n");
+    grrt::VolumetricParams vp;
+    vp.alpha = 0.1;
+    vp.turbulence = 1.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    const double r = 8.0, z = 0.0;
+    grrt::VolumetricParams vp0 = vp;
+    vp0.turbulence = 0.0;
+    grrt::VolumetricDisk disk0(1.0, 0.998, 30.0, 1e7, vp0);
+    const double rho_smooth = disk0.density(r, z, 0.0);
+
+    const int N = 4096;
+    double sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        const double phi = 2.0 * 3.14159265358979 * i / N;
+        sum += disk.density(r, z, phi);
+    }
+    const double mean = sum / N;
+    const double sigma = disk.sigma_s_phys() * vp.turbulence;
+    const double expected = rho_smooth * std::exp(sigma * sigma * 0.5);
+    const double rel_err = std::abs(mean - expected) / expected;
+    std::printf("  mean=%.4e expected=%.4e rel_err=%.3f\n", mean, expected, rel_err);
+    if (rel_err > 0.10) {
+        std::printf("  FAIL\n");
+        failures++;
+    } else {
+        std::printf("  PASS\n");
+    }
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -292,6 +352,8 @@ int main() {
     test_outer_radial_taper();
     test_h_continuous_across_isco();
     test_sigma_s_phys_in_range();
+    test_density_strictly_positive_inside_volume();
+    test_density_lognormal_mean();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

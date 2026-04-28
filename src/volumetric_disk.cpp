@@ -242,25 +242,31 @@ double VolumetricDisk::z_max_at(double r) const {
 }
 
 double VolumetricDisk::density(double r, double z, double phi) const {
-    if (r <= r_horizon_ || r > r_outer_) return 0.0;
+    if (r <= r_horizon_ || r > r_outer_ + 0.5 * outer_taper_width_) return 0.0;
     const double z_abs = std::abs(z);
     const double zm = z_max_at(r);
-    if (z_abs >= zm) return 0.0;                  // LUT now goes to true zero
+    if (z_abs >= zm) return 0.0;
 
     const double rho_mid  = interp_radial(rho_mid_lut_, r);
     const double rho_norm = interp_2d(rho_profile_lut_, r, z_abs);
     const double base     = rho_mid * rho_norm * rho_scale_ * taper(r);
 
-    // Noise composition (replaced in Task 11 with log-normal form);
-    // for now keep the existing additive form using params_.noise_scale (or auto):
+    const double H_local = scale_height(r);
+    const double c_corr  = (params_.noise_correlation_length_factor > 0.0)
+                         ? params_.noise_correlation_length_factor : 0.5;
     const double L = (params_.noise_scale > 0.0)
-                   ? params_.noise_scale
-                   : noise_scale_;
+                   ? params_.noise_scale * H_local
+                   : c_corr * H_local;
+    if (L <= 0.0) return base;
+
     const double nx = r * std::cos(phi) / L;
     const double ny = r * std::sin(phi) / L;
     const double nz = z / L;
     const double n  = noise_.evaluate_fbm(nx, ny, nz, params_.noise_octaves);
-    return std::max(0.0, base * (1.0 + params_.turbulence * n));
+
+    double arg = sigma_s_phys_ * params_.turbulence * n;
+    arg = std::clamp(arg, -50.0, 50.0);
+    return base * std::exp(arg);
 }
 
 double VolumetricDisk::density_cgs(double r, double z, double phi) const {
@@ -783,10 +789,6 @@ void VolumetricDisk::normalize_density() {
         rho_scale_ = 1.0;
         return;
     }
-
-    // Set noise scale to ~2× scale height at peak-flux radius (avoids aliasing)
-    noise_scale_ = (params_.noise_scale > 0.0) ? params_.noise_scale : 2.0 * H_lut_[peak_idx];
-    if (noise_scale_ < 0.01) noise_scale_ = 0.01; // safety floor
 
     // Integrate rho_profile * dz at peak radius to get column integral
     const double z_max = z_max_lut_[peak_idx];

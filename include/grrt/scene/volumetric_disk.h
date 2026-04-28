@@ -143,7 +143,14 @@ public:
     double taper_width() const { return taper_width_; }
     double turbulence() const { return params_.turbulence; }
     double peak_temperature() const { return peak_temperature_; }
-    double noise_scale() const { return noise_scale_; }
+    /// Legacy accessor — returns the noise correlation length at peak-flux radius
+    /// for compatibility with the CUDA host data layout. Computes on demand.
+    double noise_scale() const {
+        if (params_.noise_scale > 0.0) return params_.noise_scale;
+        const double c_corr = (params_.noise_correlation_length_factor > 0.0)
+                            ? params_.noise_correlation_length_factor : 0.5;
+        return c_corr * H_lut_[n_r_ / 2];
+    }
 
     /// Physical noise amplitude σ_s = b·√(ln(1+α)). Set during construction.
     double sigma_s_phys() const { return sigma_s_phys_; }
@@ -188,9 +195,6 @@ private:
 
     // Density normalization factor
     double rho_scale_ = 1.0;
-
-    // Noise spatial scale (fixed reference length to avoid aliasing)
-    double noise_scale_ = 1.0;
 
     double sigma_s_phys_ = 0.0;
 
