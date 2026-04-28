@@ -119,6 +119,27 @@ GRRTContext* grrt_create(const GRRTParams* params) {
                 vp.opacity_nu_min = nu_lo * 0.1;
                 vp.opacity_nu_max = nu_hi * 10.0;
             }
+            // New fields from spec 2026-04-27 (0 = use VolumetricParams defaults)
+            if (params->disk_noise_compressive_b > 0.0)
+                vp.noise_compressive_b = params->disk_noise_compressive_b;
+            if (params->disk_noise_correlation_length_factor > 0.0)
+                vp.noise_correlation_length_factor = params->disk_noise_correlation_length_factor;
+            if (params->disk_outer_taper_width > 0.0)
+                vp.outer_taper_width = params->disk_outer_taper_width;
+            if (params->disk_plunging_h_decay_exponent > 0.0)
+                vp.plunging_h_decay_exponent = params->disk_plunging_h_decay_exponent;
+            if (params->disk_bins_per_h > 0)
+                vp.bins_per_h = params->disk_bins_per_h;
+            if (params->disk_bins_per_gradient > 0)
+                vp.bins_per_gradient = params->disk_bins_per_gradient;
+            if (params->disk_target_lut_eps > 0.0)
+                vp.target_lut_eps = params->disk_target_lut_eps;
+            if (params->disk_min_n_r > 0)        vp.min_n_r = params->disk_min_n_r;
+            if (params->disk_min_n_z > 0)        vp.min_n_z = params->disk_min_n_z;
+            if (params->disk_max_n_r > 0)        vp.max_n_r = params->disk_max_n_r;
+            if (params->disk_max_n_z > 0)        vp.max_n_z = params->disk_max_n_z;
+            if (params->disk_refine_num_frequencies > 0)
+                vp.refine_num_frequencies = params->disk_refine_num_frequencies;
             ctx->vol_disk = std::make_unique<grrt::VolumetricDisk>(
                 params->mass, params->spin,
                 params->disk_outer > 0 ? params->disk_outer : 30.0,
