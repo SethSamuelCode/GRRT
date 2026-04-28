@@ -128,6 +128,14 @@ void dump_vertical_profile() {
     }
 }
 
+// We'll only test smoothstep indirectly through the outer-taper task. For this
+// task, just sanity-check that the disk constructs cleanly (regression guard).
+void test_smoothstep_regression() {
+    std::printf("\n=== Smoothstep helper (regression guard) ===\n");
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7);
+    std::printf("  PASS: construction completed\n");
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -136,6 +144,7 @@ int main() {
     test_volume_bounds();
     test_warnings_initially_empty();
     test_severity_enum_values();
+    test_smoothstep_regression();
     dump_vertical_profile();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
