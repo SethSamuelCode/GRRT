@@ -6,6 +6,7 @@
 #include "grrt_export.h"
 #include <vector>
 #include <cstdint>
+#include <string>
 
 namespace grrt {
 
@@ -41,6 +42,19 @@ struct VolumetricParams {
     int max_n_r            = 4096;
     int max_n_z            = 1024;
     int refine_num_frequencies = 8;      ///< Frequency samples for max-envelope
+};
+
+enum class WarningSeverity {
+    Info       = 0,
+    Warning    = 1,
+    Promptable = 2,
+    Severe     = 3
+};
+
+struct ConstructionWarning {
+    WarningSeverity severity;
+    std::string code;
+    std::string message;
 };
 
 /// Volumetric accretion disk with Shakura-Sunyaev vertical structure,
@@ -135,6 +149,13 @@ public:
     double z_max_at(double r) const;
     const std::vector<double>& z_max_lut() const { return z_max_lut_; }
 
+    /// Warnings collected during construction. Pointer-stable for the lifetime of
+    /// this VolumetricDisk instance.
+    const std::vector<ConstructionWarning>& warnings() const { return warnings_; }
+
+    /// Number of warnings with severity >= Promptable.
+    int promptable_count() const;
+
 private:
     double mass_, spin_, r_outer_, peak_temperature_;
     double r_isco_, r_horizon_;
@@ -166,6 +187,9 @@ private:
 
     // Noise spatial scale (fixed reference length to avoid aliasing)
     double noise_scale_ = 1.0;
+
+    std::vector<ConstructionWarning> warnings_;
+    void emit(WarningSeverity sev, std::string code, std::string message);
 
     // --- Construction helpers ---
     void build_flux_lut(std::vector<double>& flux, double& flux_max) const;

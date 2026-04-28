@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <numbers>
 #include <cstdio>
+#include <utility>
 
 namespace grrt {
 
@@ -846,6 +847,28 @@ void VolumetricDisk::normalize_density() {
 
     std::printf("[VolumetricDisk] rho_scale = %.4e, midplane rho_cgs ~ %.4e\n",
                 rho_scale_, rho_scale_ * peak_rho);
+}
+
+void VolumetricDisk::emit(WarningSeverity sev, std::string code, std::string message) {
+    const char* level = "INFO";
+    FILE* sink = stdout;
+    switch (sev) {
+        case WarningSeverity::Info:       level = "INFO";       sink = stdout; break;
+        case WarningSeverity::Warning:    level = "WARNING";    sink = stderr; break;
+        case WarningSeverity::Promptable: level = "PROMPTABLE"; sink = stderr; break;
+        case WarningSeverity::Severe:     level = "SEVERE";     sink = stderr; break;
+    }
+    std::fprintf(sink, "[VolumetricDisk] %s [%s]: %s\n",
+                 level, code.c_str(), message.c_str());
+    warnings_.push_back({sev, std::move(code), std::move(message)});
+}
+
+int VolumetricDisk::promptable_count() const {
+    int count = 0;
+    for (const auto& w : warnings_) {
+        if (w.severity >= WarningSeverity::Promptable) ++count;
+    }
+    return count;
 }
 
 } // namespace grrt

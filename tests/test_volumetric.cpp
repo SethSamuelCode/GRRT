@@ -72,6 +72,24 @@ void test_volume_bounds() {
     else { std::printf("  PASS: beyond r_outer outside\n"); }
 }
 
+void test_warnings_initially_empty() {
+    std::printf("\n=== Warnings initially empty ===\n");
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7);
+    if (!disk.warnings().empty()) {
+        std::printf("  FAIL: expected empty warnings on a normal construction, got %zu\n",
+                    disk.warnings().size());
+        failures++;
+    } else {
+        std::printf("  PASS\n");
+    }
+    if (disk.promptable_count() != 0) {
+        std::printf("  FAIL: expected promptable_count=0\n");
+        failures++;
+    } else {
+        std::printf("  PASS: promptable_count=0\n");
+    }
+}
+
 void dump_vertical_profile() {
     std::printf("\n=== Vertical profile diagnostic ===\n");
     grrt::VolumetricParams vp;
@@ -99,6 +117,7 @@ int main() {
     test_temperature_profile();
     test_taper();
     test_volume_bounds();
+    test_warnings_initially_empty();
     dump_vertical_profile();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
