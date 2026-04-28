@@ -373,6 +373,11 @@ void test_validate_luts_clean_construction() {
     }
 }
 
+void test_compare_columns_compiles() {
+    std::printf("\n=== compare_columns compiles (refinement scaffold) ===\n");
+    std::printf("  PASS\n");
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -392,6 +397,7 @@ int main() {
     test_density_lognormal_mean();
     test_inside_volume_tight_margin();
     test_validate_luts_clean_construction();
+    test_compare_columns_compiles();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

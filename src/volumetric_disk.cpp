@@ -977,4 +977,90 @@ int VolumetricDisk::promptable_count() const {
     return count;
 }
 
+// ============================================================================
+// compare_columns() — optical-depth-weighted max-envelope error metric
+// ============================================================================
+// Used by Richardson refinement (Tasks 16-17) to decide whether n_z / n_r
+// needs to be increased. Algorithm:
+//   1. For each of N_freq sample frequencies, compute the contribution function
+//      C(z) = (dτ/dz) · exp(−τ), where τ is integrated from the top down.
+//   2. Normalise C(z) per frequency so it sums to 1.
+//   3. Take the pointwise max-envelope across all frequencies.
+//   4. Normalise the envelope → weights w(z_i) with Σw = 1.
+//   5. The error at each z_i is |ρ_lo − ρ_hi| / ρ_lo, weighted by √w(z_i).
+//   6. Return max(z_max relative delta, max of weighted density deltas).
+
+double VolumetricDisk::compare_columns(const ColumnSolution& lo,
+                                        const ColumnSolution& hi) const {
+    const int n_lo = static_cast<int>(lo.rho_z.size());
+    const int n_hi = static_cast<int>(hi.rho_z.size());
+    if (n_lo < 2 || n_hi < 2 || lo.z_max <= 0.0) return 0.0;
+
+    const int N_freq = std::max(1, params_.refine_num_frequencies);
+    const double log_min = std::log10(std::max(params_.opacity_nu_min, 1e-30));
+    const double log_max = std::log10(std::max(params_.opacity_nu_max, params_.opacity_nu_min * 10.0));
+    const double dz_lo = lo.z_max / (n_lo - 1);
+
+    std::vector<double> C_max(n_lo, 0.0);
+    std::vector<double> dtau_local(n_lo);
+    std::vector<double> tau(n_lo);
+    std::vector<double> C_nu(n_lo);
+
+    for (int k = 0; k < N_freq; ++k) {
+        const double frac = (N_freq > 1) ? static_cast<double>(k) / (N_freq - 1) : 0.0;
+        const double nu = std::pow(10.0, log_min + frac * (log_max - log_min));
+
+        for (int zi = 0; zi < n_lo; ++zi) {
+            const double rho_cgs = std::clamp(lo.rho_z[zi] * rho_scale_ * 1.0, 1e-18, 1e-6);
+            const double T_clamped = std::clamp(lo.T_z[zi], 3000.0, 1e8);
+            const double k_abs = opacity_luts_.lookup_kappa_abs(nu, rho_cgs, T_clamped);
+            const double k_es  = opacity_luts_.lookup_kappa_es(rho_cgs, T_clamped);
+            dtau_local[zi] = (k_abs + k_es) * lo.rho_z[zi] * dz_lo;
+        }
+
+        tau[n_lo - 1] = 0.0;
+        for (int zi = n_lo - 2; zi >= 0; --zi) {
+            tau[zi] = tau[zi+1] + 0.5 * (dtau_local[zi] + dtau_local[zi+1]);
+        }
+
+        for (int zi = 0; zi < n_lo; ++zi) {
+            C_nu[zi] = dtau_local[zi] * std::exp(-tau[zi]);
+        }
+        double Z = 0.0;
+        for (int zi = 0; zi < n_lo; ++zi) Z += C_nu[zi];
+        if (Z > 0.0) {
+            for (int zi = 0; zi < n_lo; ++zi) C_nu[zi] /= Z;
+        }
+
+        for (int zi = 0; zi < n_lo; ++zi) {
+            C_max[zi] = std::max(C_max[zi], C_nu[zi]);
+        }
+    }
+
+    double Z_env = 0.0;
+    for (int zi = 0; zi < n_lo; ++zi) Z_env += C_max[zi];
+    std::vector<double> w(n_lo);
+    if (Z_env > 0.0) {
+        for (int zi = 0; zi < n_lo; ++zi) w[zi] = C_max[zi] / Z_env;
+    } else {
+        for (int zi = 0; zi < n_lo; ++zi) w[zi] = 1.0 / n_lo;
+    }
+
+    const double zmax_delta = std::abs(lo.z_max - hi.z_max) / std::max(lo.z_max, 1e-30);
+
+    double max_weighted = 0.0;
+    for (int zi = 0; zi < n_lo; ++zi) {
+        const double z_norm = static_cast<double>(zi) / (n_lo - 1);
+        const double hi_idx = z_norm * (n_hi - 1);
+        const int    hi_i   = std::clamp(static_cast<int>(hi_idx), 0, n_hi - 2);
+        const double hi_t   = hi_idx - hi_i;
+        const double rho_hi_at = (1.0 - hi_t) * hi.rho_z[hi_i] + hi_t * hi.rho_z[hi_i + 1];
+        const double denom = std::max(lo.rho_z[zi], 1e-12);
+        const double delta = std::abs(lo.rho_z[zi] - rho_hi_at) / denom;
+        const double weighted = delta * std::sqrt(std::max(w[zi], 0.0));
+        max_weighted = std::max(max_weighted, weighted);
+    }
+    return std::max(zmax_delta, max_weighted);
+}
+
 } // namespace grrt

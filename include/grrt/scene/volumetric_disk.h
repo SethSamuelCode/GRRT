@@ -214,6 +214,10 @@ private:
     ColumnSolution solve_column(double r, double H, double T_eff,
                                  double rho_mid_proportional, int n_z) const;
 
+    /// Compare two ColumnSolutions (lo=coarse, hi=fine) using an optical-depth-weighted
+    /// max-envelope metric. Returns a scalar error estimate for Richardson refinement.
+    double compare_columns(const ColumnSolution& lo, const ColumnSolution& hi) const;
+
     // --- Construction helpers ---
     void build_flux_lut(std::vector<double>& flux, double& flux_max) const;
     void compute_radial_structure();
