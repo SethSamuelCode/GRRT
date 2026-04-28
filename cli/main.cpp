@@ -36,9 +36,9 @@ static void print_usage() {
     std::println("  --disk-temp T         Peak disk temperature in K (default: 1e7)");
     std::println("  --disk-volumetric     Enable volumetric disk model");
     std::println("  --disk-alpha A        Shakura-Sunyaev viscosity (default: 0.1)");
-    std::println("  --disk-turbulence T   Noise amplitude (default: 0.4)");
+    std::println("  --disk-turbulence T   Dimensionless boost on physical σ_s (default: 1.0)");
     std::println("  --disk-seed N         Noise seed (default: 42)");
-    std::println("  --disk-noise-scale S  Noise feature size in M, 0=auto (default: 0)");
+    std::println("  --disk-noise-scale S  Multiplier on c_corr·H(r); 0=auto (default: 0)");
     std::println("  --disk-noise-octaves N  fBm octave count (default: 2)");
     std::println("  --mass-solar M        Black hole mass in solar masses (derives temperature)");
     std::println("  --eddington-fraction F  Accretion rate as Eddington fraction (derives temperature)");
