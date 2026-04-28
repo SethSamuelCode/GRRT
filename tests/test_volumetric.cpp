@@ -90,6 +90,23 @@ void test_warnings_initially_empty() {
     }
 }
 
+void test_severity_enum_values() {
+    std::printf("\n=== Severity enum stability ===\n");
+    if (static_cast<int>(grrt::WarningSeverity::Info) != 0) {
+        std::printf("  FAIL: Info != 0\n"); failures++; return;
+    }
+    if (static_cast<int>(grrt::WarningSeverity::Warning) != 1) {
+        std::printf("  FAIL: Warning != 1\n"); failures++; return;
+    }
+    if (static_cast<int>(grrt::WarningSeverity::Promptable) != 2) {
+        std::printf("  FAIL: Promptable != 2\n"); failures++; return;
+    }
+    if (static_cast<int>(grrt::WarningSeverity::Severe) != 3) {
+        std::printf("  FAIL: Severe != 3\n"); failures++; return;
+    }
+    std::printf("  PASS\n");
+}
+
 void dump_vertical_profile() {
     std::printf("\n=== Vertical profile diagnostic ===\n");
     grrt::VolumetricParams vp;
@@ -118,6 +135,7 @@ int main() {
     test_taper();
     test_volume_bounds();
     test_warnings_initially_empty();
+    test_severity_enum_values();
     dump_vertical_profile();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;

@@ -346,3 +346,31 @@ void grrt_debug_pixel(GRRTContext* ctx, int px, int py) {
     grrt::GeodesicState state = ctx->camera->ray_for_pixel(px, py);
     ctx->tracer->trace_debug(state, ctx->disk.get(), ctx->spectrum.get());
 }
+
+extern "C" {
+
+int grrt_warning_count(const GRRTContext* ctx) {
+    if (!ctx || !ctx->vol_disk) return 0;
+    return static_cast<int>(ctx->vol_disk->warnings().size());
+}
+
+int grrt_warning_severity(const GRRTContext* ctx, int i) {
+    if (!ctx || !ctx->vol_disk) return 0;
+    const auto& ws = ctx->vol_disk->warnings();
+    if (i < 0 || i >= static_cast<int>(ws.size())) return 0;
+    return static_cast<int>(ws[i].severity);
+}
+
+const char* grrt_warning_message(const GRRTContext* ctx, int i) {
+    if (!ctx || !ctx->vol_disk) return "";
+    const auto& ws = ctx->vol_disk->warnings();
+    if (i < 0 || i >= static_cast<int>(ws.size())) return "";
+    return ws[i].message.c_str();
+}
+
+int grrt_promptable_warning_count(const GRRTContext* ctx) {
+    if (!ctx || !ctx->vol_disk) return 0;
+    return ctx->vol_disk->promptable_count();
+}
+
+} // extern "C"

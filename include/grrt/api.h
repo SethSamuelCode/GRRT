@@ -50,6 +50,19 @@ GRRT_EXPORT int grrt_render_spectral_to_fits_cb(GRRTContext* ctx,
                                                  grrt_progress_fn progress,
                                                  void* user_data);
 
+/* Warning severity values — must match grrt::WarningSeverity enum */
+#define GRRT_SEV_INFO       0
+#define GRRT_SEV_WARNING    1
+#define GRRT_SEV_PROMPTABLE 2
+#define GRRT_SEV_SEVERE     3
+
+/* Construction warnings — populated when grrt_create runs the volumetric disk
+ * builder. Pointers returned by grrt_warning_message are valid until grrt_destroy. */
+GRRT_EXPORT int          grrt_warning_count(const GRRTContext* ctx);
+GRRT_EXPORT int          grrt_warning_severity(const GRRTContext* ctx, int i);
+GRRT_EXPORT const char*  grrt_warning_message(const GRRTContext* ctx, int i);
+GRRT_EXPORT int          grrt_promptable_warning_count(const GRRTContext* ctx);
+
 #ifdef __cplusplus
 }
 #endif
