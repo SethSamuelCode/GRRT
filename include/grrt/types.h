@@ -46,6 +46,22 @@ typedef struct {
     double disk_noise_scale;    /* Noise feature size in M (0 = auto, default 0) */
     int disk_noise_octaves;     /* fBm octave count (default 2) */
 
+    /* New fields for boundary-smoothing spec — all 0 = use VolumetricParams defaults */
+    double disk_noise_compressive_b;
+    double disk_noise_correlation_length_factor;
+    double disk_outer_taper_width;
+    double disk_plunging_h_decay_exponent;
+    int    disk_bins_per_h;
+    int    disk_bins_per_gradient;
+    double disk_target_lut_eps;
+    int    disk_min_n_r;
+    int    disk_min_n_z;
+    int    disk_max_n_r;
+    int    disk_max_n_z;
+    int    disk_refine_num_frequencies;
+    int    disk_force;          /* 1 = skip prompt and proceed on warnings */
+    int    disk_strict;         /* 1 = abort on any Promptable/Severe warning */
+
     double mass_solar;          /* BH mass in solar masses (0 = use disk_temperature directly) */
     double eddington_fraction;  /* Accretion rate as fraction of Eddington (0 = use disk_temperature) */
 

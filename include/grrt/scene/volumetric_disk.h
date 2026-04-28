@@ -11,14 +11,36 @@ namespace grrt {
 
 /// Parameters for the volumetric accretion disk model.
 struct VolumetricParams {
-    double alpha      = 0.1;    ///< Shakura-Sunyaev viscosity parameter
-    double turbulence = 0.4;    ///< Noise amplitude delta
-    uint32_t seed     = 42;     ///< Noise seed
-    double tau_mid    = 100.0;  ///< Midplane optical depth normalization at peak-flux radius
-    double noise_scale  = 0.0;  ///< Noise feature size (0 = auto = 2*H at peak)
-    int noise_octaves   = 2;    ///< fBm octave count
-    double opacity_nu_min = 1e14; ///< Opacity LUT frequency lower bound (Hz)
-    double opacity_nu_max = 1e16; ///< Opacity LUT frequency upper bound (Hz)
+    // --- Physical (unchanged) ---
+    double alpha          = 0.1;
+    uint32_t seed         = 42;
+    double tau_mid        = 100.0;
+    double opacity_nu_min = 1e14;
+    double opacity_nu_max = 1e16;
+    int noise_octaves     = 2;
+
+    // --- Noise composition (CHANGED semantics) ---
+    double turbulence  = 1.0;   ///< Dimensionless boost on physically-derived σ_s.
+                                ///< 1.0 = pure physical. 0.0 = axisymmetric.
+    double noise_scale = 0.0;   ///< Multiplier on c_corr·H(r). 0 = auto.
+
+    // --- Noise physics (NEW — data-derived defaults) ---
+    double noise_compressive_b              = 0.0;  ///< 0 = derive from peak β
+    double noise_correlation_length_factor  = 0.5;  ///< c_corr; eddy length / H(r)
+
+    // --- Smooth volumetric envelope (NEW) ---
+    double outer_taper_width        = 0.0;   ///< 0 = auto = 2·H(r_outer); units M
+    double plunging_h_decay_exponent = 0.5;  ///< H(r<r_isco) = H_isco·taper(r)^p
+
+    // --- LUT sizing (NEW — data-driven with manual override) ---
+    int bins_per_h         = 0;          ///< 0 = auto via Richardson refinement
+    int bins_per_gradient  = 0;          ///< 0 = auto via Richardson refinement
+    double target_lut_eps  = 1e-3;       ///< Refinement tolerance (relative)
+    int min_n_r            = 256;
+    int min_n_z            = 64;
+    int max_n_r            = 4096;
+    int max_n_z            = 1024;
+    int refine_num_frequencies = 8;      ///< Frequency samples for max-envelope
 };
 
 /// Volumetric accretion disk with Shakura-Sunyaev vertical structure,
