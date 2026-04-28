@@ -403,6 +403,55 @@ void test_refine_n_z_caps_with_warning() {
     }
 }
 
+void test_smoke_parameter_sweep() {
+    std::printf("\n=== Smoke parameter sweep (mass micro to SMBH) ===\n");
+    struct Case { double mass, spin, alpha, turb; double r_outer; double T_peak; };
+    Case cases[] = {
+        { 1.0, 0.0,    0.01, 0.0, 30.0, 1e7  },     // baseline, no turbulence
+        { 1.0, 0.998,  0.10, 1.0, 30.0, 1e7  },     // stellar-mass canonical
+        { 1.0, 0.5,    0.05, 1.5, 60.0, 5e6  },     // intermediate
+        { 1.0, 0.998,  0.10, 1.0, 100.0, 5e5 },     // AGN-like
+        { 1.0, 0.0,    0.30, 0.5, 200.0, 1e5 },     // SMBH high-α
+        { 1.0, 0.99,   0.10, 2.0, 20.0, 1e9  },     // micro-BH near Eddington
+        { 1.0, 0.0,    0.01, 0.0, 500.0, 1e4 },     // very SMBH, gas-dominated
+    };
+    int case_failures = 0;
+    for (const auto& c : cases) {
+        grrt::VolumetricParams vp;
+        vp.alpha = c.alpha;
+        vp.turbulence = c.turb;
+        try {
+            grrt::VolumetricDisk disk(c.mass, c.spin, c.r_outer, c.T_peak, vp);
+            int severe = 0;
+            for (const auto& w : disk.warnings()) {
+                if (w.severity == grrt::WarningSeverity::Severe) ++severe;
+            }
+            if (severe > 0) {
+                std::printf("  FAIL: mass=%.0e spin=%.3f T=%.0e: %d Severe\n",
+                            c.mass, c.spin, c.T_peak, severe);
+                case_failures++;
+            } else if (!std::isfinite(disk.sigma_s_phys()) || disk.sigma_s_phys() <= 0.0) {
+                std::printf("  FAIL: mass=%.0e spin=%.3f: σ_s_phys=%.4f bad\n",
+                            c.mass, c.spin, disk.sigma_s_phys());
+                case_failures++;
+            } else {
+                std::printf("  PASS: mass=%.0e spin=%.3f T=%.0e σ=%.3f\n",
+                            c.mass, c.spin, c.T_peak, disk.sigma_s_phys());
+            }
+        } catch (const std::exception& e) {
+            std::printf("  FAIL: mass=%.0e spin=%.3f: exception '%s'\n",
+                        c.mass, c.spin, e.what());
+            case_failures++;
+        }
+    }
+    if (case_failures > 0) {
+        std::printf("  Total case failures: %d\n", case_failures);
+        failures += case_failures;
+    } else {
+        std::printf("  All %zu cases PASS\n", sizeof(cases)/sizeof(cases[0]));
+    }
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -424,6 +473,7 @@ int main() {
     test_validate_luts_clean_construction();
     test_compare_columns_compiles();
     test_refine_n_z_caps_with_warning();
+    test_smoke_parameter_sweep();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
