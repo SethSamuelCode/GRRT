@@ -260,6 +260,23 @@ void test_h_continuous_across_isco() {
                 H_below, H_at, H_above);
 }
 
+void test_sigma_s_phys_in_range() {
+    std::printf("\n=== σ_s_phys in expected range for stellar-mass disk ===\n");
+    grrt::VolumetricParams vp;
+    vp.alpha = 0.1;
+    vp.turbulence = 0.0;
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    const double sigma = disk.sigma_s_phys();
+    std::printf("  σ_s_phys = %.4f (expect 0.05 < σ < 0.5 for α=0.1)\n", sigma);
+    if (sigma < 0.05 || sigma > 0.5) {
+        std::printf("  FAIL: σ outside expected range\n");
+        failures++;
+        return;
+    }
+    std::printf("  PASS\n");
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -274,6 +291,7 @@ int main() {
     test_density_smooth_across_zmax();
     test_outer_radial_taper();
     test_h_continuous_across_isco();
+    test_sigma_s_phys_in_range();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

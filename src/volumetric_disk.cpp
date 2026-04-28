@@ -5,6 +5,7 @@
 #include <numbers>
 #include <cstdio>
 #include <utility>
+#include <limits>
 
 namespace grrt {
 
@@ -80,6 +81,8 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
 
     std::printf("[VolumetricDisk] Normalizing density...\n");
     normalize_density();
+
+    compute_sigma_s_phys();
 
     std::printf("[VolumetricDisk] Construction complete. r_isco=%.4f r_horizon=%.4f\n",
                 r_isco_, r_horizon_);
@@ -827,6 +830,70 @@ void VolumetricDisk::normalize_density() {
 
     std::printf("[VolumetricDisk] rho_scale = %.4e, midplane rho_cgs ~ %.4e\n",
                 rho_scale_, rho_scale_ * peak_rho);
+}
+
+// ============================================================================
+// compute_sigma_s_phys()
+// ============================================================================
+
+void VolumetricDisk::compute_sigma_s_phys() {
+    using namespace constants;
+
+    double b = params_.noise_compressive_b;
+    double beta = std::numeric_limits<double>::quiet_NaN();
+    bool used_default = false;
+
+    if (b <= 0.0) {
+        // Find peak-flux radius
+        int peak_idx = 0;
+        double peak_rho = 0.0;
+        for (int i = 0; i < n_r_; ++i) {
+            const double r = r_min_ + (r_outer_ - r_min_) * i / (n_r_ - 1);
+            if (r >= r_isco_ && rho_mid_lut_[i] > peak_rho) {
+                peak_rho = rho_mid_lut_[i];
+                peak_idx = i;
+            }
+        }
+
+        const double T_eff_peak = T_eff_lut_[peak_idx];
+        const double T_mid4 = 0.75 * std::pow(T_eff_peak, 4.0)
+                            * (params_.tau_mid + 2.0/3.0);
+        const double T_mid = std::pow(std::max(T_mid4, 0.0), 0.25);
+        double rho_mid_cgs = rho_scale_ * rho_mid_lut_[peak_idx];
+        rho_mid_cgs = std::clamp(rho_mid_cgs, 1e-18, 1e-6);
+
+        double mu = opacity_luts_.lookup_mu(rho_mid_cgs, std::clamp(T_mid, 3000.0, 1e8));
+        if (mu <= 0.0 || !std::isfinite(mu)) mu = 0.6;
+
+        const double P_gas = rho_mid_cgs * k_B * T_mid / (mu * m_p);
+        const double P_rad = (a_rad / 3.0) * std::pow(T_mid, 4.0);
+        beta = P_gas / (P_gas + P_rad);
+
+        if (!std::isfinite(beta)) {
+            emit(WarningSeverity::Info, "beta_fallback",
+                 "pressure regime detection failed; using b=0.5");
+            b = 0.5;
+            used_default = true;
+        } else {
+            constexpr double B_GAS = 0.35;
+            constexpr double B_RAD = 0.70;
+            b = B_GAS + (B_RAD - B_GAS) * (1.0 - beta);
+        }
+    }
+
+    sigma_s_phys_ = b * std::sqrt(std::log1p(params_.alpha));
+
+    if (sigma_s_phys_ < 0.05 || sigma_s_phys_ > 1.5) {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "σ_s_phys=%.3f outside typical [0.05, 1.5]", sigma_s_phys_);
+        emit(WarningSeverity::Info, "sigma_s_atypical", buf);
+    }
+
+    std::printf("[VolumetricDisk] σ_s_phys = %.4f (b = %.3f, β = %.3f%s)\n",
+                sigma_s_phys_, b,
+                std::isfinite(beta) ? beta : 0.0,
+                used_default ? ", default" : "");
 }
 
 void VolumetricDisk::emit(WarningSeverity sev, std::string code, std::string message) {

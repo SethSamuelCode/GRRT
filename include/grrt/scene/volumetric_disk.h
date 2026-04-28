@@ -145,6 +145,9 @@ public:
     double peak_temperature() const { return peak_temperature_; }
     double noise_scale() const { return noise_scale_; }
 
+    /// Physical noise amplitude σ_s = b·√(ln(1+α)). Set during construction.
+    double sigma_s_phys() const { return sigma_s_phys_; }
+
     /// Atmosphere extent z_max(r) [geometric]. Interpolated from z_max_lut_.
     double z_max_at(double r) const;
     const std::vector<double>& z_max_lut() const { return z_max_lut_; }
@@ -189,6 +192,8 @@ private:
     // Noise spatial scale (fixed reference length to avoid aliasing)
     double noise_scale_ = 1.0;
 
+    double sigma_s_phys_ = 0.0;
+
     std::vector<ConstructionWarning> warnings_;
     void emit(WarningSeverity sev, std::string code, std::string message);
 
@@ -211,6 +216,7 @@ private:
     void apply_outer_radial_taper();
     void compute_vertical_profiles();
     void normalize_density();
+    void compute_sigma_s_phys();
 
     // --- LUT interpolation helpers ---
     double interp_radial(const std::vector<double>& lut, double r) const;
