@@ -134,6 +134,7 @@ public:
     int vertical_bins() const { return n_z_; }
     double r_min() const { return r_min_; }
     double r_max() const { return r_outer_; }
+    double outer_taper_width() const { return outer_taper_width_; }
     double r_isco() const { return r_isco_; }
     double r_horizon() const { return r_horizon_; }
     double rho_scale() const { return rho_scale_; }
