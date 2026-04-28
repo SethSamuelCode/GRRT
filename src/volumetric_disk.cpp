@@ -52,7 +52,6 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
     r_min_ = r_horizon_ + 0.01 * mass_;
     taper_width_ = (r_isco_ - r_horizon_) / 3.0;
 
-    // BPT72 conserved quantities at ISCO
     {
         const double v = std::sqrt(mass_ / r_isco_);
         const double a_star = spin_ / mass_;
@@ -65,25 +64,47 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
     }
 
     std::printf("[VolumetricDisk] Building opacity LUTs...\n");
-    // Build opacity LUTs BEFORE density normalization (Section 0 of spec)
     opacity_luts_ = build_opacity_luts(1e-18, 1e-6, 3000.0, 1e8,
                                        params_.opacity_nu_min, params_.opacity_nu_max);
 
-    std::printf("[VolumetricDisk] Computing radial structure...\n");
+    // --- Refinement-driven LUT construction ---
+    if (params_.bins_per_gradient > 0) {
+        n_r_ = std::clamp(params_.bins_per_gradient *
+                          static_cast<int>(std::ceil((r_outer_ - r_min_) / std::max(taper_width_, 0.01))),
+                          params_.min_n_r, params_.max_n_r);
+    } else {
+        n_r_ = std::max(params_.min_n_r, 256);
+    }
+    if (params_.bins_per_h > 0) {
+        n_z_ = std::clamp(params_.bins_per_h * 8, params_.min_n_z, params_.max_n_z);
+    } else {
+        n_z_ = std::max(params_.min_n_z, 64);
+    }
+
+    // Initial radial build (used by both manual and auto modes)
+    H_lut_.assign(n_r_, 0.0);
+    rho_mid_lut_.assign(n_r_, 0.0);
+    T_eff_lut_.assign(n_r_, 0.0);
     compute_radial_structure();
-
     compute_plunging_region_decay();
-
     apply_outer_radial_taper();
 
-    std::printf("[VolumetricDisk] Computing vertical profiles...\n");
+    std::printf("[VolumetricDisk] Refining LUT sizing (n_r=%d, n_z=%d initial)...\n",
+                n_r_, n_z_);
+
+    auto [final_n_r, final_n_z] = nested_refine();
+    n_r_ = final_n_r;
+    n_z_ = final_n_z;
+
+    std::printf("[VolumetricDisk] Refinement done: n_r=%d, n_z=%d\n", n_r_, n_z_);
+
+    // Final vertical-profile build at the converged (n_r_, n_z_)
     compute_vertical_profiles();
 
     std::printf("[VolumetricDisk] Normalizing density...\n");
     normalize_density();
 
     compute_sigma_s_phys();
-
     validate_luts();
 
     std::printf("[VolumetricDisk] Construction complete. r_isco=%.4f r_horizon=%.4f\n",
@@ -1100,6 +1121,13 @@ int VolumetricDisk::refine_n_z_globally() {
     while (true) {
         const int n_z_hi = std::min(2 * n_z, params_.max_n_z);
         if (n_z_hi <= n_z) {
+            // Already at or above max_n_z — cannot double to check convergence.
+            // Emit n_z_cap warning (Promptable) so callers know refinement was skipped.
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                "n_z capped at %d; cannot double to verify convergence (max_n_z=%d)",
+                n_z, params_.max_n_z);
+            emit(WarningSeverity::Promptable, "n_z_cap", buf);
             store(cols_lo, n_z);
             return n_z;
         }
