@@ -4,6 +4,7 @@
 #include "grrt/color/opacity.h"
 #include "grrt/math/noise.h"
 #include "grrt_export.h"
+#include <utility>
 #include <vector>
 #include <cstdint>
 #include <string>
@@ -223,6 +224,17 @@ private:
     /// Mutates n_z_, z_max_lut_, rho_profile_lut_, T_profile_lut_.
     /// Emits a Promptable/Warning "n_z_cap" warning if capped before converging.
     [[maybe_unused]] int refine_n_z_globally();
+
+    /// Richardson refinement loop for radial resolution. Doubles n_r until
+    /// compare_radial() falls below target_lut_eps or max_n_r is reached.
+    /// Mutates n_r_, H_lut_, rho_mid_lut_, T_eff_lut_.
+    /// Emits a Promptable/Warning "n_r_cap" warning if capped before converging.
+    [[maybe_unused]] int refine_n_r();
+
+    /// Nested refinement: alternates refine_n_z_globally() and refine_n_r() until
+    /// both converge to a fixed point or MAX_NESTED_ITERS is reached.
+    /// Returns {n_r, n_z}.
+    [[maybe_unused]] std::pair<int, int> nested_refine();
 
     // --- Construction helpers ---
     void build_flux_lut(std::vector<double>& flux, double& flux_max) const;

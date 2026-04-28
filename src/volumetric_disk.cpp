@@ -1131,4 +1131,105 @@ int VolumetricDisk::refine_n_z_globally() {
     }
 }
 
+// ============================================================================
+// refine_n_r() — Richardson refinement for radial LUT resolution
+// ============================================================================
+
+int VolumetricDisk::refine_n_r() {
+    int n_r = std::max(params_.min_n_r, 32);
+
+    auto build_radial_at = [&](int nr) {
+        n_r_ = nr;
+        H_lut_.assign(n_r_, 0.0);
+        rho_mid_lut_.assign(n_r_, 0.0);
+        T_eff_lut_.assign(n_r_, 0.0);
+        compute_radial_structure();
+        compute_plunging_region_decay();
+        apply_outer_radial_taper();
+    };
+
+    auto snapshot = [&]() {
+        return std::tuple{H_lut_, rho_mid_lut_, T_eff_lut_};
+    };
+
+    auto compare_radial = [&](
+        const std::tuple<std::vector<double>,std::vector<double>,std::vector<double>>& lo,
+        const std::tuple<std::vector<double>,std::vector<double>,std::vector<double>>& hi) -> double {
+        const auto& [H_lo, R_lo, T_lo] = lo;
+        const auto& [H_hi, R_hi, T_hi] = hi;
+        const int n_lo = static_cast<int>(H_lo.size());
+        const int n_hi = static_cast<int>(H_hi.size());
+        double max_delta = 0.0;
+        auto cmp = [&](const std::vector<double>& a_lo, const std::vector<double>& a_hi) {
+            for (int i = 0; i < n_lo; ++i) {
+                const double t = static_cast<double>(i) / (n_lo - 1);
+                const double hi_idx = t * (n_hi - 1);
+                const int hi_i = std::clamp(static_cast<int>(hi_idx), 0, n_hi - 2);
+                const double hi_t = hi_idx - hi_i;
+                const double v_hi = (1.0 - hi_t) * a_hi[hi_i] + hi_t * a_hi[hi_i+1];
+                const double denom = std::max(std::abs(a_lo[i]), 1e-30);
+                max_delta = std::max(max_delta, std::abs(a_lo[i] - v_hi) / denom);
+            }
+        };
+        cmp(H_lo, H_hi);
+        cmp(R_lo, R_hi);
+        cmp(T_lo, T_hi);
+        return max_delta;
+    };
+
+    build_radial_at(n_r);
+    auto snap_lo = snapshot();
+
+    while (true) {
+        const int n_r_hi = std::min(2 * n_r, params_.max_n_r);
+        if (n_r_hi <= n_r) return n_r;
+
+        build_radial_at(n_r_hi);
+        auto snap_hi = snapshot();
+
+        const double delta = compare_radial(snap_lo, snap_hi);
+
+        if (delta < params_.target_lut_eps) return n_r_hi;
+        if (n_r_hi >= params_.max_n_r) {
+            const auto sev = (delta >= 2.0 * params_.target_lut_eps)
+                           ? WarningSeverity::Promptable : WarningSeverity::Warning;
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                "n_r capped at %d with delta=%.2e > %.2e",
+                params_.max_n_r, delta, params_.target_lut_eps);
+            emit(sev, "n_r_cap", buf);
+            return n_r_hi;
+        }
+        snap_lo = std::move(snap_hi);
+        n_r = n_r_hi;
+    }
+}
+
+// ============================================================================
+// nested_refine() — alternating Richardson refinement for n_r and n_z
+// ============================================================================
+
+std::pair<int, int> VolumetricDisk::nested_refine() {
+    constexpr int MAX_NESTED_ITERS = 5;
+    int n_r = std::max(params_.min_n_r, 32);
+    int n_z = std::max(params_.min_n_z, 32);
+
+    for (int iter = 0; iter < MAX_NESTED_ITERS; ++iter) {
+        const int n_z_new = (params_.bins_per_h > 0)
+                          ? params_.min_n_z   // forced — refinement skipped
+                          : refine_n_z_globally();
+        const int n_r_new = (params_.bins_per_gradient > 0)
+                          ? n_r              // forced — refinement skipped
+                          : refine_n_r();
+        if (n_r_new == n_r && n_z_new == n_z) {
+            return {n_r_new, n_z_new};
+        }
+        n_r = n_r_new;
+        n_z = n_z_new;
+    }
+    emit(WarningSeverity::Promptable, "nested_refine_no_fixed_point",
+         "nested refinement did not reach fixed point in 5 iterations");
+    return {n_r, n_z};
+}
+
 } // namespace grrt
