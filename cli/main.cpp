@@ -10,6 +10,7 @@
 #include <numbers>
 #include <chrono>
 #include <cstdio>
+#include <iostream>
 
 #ifdef _WIN32
   #include <io.h>
@@ -231,6 +232,12 @@ int main(int argc, char* argv[]) {
     }
 
     // Validation mode: render on both backends, compare, and exit
+    if (validate && params.disk_volumetric) {
+        std::println(stderr,
+            "[grrt-cli] --validate is disabled for volumetric disk pending CUDA spec; "
+            "proceeding with non-validate render.");
+        validate = false;
+    }
     if (validate) {
         std::println("gr-raytracer validation mode");
         std::println("============================");
@@ -311,6 +318,49 @@ int main(int argc, char* argv[]) {
     if (!ctx) {
         std::println(stderr, "Failed to create render context");
         return 1;
+    }
+
+    // Construction-warning gate: prompt or abort if any warnings are Promptable+
+    {
+        const int prompt_count = grrt_promptable_warning_count(ctx);
+        if (prompt_count > 0) {
+            std::println(stderr, "");
+            std::println(stderr, "================================================================");
+            std::println(stderr, "Volumetric disk construction completed with {} warning(s):",
+                         prompt_count);
+            for (int i = 0; i < grrt_warning_count(ctx); ++i) {
+                const int sev = grrt_warning_severity(ctx, i);
+                if (sev >= GRRT_SEV_PROMPTABLE) {
+                    const char* sev_name = (sev == GRRT_SEV_PROMPTABLE) ? "PROMPTABLE" : "SEVERE";
+                    std::println(stderr, "  [{}] {}", sev_name, grrt_warning_message(ctx, i));
+                }
+            }
+            std::println(stderr, "================================================================");
+
+            if (force_flag) {
+                std::println(stderr, "[grrt-cli] --force specified, continuing.");
+            } else if (strict_flag) {
+                std::println(stderr, "[grrt-cli] --strict specified, aborting.");
+                grrt_destroy(ctx);
+                return 1;
+            } else if (!stdin_is_tty()) {
+                std::println(stderr,
+                    "[grrt-cli] Non-interactive session and no --force; aborting "
+                    "to avoid producing a compromised render.");
+                grrt_destroy(ctx);
+                return 1;
+            } else {
+                std::print(stderr, "Render may be compromised. Proceed anyway? [y/N]: ");
+                std::fflush(stderr);
+                std::string line;
+                std::getline(std::cin, line);
+                if (line.empty() || (line[0] != 'y' && line[0] != 'Y')) {
+                    std::println(stderr, "[grrt-cli] Aborted by user.");
+                    grrt_destroy(ctx);
+                    return 1;
+                }
+            }
+        }
     }
 
     // Debug single pixel mode — trace and exit without rendering
