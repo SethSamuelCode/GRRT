@@ -378,6 +378,31 @@ void test_compare_columns_compiles() {
     std::printf("  PASS\n");
 }
 
+void test_refine_n_z_caps_with_warning() {
+    std::printf("\n=== refine_n_z caps emit Promptable when delta >> target ===\n");
+    grrt::VolumetricParams vp;
+    vp.turbulence = 0.0;
+    vp.bins_per_h = 0;             // auto
+    vp.bins_per_gradient = 16;     // skip n_r refinement (set deterministically)
+    vp.target_lut_eps = 1e-8;       // unrealistically tight
+    vp.max_n_z = 64;                // tiny cap
+    grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
+
+    bool found_promptable = false;
+    for (const auto& w : disk.warnings()) {
+        if (w.severity >= grrt::WarningSeverity::Promptable
+            && w.code == "n_z_cap") {
+            found_promptable = true; break;
+        }
+    }
+    if (!found_promptable) {
+        std::printf("  FAIL: expected Promptable n_z_cap warning\n");
+        failures++;
+    } else {
+        std::printf("  PASS: n_z_cap Promptable emitted\n");
+    }
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -398,6 +423,7 @@ int main() {
     test_inside_volume_tight_margin();
     test_validate_luts_clean_construction();
     test_compare_columns_compiles();
+    test_refine_n_z_caps_with_warning();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

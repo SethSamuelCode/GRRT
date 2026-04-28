@@ -1063,4 +1063,72 @@ double VolumetricDisk::compare_columns(const ColumnSolution& lo,
     return std::max(zmax_delta, max_weighted);
 }
 
+// ============================================================================
+// refine_n_z_globally() — Richardson refinement for vertical LUT resolution
+// ============================================================================
+
+int VolumetricDisk::refine_n_z_globally() {
+    int n_z = std::max(params_.min_n_z, 32);
+
+    auto build_columns = [&](int nz) {
+        std::vector<ColumnSolution> cols;
+        cols.reserve(n_r_);
+        for (int i = 0; i < n_r_; ++i) {
+            const double r = r_min_ + (r_outer_ - r_min_) * i / (n_r_ - 1);
+            cols.push_back(solve_column(r, H_lut_[i], T_eff_lut_[i],
+                                         rho_mid_lut_[i], nz));
+        }
+        return cols;
+    };
+
+    auto store = [&](const std::vector<ColumnSolution>& cols, int nz) {
+        n_z_ = nz;
+        z_max_lut_.resize(n_r_);
+        rho_profile_lut_.assign(n_r_ * n_z_, 0.0);
+        T_profile_lut_.assign(n_r_ * n_z_, 0.0);
+        for (int i = 0; i < n_r_; ++i) {
+            z_max_lut_[i] = cols[i].z_max;
+            for (int zi = 0; zi < n_z_; ++zi) {
+                rho_profile_lut_[i * n_z_ + zi] = cols[i].rho_z[zi];
+                T_profile_lut_[i * n_z_ + zi]   = cols[i].T_z[zi];
+            }
+        }
+    };
+
+    auto cols_lo = build_columns(n_z);
+
+    while (true) {
+        const int n_z_hi = std::min(2 * n_z, params_.max_n_z);
+        if (n_z_hi <= n_z) {
+            store(cols_lo, n_z);
+            return n_z;
+        }
+        auto cols_hi = build_columns(n_z_hi);
+
+        double max_delta = 0.0;
+        for (int i = 0; i < n_r_; ++i) {
+            max_delta = std::max(max_delta, compare_columns(cols_lo[i], cols_hi[i]));
+        }
+
+        if (max_delta < params_.target_lut_eps) {
+            store(cols_hi, n_z_hi);
+            return n_z_hi;
+        }
+        if (n_z_hi >= params_.max_n_z) {
+            const auto sev = (max_delta >= 2.0 * params_.target_lut_eps)
+                           ? WarningSeverity::Promptable : WarningSeverity::Warning;
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                "n_z capped at %d with delta=%.2e > %.2e",
+                params_.max_n_z, max_delta, params_.target_lut_eps);
+            emit(sev, "n_z_cap", buf);
+            store(cols_hi, n_z_hi);
+            return n_z_hi;
+        }
+
+        cols_lo = std::move(cols_hi);
+        n_z = n_z_hi;
+    }
+}
+
 } // namespace grrt

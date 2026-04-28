@@ -218,6 +218,12 @@ private:
     /// max-envelope metric. Returns a scalar error estimate for Richardson refinement.
     double compare_columns(const ColumnSolution& lo, const ColumnSolution& hi) const;
 
+    /// Richardson refinement loop for vertical resolution. Doubles n_z until
+    /// compare_columns() falls below target_lut_eps or max_n_z is reached.
+    /// Mutates n_z_, z_max_lut_, rho_profile_lut_, T_profile_lut_.
+    /// Emits a Promptable/Warning "n_z_cap" warning if capped before converging.
+    [[maybe_unused]] int refine_n_z_globally();
+
     // --- Construction helpers ---
     void build_flux_lut(std::vector<double>& flux, double& flux_max) const;
     void compute_radial_structure();
