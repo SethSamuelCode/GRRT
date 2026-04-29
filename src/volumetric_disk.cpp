@@ -50,7 +50,6 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
     r_isco_ = compute_isco(mass_, spin_);
     r_horizon_ = compute_horizon(mass_, spin_);
     r_min_ = r_horizon_ + 0.01 * mass_;
-    taper_width_ = (r_isco_ - r_horizon_) / 3.0;
 
     {
         const double v = std::sqrt(mass_ / r_isco_);
@@ -69,8 +68,9 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
 
     // --- Refinement-driven LUT construction ---
     if (params_.bins_per_gradient > 0) {
+        const double sizing_scale = std::max((r_isco_ - r_horizon_) / 3.0, 0.01);
         n_r_ = std::clamp(params_.bins_per_gradient *
-                          static_cast<int>(std::ceil((r_outer_ - r_min_) / std::max(taper_width_, 0.01))),
+                          static_cast<int>(std::ceil((r_outer_ - r_min_) / sizing_scale)),
                           params_.min_n_r, params_.max_n_r);
     } else {
         n_r_ = std::max(params_.min_n_r, 256);
@@ -181,8 +181,26 @@ void VolumetricDisk::plunging_velocity(double r, double theta,
 
 double VolumetricDisk::taper(double r) const {
     if (r >= r_isco_) return 1.0;
-    const double dr = r_isco_ - r;
-    return std::exp(-(dr * dr) / (taper_width_ * taper_width_));
+    if (r <= r_horizon_) return 0.0;
+
+    // Mass conservation along the BPT72 plunging geodesic:
+    //   ρ(r) ∝ 1 / (r · |u^r(r)|)
+    // Normalize so taper saturates to 1 at ISCO via a regulator at r_isco·EPS.
+    constexpr double EPS = 0.99;
+    constexpr double THETA = 1.5707963267948966;  // pi/2, equatorial plane
+
+    double ut, ur_ref, uphi;
+    plunging_velocity(r_isco_ * EPS, THETA, ut, ur_ref, uphi);
+    const double r_ref = r_isco_ * EPS;
+    const double denom_ref = r_ref * std::abs(ur_ref);
+    if (denom_ref <= 0.0) return 1.0;
+
+    double ur;
+    plunging_velocity(r, THETA, ut, ur, uphi);
+    const double denom = r * std::abs(ur);
+    if (denom <= 0.0) return 1.0;
+
+    return std::clamp(denom_ref / denom, 0.0, 1.0);
 }
 
 // ============================================================================

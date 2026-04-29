@@ -60,7 +60,7 @@ void test_taper() {
     check("taper(r_isco)", disk.taper(disk.r_isco()), 1.0, 0.01);
     check("taper(r_isco+1)", disk.taper(disk.r_isco()+1.0), 1.0, 0.01);
     double t_hor = disk.taper(disk.r_horizon());
-    if (t_hor > 0.1) { std::printf("  FAIL: taper at horizon should be small\n"); failures++; }
+    if (t_hor > 0.05) { std::printf("  FAIL: BPT72 taper at horizon should be near zero (got %.4e)\n", t_hor); failures++; }
     else { std::printf("  PASS: taper(horizon)=%.4e\n", t_hor); }
 }
 

@@ -98,7 +98,9 @@ public:
     /// Temperature at (r, z) from precomputed vertical profile LUT [K].
     double temperature(double r, double z) const;
 
-    /// ISCO taper factor: 1 for r >= r_isco, Gaussian decay inside.
+    /// ISCO taper factor: 1 for r >= r_isco, decays via BPT72 mass
+    /// conservation along the plunging geodesic for r < r_isco.
+    /// Reaches 0 at r_horizon by construction.
     double taper(double r) const;
 
     /// Whether the point (r, |z|) is within the disk volume bounds.
@@ -142,7 +144,11 @@ public:
     const SimplexNoise3D& noise() const { return noise_; }
     double E_isco() const { return E_isco_; }
     double L_isco() const { return L_isco_; }
-    double taper_width() const { return taper_width_; }
+    /// Legacy accessor — preserved for CUDA host-data layout compatibility.
+    /// Returns the heuristic length scale that was used by the old Gaussian
+    /// taper. New code should not depend on this value; the BPT72 taper
+    /// has no width parameter.
+    double taper_width() const { return (r_isco_ - r_horizon_) / 3.0; }
     double turbulence() const { return params_.turbulence; }
     double peak_temperature() const { return peak_temperature_; }
     /// Legacy accessor — returns the noise correlation length at peak-flux radius
@@ -172,7 +178,6 @@ private:
     double mass_, spin_, r_outer_, peak_temperature_;
     double r_isco_, r_horizon_;
     double r_min_;              ///< Inner bound (slightly outside horizon)
-    double taper_width_;        ///< Gaussian taper width inside ISCO
     double outer_taper_width_ = 0.0;   ///< Resolved width of the outer radial taper [M]
     VolumetricParams params_;
     SimplexNoise3D noise_;
