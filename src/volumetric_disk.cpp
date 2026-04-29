@@ -2,6 +2,7 @@
 #include "grrt/math/constants.h"
 #include <cmath>
 #include <algorithm>
+#include <iterator>
 #include <numbers>
 #include <cstdio>
 #include <utility>
@@ -718,33 +719,105 @@ VolumetricDisk::ColumnSolution VolumetricDisk::solve_column(
             }
         }
 
+        // Define rhs lambda once (used by all DP45 stages)
+        auto rhs = [&](double z_eval, double rho_eval) -> double {
+            const double z_frac = z_eval / dz;
+            const int idx = std::clamp(static_cast<int>(z_frac), 0, n_z - 2);
+            const double t = z_frac - idx;
+            const double cs2 = k_B * ((1.0-t)*out.T_z[idx] + t*out.T_z[idx+1])
+                             / (((1.0-t)*mu_z[idx] + t*mu_z[idx+1]) * m_p);
+            const double dcs2 = (1.0-t)*d_cs2_dz[idx] + t*d_cs2_dz[idx+1];
+            const double dfE  = (1.0-t)*d_fE_dz[idx]  + t*d_fE_dz[idx+1];
+            if (cs2 < 1e-30) return 0.0;
+            const double cs2_geom = cs2 / (c_cgs * c_cgs);
+            const double dcs2_geom = dcs2 / (c_cgs * c_cgs);
+            const double dfE_geom = dfE / (rho_cgs_ref * c_cgs * c_cgs);
+            return (-rho_eval * Omz2 * z_eval - rho_eval * dcs2_geom - dfE_geom)
+                   / std::max(cs2_geom, 1e-30);
+        };
+
+        // Adaptive Dormand-Prince RK4(5) integration of dρ/dz from z=0 to z_max.
+        // Variable step size handles the photosphere cliff; result is sampled
+        // onto the uniform n_z grid for storage in rho_z[].
+        const double dp45_tol = std::max(params_.target_lut_eps, 1e-6);
+        const double h_floor = z_max * 1e-9;
+        constexpr int MAX_DP45_STEPS = 4096;  // safety against pathological cliffs
+
+        std::vector<double> z_samples;
+        std::vector<double> rho_samples;
+        z_samples.reserve(256);
+        rho_samples.reserve(256);
+        z_samples.push_back(0.0);
+        rho_samples.push_back(1.0);
+
+        double z_cur = 0.0;
+        double rho_cur = 1.0;
+        double h = z_max / 64.0;  // start with ~64 steps; adapt from there
+        int step_count = 0;
+
+        while (z_cur < z_max && step_count < MAX_DP45_STEPS) {
+            ++step_count;
+            h = std::min(h, z_max - z_cur);
+
+            const double k1 = rhs(z_cur, rho_cur);
+            const double k2 = rhs(z_cur + h/5.0,
+                                  std::max(rho_cur + h*k1/5.0, RHO_FLOOR));
+            const double k3 = rhs(z_cur + 3.0*h/10.0,
+                                  std::max(rho_cur + h*(3.0*k1/40.0 + 9.0*k2/40.0), RHO_FLOOR));
+            const double k4 = rhs(z_cur + 4.0*h/5.0,
+                                  std::max(rho_cur + h*(44.0*k1/45.0 - 56.0*k2/15.0 + 32.0*k3/9.0), RHO_FLOOR));
+            const double k5 = rhs(z_cur + 8.0*h/9.0,
+                                  std::max(rho_cur + h*(19372.0*k1/6561.0 - 25360.0*k2/2187.0
+                                                        + 64448.0*k3/6561.0 - 212.0*k4/729.0), RHO_FLOOR));
+            const double k6 = rhs(z_cur + h,
+                                  std::max(rho_cur + h*(9017.0*k1/3168.0 - 355.0*k2/33.0
+                                                        + 46732.0*k3/5247.0 + 49.0*k4/176.0
+                                                        - 5103.0*k5/18656.0), RHO_FLOOR));
+
+            const double rho_next = rho_cur + h*(35.0*k1/384.0 + 500.0*k3/1113.0
+                                                 + 125.0*k4/192.0 - 2187.0*k5/6784.0
+                                                 + 11.0*k6/84.0);
+            const double k7 = rhs(z_cur + h, std::max(rho_next, RHO_FLOOR));
+
+            const double err = h * std::abs(71.0*k1/57600.0 - 71.0*k3/16695.0
+                                            + 71.0*k4/1920.0 - 17253.0*k5/339200.0
+                                            + 22.0*k6/525.0 - k7/40.0);
+            const double scale = std::max(std::abs(rho_cur), RHO_FLOOR);
+            const double err_rel = err / scale;
+
+            if (err_rel < dp45_tol || h <= h_floor) {
+                // Accept
+                z_cur += h;
+                rho_cur = std::max(rho_next, RHO_FLOOR);
+                z_samples.push_back(z_cur);
+                rho_samples.push_back(rho_cur);
+                const double scale_factor = (err_rel > 1e-30)
+                    ? std::clamp(0.9 * std::pow(dp45_tol / err_rel, 0.2), 0.2, 5.0)
+                    : 5.0;
+                h *= scale_factor;
+            } else {
+                // Reject — shrink and retry
+                h *= std::max(0.2, 0.9 * std::pow(dp45_tol / err_rel, 0.2));
+            }
+        }
+
+        // Sample rho onto the uniform n_z grid via linear interpolation
         out.rho_z[0] = 1.0;
-        for (int zi = 0; zi < n_z - 1; ++zi) {
-            const double z_here = zi * dz;
-            const double rho_here = out.rho_z[zi];
-
-            auto rhs = [&](double z_eval, double rho_eval) -> double {
-                const double z_frac = z_eval / dz;
-                const int idx = std::clamp(static_cast<int>(z_frac), 0, n_z - 2);
-                const double t = z_frac - idx;
-                const double cs2 = k_B * ((1.0-t)*out.T_z[idx] + t*out.T_z[idx+1])
-                                 / (((1.0-t)*mu_z[idx] + t*mu_z[idx+1]) * m_p);
-                const double dcs2 = (1.0-t)*d_cs2_dz[idx] + t*d_cs2_dz[idx+1];
-                const double dfE  = (1.0-t)*d_fE_dz[idx]  + t*d_fE_dz[idx+1];
-                if (cs2 < 1e-30) return 0.0;
-                const double cs2_geom = cs2 / (c_cgs * c_cgs);
-                const double dcs2_geom = dcs2 / (c_cgs * c_cgs);
-                const double dfE_geom = dfE / (rho_cgs_ref * c_cgs * c_cgs);
-                return (-rho_eval * Omz2 * z_eval - rho_eval * dcs2_geom - dfE_geom)
-                       / std::max(cs2_geom, 1e-30);
-            };
-
-            const double k1 = dz * rhs(z_here, rho_here);
-            const double k2 = dz * rhs(z_here + 0.5*dz, std::max(rho_here + 0.5*k1, RHO_FLOOR));
-            const double k3 = dz * rhs(z_here + 0.5*dz, std::max(rho_here + 0.5*k2, RHO_FLOOR));
-            const double k4 = dz * rhs(z_here + dz,     std::max(rho_here + k3,     RHO_FLOOR));
-            out.rho_z[zi+1] = std::max(rho_here + (k1 + 2.0*k2 + 2.0*k3 + k4) / 6.0,
-                                        RHO_FLOOR);
+        for (int zi = 1; zi < n_z; ++zi) {
+            const double z_target = zi * dz;
+            auto it = std::upper_bound(z_samples.begin(), z_samples.end(), z_target);
+            if (it == z_samples.begin()) {
+                out.rho_z[zi] = rho_samples[0];
+            } else if (it == z_samples.end()) {
+                out.rho_z[zi] = rho_samples.back();
+            } else {
+                const size_t hi = static_cast<size_t>(std::distance(z_samples.begin(), it));
+                const size_t lo = hi - 1;
+                const double span = z_samples[hi] - z_samples[lo];
+                const double t = (span > 0.0) ? (z_target - z_samples[lo]) / span : 0.0;
+                out.rho_z[zi] = std::max((1.0 - t) * rho_samples[lo] + t * rho_samples[hi],
+                                          RHO_FLOOR);
+            }
         }
 
         // Extend z_max if not yet at convergence floor
