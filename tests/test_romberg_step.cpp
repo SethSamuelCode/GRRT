@@ -1,0 +1,76 @@
+// tests/test_romberg_step.cpp
+//
+// Unit tests for romberg_step using synthetic StepSampler implementations.
+// We test against analytic dτ values for closed-form integrands.
+
+#include "grrt/geodesic/romberg_step.h"
+#include "grrt/geodesic/rk4.h"
+#include "grrt/spacetime/kerr.h"
+#include "grrt/math/vec3.h"
+
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+
+using namespace grrt;
+
+#define EXPECT_NEAR(actual, expected, tol)                                    \
+    do {                                                                      \
+        double a = (actual), e = (expected), t = (tol);                       \
+        if (std::abs(a - e) > t) {                                            \
+            std::printf("FAIL %s:%d: %s ≈ %s (got %.6e, expected %.6e, tol %.2e)\n", \
+                        __FILE__, __LINE__, #actual, #expected, a, e, t);     \
+            std::exit(1);                                                     \
+        }                                                                     \
+    } while (0)
+
+// --- Synthetic samplers ---
+
+// Constant integrand: κρ|p·u_emit| = K everywhere. Then dτ = K·Δλ exactly.
+struct ConstantSampler : StepSampler {
+    double K;
+    explicit ConstantSampler(double k) : K(k) {}
+    bool sample_integrand(const GeodesicState& /*state*/,
+                          std::span<const double> channels,
+                          std::span<double> integrand) const override {
+        for (size_t i = 0; i < channels.size(); ++i) integrand[i] = K;
+        return true;
+    }
+};
+
+// Test 1: a constant integrand should give dτ = K·ds exactly,
+// and Romberg's full and half estimates should agree (max_err == 0).
+static void test_constant_integrand() {
+    ConstantSampler sampler{2.5};
+    Kerr metric(1.0, 0.0);  // Schwarzschild as a Kerr-with-spin-0
+    RK4 integrator;
+
+    // A simple radial null geodesic at r=10, theta=pi/2.
+    GeodesicState start;
+    start.position = {0.0, 10.0, 1.5707963267948966, 0.0};
+    start.momentum = {-1.0, 0.0, 0.0, 0.0};  // purely temporal — won't move spatially much
+    // Note: the test only requires the integrand machinery, not realistic geodesic motion.
+
+    constexpr double channels[] = {550e-7};  // one channel, value irrelevant for ConstantSampler
+    const double ds = 0.1;
+
+    RombergStep r = romberg_step(start, ds,
+                                  std::span<const double>{channels, 1},
+                                  sampler, metric, integrator);
+
+    EXPECT_NEAR(r.dtau[0], 2.5 * 0.1, 1e-12);
+    EXPECT_NEAR(r.max_err, 0.0,        1e-12);
+    EXPECT_NEAR(r.ds_taken, 0.1,       1e-12);
+    if (r.n_channels != 1) {
+        std::printf("FAIL: n_channels=%d, expected 1\n", r.n_channels);
+        std::exit(1);
+    }
+}
+
+int main() {
+    std::printf("Running test_romberg_step...\n");
+    test_constant_integrand();
+    std::printf("All tests passed.\n");
+    return 0;
+}
