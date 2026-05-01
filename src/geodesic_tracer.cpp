@@ -326,7 +326,7 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& color,
         const double ds_geo = 0.1 * std::max(r - vol_disk_->r_horizon(), 0.5);
         ds = std::min(ds_tau, ds_geo);
         // H already declared above in the outside-volume check
-        ds = std::clamp(ds, H / 64.0, H);
+        ds = std::clamp(ds, H / 64.0, H / 8.0);  // DEBUG: tightened max from H to H/8
 
         state = new_state;
     }
