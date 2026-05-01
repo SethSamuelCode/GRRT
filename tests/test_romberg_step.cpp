@@ -10,6 +10,8 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <utility>
+#include <vector>
 
 using namespace grrt;
 
@@ -27,6 +29,21 @@ int failures = 0;
     } while (0)
 
 // --- Synthetic samplers ---
+
+// Per-channel constant integrand: integrand[ch] = ks[ch].
+struct PerChannelConstantSampler : StepSampler {
+    std::vector<double> ks;
+    explicit PerChannelConstantSampler(std::vector<double> values)
+        : ks(std::move(values)) {}
+    bool sample_integrand(const GeodesicState& /*state*/,
+                          std::span<const double> channels,
+                          std::span<double> integrand) const override {
+        for (size_t i = 0; i < channels.size(); ++i) {
+            integrand[i] = (i < ks.size()) ? ks[i] : 0.0;
+        }
+        return true;
+    }
+};
 
 // Constant integrand: κρ|p·u_emit| = K everywhere. Then dτ = K·Δλ exactly.
 struct ConstantSampler : StepSampler {
@@ -69,9 +86,37 @@ static void test_constant_integrand() {
     }
 }
 
+static void test_multi_channel_batching() {
+    PerChannelConstantSampler sampler({1.0, 2.5, 7.0});  // 3 channels
+    Kerr metric(1.0, 0.0);
+    RK4 integrator;
+
+    GeodesicState start;
+    start.position = {0.0, 10.0, 1.5707963267948966, 0.0};
+    start.momentum = {-0.8, 1.0, 0.0, 0.0};  // valid radial null geodesic at r=10, M=1
+
+    constexpr double channels[] = {450e-7, 550e-7, 650e-7};
+    const double ds = 0.1;
+
+    RombergStep r = romberg_step(start, ds,
+                                  std::span<const double>{channels, 3},
+                                  sampler, metric, integrator);
+
+    EXPECT_NEAR(r.dtau[0], 1.0 * 0.1, 1e-12);
+    EXPECT_NEAR(r.dtau[1], 2.5 * 0.1, 1e-12);
+    EXPECT_NEAR(r.dtau[2], 7.0 * 0.1, 1e-12);
+    EXPECT_NEAR(r.max_err, 0.0,       1e-12);
+
+    if (r.n_channels != 3) {
+        std::printf("FAIL: n_channels=%d, expected 3\n", r.n_channels);
+        failures++;
+    }
+}
+
 int main() {
     std::printf("Running test_romberg_step...\n");
     test_constant_integrand();
+    test_multi_channel_batching();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
