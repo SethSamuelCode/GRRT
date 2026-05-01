@@ -77,6 +77,10 @@ typedef struct {
 
     int num_frequency_bins;          /* 0 = legacy RGB mode (default) */
     const double* frequency_bins_hz; /* Array of observer-frame frequencies in Hz */
+
+    /* Per-step optical-depth tolerance for the volumetric raymarcher.
+     * Smaller = higher fidelity, slower. Default 1e-2 (set by the CLI/api). */
+    double raymarch_tol;
 } GRRTParams;
 
 typedef struct GRRTContext GRRTContext;

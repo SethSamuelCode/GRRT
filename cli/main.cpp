@@ -46,6 +46,7 @@ static void print_usage() {
     std::println("  --max-steps N         Max integration steps (default: 10000)");
     std::println("  --tolerance T         Integrator tolerance (default: 1e-8)");
     std::println("  --samples N           Samples per pixel for anti-aliasing (default: 1)");
+    std::println("  --raymarch-tol T      Volumetric raymarch τ-tolerance (default: 1e-2)");
     std::println("  --threads N           CPU threads, 0=auto (default: 0)");
     std::println("  --backend TYPE        cpu | cuda (default: cpu)");
     std::println("  --validate            Render on both backends, compare results");
@@ -92,6 +93,7 @@ int main(int argc, char* argv[]) {
     params.samples_per_pixel = 1;
     params.num_frequency_bins = 0;
     params.frequency_bins_hz = nullptr;
+    params.raymarch_tol = 1e-2;
 
     std::string output_name = "output";
     std::string backend_str = "cpu";
@@ -169,6 +171,14 @@ int main(int argc, char* argv[]) {
             if (auto v = next()) params.integrator_tolerance = std::atof(v);
         } else if (arg("--samples")) {
             if (auto v = next()) params.samples_per_pixel = std::atoi(v);
+        } else if (arg("--raymarch-tol")) {
+            if (auto v = next()) {
+                params.raymarch_tol = std::atof(v);
+                if (params.raymarch_tol <= 0.0) {
+                    std::println(stderr, "Error: --raymarch-tol must be > 0");
+                    return 1;
+                }
+            }
         } else if (arg("--threads")) {
             if (auto v = next()) params.thread_count = std::atoi(v);
         } else if (arg("--backend")) {
