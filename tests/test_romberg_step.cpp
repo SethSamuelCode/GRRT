@@ -6,14 +6,14 @@
 #include "grrt/geodesic/romberg_step.h"
 #include "grrt/geodesic/rk4.h"
 #include "grrt/spacetime/kerr.h"
-#include "grrt/math/vec3.h"
 
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 
 using namespace grrt;
+
+int failures = 0;
 
 #define EXPECT_NEAR(actual, expected, tol)                                    \
     do {                                                                      \
@@ -21,7 +21,8 @@ using namespace grrt;
         if (std::abs(a - e) > t) {                                            \
             std::printf("FAIL %s:%d: %s ≈ %s (got %.6e, expected %.6e, tol %.2e)\n", \
                         __FILE__, __LINE__, #actual, #expected, a, e, t);     \
-            std::exit(1);                                                     \
+            failures++;                                                       \
+            return;                                                           \
         }                                                                     \
     } while (0)
 
@@ -46,11 +47,11 @@ static void test_constant_integrand() {
     Kerr metric(1.0, 0.0);  // Schwarzschild as a Kerr-with-spin-0
     RK4 integrator;
 
-    // A simple radial null geodesic at r=10, theta=pi/2.
+    // Valid radial null geodesic at r=10 in Schwarzschild (M=1):
+    // g^tt p_t^2 + g^rr p_r^2 = 0  →  |p_t|/|p_r| = 1 - 2M/r = 0.8
     GeodesicState start;
     start.position = {0.0, 10.0, 1.5707963267948966, 0.0};
-    start.momentum = {-1.0, 0.0, 0.0, 0.0};  // purely temporal — won't move spatially much
-    // Note: the test only requires the integrand machinery, not realistic geodesic motion.
+    start.momentum = {-0.8, 1.0, 0.0, 0.0};  // null radial geodesic at r=10, M=1
 
     constexpr double channels[] = {550e-7};  // one channel, value irrelevant for ConstantSampler
     const double ds = 0.1;
@@ -64,13 +65,13 @@ static void test_constant_integrand() {
     EXPECT_NEAR(r.ds_taken, 0.1,       1e-12);
     if (r.n_channels != 1) {
         std::printf("FAIL: n_channels=%d, expected 1\n", r.n_channels);
-        std::exit(1);
+        failures++;
     }
 }
 
 int main() {
     std::printf("Running test_romberg_step...\n");
     test_constant_integrand();
-    std::printf("All tests passed.\n");
-    return 0;
+    std::printf("\n=== %d failures ===\n", failures);
+    return failures > 0 ? 1 : 0;
 }
