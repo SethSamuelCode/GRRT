@@ -40,7 +40,8 @@ public:
     GeodesicTracer(const Kerr& metric, const RK4& integrator,
                    double observer_r, int max_steps = 10000, double r_escape = 1000.0,
                    double tolerance = 1e-8,
-                   const VolumetricDisk* vol_disk = nullptr);
+                   const VolumetricDisk* vol_disk = nullptr,
+                   double raymarch_tol = 1e-2);
 
     TraceResult trace(GeodesicState state,
                       const AccretionDisk* disk,
@@ -63,6 +64,7 @@ private:
     double tolerance_;
     double horizon_epsilon_ = 0.01;
     const VolumetricDisk* vol_disk_ = nullptr;
+    double raymarch_tol_ = 1e-2;
 
     void raymarch_volumetric(GeodesicState& state, Vec3& color,
                              double J_rgb[3], double T_rgb[3]) const;

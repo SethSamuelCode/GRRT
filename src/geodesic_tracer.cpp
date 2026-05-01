@@ -15,10 +15,12 @@ namespace grrt {
 
 GeodesicTracer::GeodesicTracer(const Kerr& metric, const RK4& integrator,
                                double observer_r, int max_steps, double r_escape,
-                               double tolerance, const VolumetricDisk* vol_disk)
+                               double tolerance, const VolumetricDisk* vol_disk,
+                               double raymarch_tol)
     : metric_(metric), integrator_(integrator),
       observer_r_(observer_r), max_steps_(max_steps), r_escape_(r_escape),
-      tolerance_(tolerance), vol_disk_(vol_disk) {}
+      tolerance_(tolerance), vol_disk_(vol_disk),
+      raymarch_tol_(raymarch_tol > 0.0 ? raymarch_tol : 1e-12) {}
 
 TraceResult GeodesicTracer::trace(GeodesicState state,
                                   const AccretionDisk* disk,

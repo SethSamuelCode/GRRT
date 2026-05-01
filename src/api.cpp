@@ -151,7 +151,8 @@ GRRTContext* grrt_create(const GRRTParams* params) {
     // Geodesic tracer (created after volumetric disk so it can reference it)
     ctx->tracer = std::make_unique<grrt::GeodesicTracer>(
         *ctx->metric, *ctx->integrator, observer_r, max_steps, 1000.0, tolerance,
-        ctx->vol_disk.get());
+        ctx->vol_disk.get(),
+        params->raymarch_tol);
 
     // Background (optional)
     if (params->background_type == GRRT_BG_STARS) {
