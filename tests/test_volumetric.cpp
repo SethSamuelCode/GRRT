@@ -548,7 +548,7 @@ int main() {
     test_validate_luts_clean_construction();
     test_compare_columns_compiles();
     test_refine_n_z_caps_with_warning();
-    // test_smoke_parameter_sweep();  // ~3-4 min — uncomment for full sweep
+    test_smoke_parameter_sweep();  // ~5-7 min at 1e-6 DP45 (7 unique configs, no sharing)
     test_tau_midplane_near_target();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;

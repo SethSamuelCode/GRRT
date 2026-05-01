@@ -205,3 +205,97 @@ The new BPT72 taper produces a different shape than the old Gaussian (factor=1/3
 The visual difference is mostly in the inner-edge brightness pattern. The high-spin (a=0.998) ISCO is at ~1.24M, very close to the horizon at 1.06M, so the plunging region is narrow and the visual effect is subtle. Reference images of pre-change renders may need updating.
 
 The C-API ABI is unchanged — no `GRRTParams` field added or removed by this spec. The intermediate `disk_plunging_taper_width_factor` field that was being added in the 2026-04-28 plan was never committed, so no compatibility concern there.
+
+## Implementation Results (2026-05-01)
+
+### Tests
+
+Final test-volumetric run with all 7 smoke-sweep cases re-enabled and shared-disk refactor in place:
+
+| Test | Status |
+|------|--------|
+| test_construction, test_density_profile, test_temperature_profile | PASS |
+| test_taper, test_volume_bounds, test_warnings_initially_empty | PASS |
+| test_severity_enum_values, test_smoothstep_regression | PASS |
+| test_photosphere_extends_to_negligible | PASS |
+| test_density_smooth_across_zmax | PASS |
+| test_outer_radial_taper, test_h_continuous_across_isco | PASS |
+| test_sigma_s_phys_in_range | PASS |
+| test_density_strictly_positive_inside_volume | PASS |
+| test_density_lognormal_mean | PASS |
+| test_inside_volume_tight_margin | PASS |
+| test_validate_luts_clean_construction | PASS |
+| test_compare_columns_compiles | PASS |
+| test_refine_n_z_caps_with_warning | PASS |
+| test_smoke_parameter_sweep — all 7 cases | PASS |
+| test_tau_midplane_near_target | **FAIL** — see below |
+
+Total: **1 failure / 19 tests**.
+
+Sweep coverage (all PASS, σ_s_phys in range):
+
+| mass (M_sun) | spin | T_peak (K) | σ_s_phys |
+|-------------:|-----:|-----------:|---------:|
+| 1.0          | 0.000 | 1e+07     | 0.070 |
+| 1.0          | 0.998 | 1e+07     | 0.216 |
+| 1.0          | 0.500 | 5e+06     | 0.155 |
+| 1.0          | 0.998 | 5e+05     | 0.214 |
+| 1.0          | 0.000 | 1e+05     | 0.238 |
+| 1.0          | 0.990 | 1e+09     | 0.216 |
+| 1.0          | 0.000 | 1e+04     | 0.035 |
+
+### Smoke render
+
+`final_smoke.png` rendered at 1024² in ~30 seconds (post-construction). Construction took ~1 minute at `dp45_tol=1e-6`. Construction log:
+
+```
+[VolumetricDisk] Refinement done: n_r=4096, n_z=1024
+[VolumetricDisk] σ_s_phys = 0.2161 (b = 0.700, β = 0.000)
+[VolumetricDisk] Construction complete. r_isco=1.2370 r_horizon=1.0632
+```
+
+### Refinement cap-binding (known issue)
+
+Promptable warnings on every render:
+- `h_jump` at i=4095 (mag 0.97): outer-edge artifact, Promptable but doesn't affect rendered output
+- `n_z_cap` (delta 0.83 vs target 1e-3): refinement caps at n_z=1024
+- `n_r_cap` (delta 0.81 vs target 1e-3): refinement caps at n_r=4096
+
+These persist because `compare_columns` compares LUT *bin values* between resolutions, but the photosphere cliff is a near-step-function. The cliff position is consistent across columns (DP45 fixed that), but uniform-grid storage at different `n_z` resolutions samples the cliff at slightly different bins, producing order-1 differences at the bin where light is emitted.
+
+**Empirical verification (2026-05-01):** tightening `dp45_tol` from 1e-3 (default) to 1e-6 dropped `n_z_cap` delta from ~1100 to 0.83 — a 1300× improvement, confirming DP45 is integrating accurately. The residual gap to 1e-3 target is *not* ODE error; it's storage aliasing. Tightening to 1e-8 doesn't help (~5× slower construction, same delta).
+
+The fix is a Phase 3 follow-up: change `compare_columns` to compare *integrated optical depth* instead of point density values. The renderer's actual integrand is τ(z), which integrates over the cliff and isn't aliased. Two LUTs that bracket the cliff differently produce nearly identical τ(z); refinement would converge cleanly.
+
+### Tau-midplane test failure (known issue)
+
+`test_tau_midplane_near_target` reports τ=403 vs target tau_mid=100 (4× overshoot). The integration formula and units are now correct (was τ=0 before this branch); the residual factor of 4 stems from one or more of:
+
+1. Peak-radius mismatch: test scans 50 r values, normalize_density uses the full n_r=4096 LUT — different peaks.
+2. Cliff sensitivity: trap-rule integration over a near-step-function depends on which bin straddles the cliff.
+3. Kappa-at-clamped vs kappa-at-unclamped asymmetry: test clamps for lookup but integrates unclamped product; normalize_density uses one consistent value.
+
+Fix is out of scope here — would require either making the test use the same internal protocol normalize_density uses (peak_idx access, same n_z, single kappa), or adding a public `peak_flux_radius()` accessor and `column_optical_depth(int ri)` method to make the comparison apples-to-apples.
+
+### Construction time
+
+| dp45_tol | construction time | notes |
+|---------:|------------------:|-------|
+| 1e-3 (old default) | ~10 s | original speed, density tests fail |
+| **1e-6 (new fixed)** | **~1 min** | density tests pass, n_z_cap delta=0.83 |
+| 1e-8 | ~5+ min | no further improvement, not worth it |
+
+Test suite total: ~3 minutes (was ~16 minutes before the shared-disk refactor in commit `5fc4737`).
+
+### Phase 1 status
+
+✅ All density tests pass
+✅ Refinement integration accurate (1300× tighter than original)
+✅ All 7 mass-scale sweep cases pass
+✅ BPT72 taper retires near-horizon h_jump warning
+✅ Smoke render produces output with no crashes
+
+🚧 Cap-binding warnings persist (Phase 3: compare_columns metric change)
+🚧 Tau-midplane test off by 4× (Phase 4: peak-radius reconciliation or test rewrite)
+
+Phase 1 is complete relative to its stated goals (the three density-related test failures are fixed). The cap-binding and tau-test issues were both narrowed to specific root causes during this work — neither was the original target but they're worth tracking as separate Phase work.
