@@ -460,11 +460,11 @@ void test_tau_midplane_near_target() {
     grrt::VolumetricDisk disk(1.0, 0.998, 30.0, 1e7, vp);
 
     // Peak-flux radius — approximate as r where rho_mid is largest
-    // (we don't have a public accessor, so scan with density(r,0,0))
+    // (we don't have a public accessor, so scan with density_cgs(r,0,0))
     double best_r = 6.0, best_rho = 0.0;
     for (int i = 0; i < 50; ++i) {
         const double r = disk.r_isco() + (30.0 - disk.r_isco()) * i / 49.0;
-        const double rho = disk.density(r, 0.0, 0.0);
+        const double rho = disk.density_cgs(r, 0.0, 0.0);
         if (rho > best_rho) { best_rho = rho; best_r = r; }
     }
 
@@ -480,8 +480,8 @@ void test_tau_midplane_near_target() {
     for (int i = 0; i < N - 1; ++i) {
         const double z_a = i * dz;
         const double z_b = (i + 1) * dz;
-        const double rho_a = std::clamp(disk.density(r, z_a, 0.0), 1e-30, 1e-3);
-        const double rho_b = std::clamp(disk.density(r, z_b, 0.0), 1e-30, 1e-3);
+        const double rho_a = std::clamp(disk.density_cgs(r, z_a, 0.0), 1e-18, 1e-6);
+        const double rho_b = std::clamp(disk.density_cgs(r, z_b, 0.0), 1e-18, 1e-6);
         const double T_a = std::clamp(disk.temperature(r, z_a), 3000.0, 1e8);
         const double T_b = std::clamp(disk.temperature(r, z_b), 3000.0, 1e8);
         const double k_a = opa.lookup_kappa_ross(std::clamp(rho_a, 1e-18, 1e-6), T_a)

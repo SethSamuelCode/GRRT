@@ -739,7 +739,18 @@ VolumetricDisk::ColumnSolution VolumetricDisk::solve_column(
         // Adaptive Dormand-Prince RK4(5) integration of dρ/dz from z=0 to z_max.
         // Variable step size handles the photosphere cliff; result is sampled
         // onto the uniform n_z grid for storage in rho_z[].
-        const double dp45_tol = std::max(params_.target_lut_eps, 1e-6);
+        //
+        // dp45_tol is the per-step ODE accuracy. It is INTENTIONALLY decoupled
+        // from params_.target_lut_eps (which controls refinement convergence —
+        // a different question). Coupling the two means a user who relaxes
+        // refinement also degrades integrator accuracy, which can quietly
+        // corrupt rendered density. Keep these independent; if you need to
+        // expose this for tuning, add a separate VolumetricParams field.
+        // 1e-6 is tight enough that adjacent columns resolve the photosphere
+        // cliff to bin-precision (which is what compare_columns wants) and
+        // loose enough that construction stays under a few minutes on default
+        // n_r/n_z. Don't fold this back into target_lut_eps.
+        const double dp45_tol = 1e-6;
         const double h_floor = z_max * 1e-9;
         constexpr int MAX_DP45_STEPS = 4096;  // safety against pathological cliffs
 
