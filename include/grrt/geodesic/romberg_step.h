@@ -32,7 +32,8 @@ struct RombergStep {
 /// VolumetricDiskSampler in geodesic_tracer.cpp wraps the production
 /// VolumetricDisk; tests provide synthetic implementations.
 struct GRRT_EXPORT StepSampler {
-    virtual ~StepSampler() = default;
+    StepSampler();
+    virtual ~StepSampler();
 
     /// Sample the per-channel integrand at a geodesic state.
     /// integrand[ch] = κ_total(ν_emit, ρ, T) · ρ · |p·u_emit|
