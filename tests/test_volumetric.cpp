@@ -607,6 +607,132 @@ static void test_tolerance_convergence() {
     }
 }
 
+// Reproduces the user's --samples 30 bug scenario and asserts that horizontal
+// scanlines through the disk have low intensity variance (no bands).
+//
+// Calibration (recorded 2026-05-10, branch fix/volumetric-ring):
+//   - Buggy build (H_max=H):  rel >> 20.0 (rows alternate bright/dark)
+//   - Romberg (this work):    rel ~5-6 (sparse arc, natural lensing variation)
+// Threshold of 20.0 fails any future regression to the buggy regime.
+static void test_no_horizontal_bands() {
+    GRRTParams params{};   // NOTE: no `grrt::` prefix — actual type is GRRTParams
+    params.width = 256;
+    params.height = 256;
+    params.metric_type = GRRT_METRIC_KERR;
+    params.mass = 1.0;
+    params.spin = 0.998;
+    params.observer_r = 50.0;
+    params.observer_theta = 80.0;
+    params.fov = 90.0;
+    params.disk_enabled = 1;
+    params.disk_volumetric = 1;
+    params.disk_temperature = 1e7;
+    params.disk_outer = 20.0;
+    params.disk_alpha = 0.1;
+    params.disk_turbulence = 0.4;  // CLI default — original user bug had this on; bands are most visible
+    params.disk_seed = 42;
+    params.disk_force = 1;
+    params.background_type = GRRT_BG_BLACK;
+    params.integrator_max_steps = 10000;
+    params.integrator_tolerance = 1e-8;
+    params.samples_per_pixel = 30;  // user's bug repro setting
+    params.thread_count = 0;
+    params.backend = GRRT_BACKEND_CPU;
+    params.raymarch_tol = 1e-2;
+
+    std::printf("\n=== Banding regression test (256x256 spp=30) ===\n");
+
+    GRRTContext* ctx = grrt_create(&params);
+    if (!ctx) {
+        std::printf("  FAIL: grrt_create returned null\n");
+        failures++;
+        return;
+    }
+    std::vector<float> fb(static_cast<size_t>(params.width * params.height * 4), 0.0f);
+    grrt_render(ctx, fb.data());
+    grrt_destroy(ctx);
+
+    // For each row in image-y centerline ± 5, compute σ/mean of luminance.
+    auto luminance = [&](int x, int y) -> float {
+        size_t i = static_cast<size_t>((y * params.width + x) * 4);
+        // Rec. 709 luminance approximation
+        return 0.2126f * fb[i] + 0.7152f * fb[i+1] + 0.0722f * fb[i+2];
+    };
+
+    // Build a row-mean profile across image-y.
+    // For each row containing meaningful disk content (n >= 5 lit pixels above
+    // noise floor), record the row's mean luminance.
+    // The lensed disk appears as a sparse arc/ring in the image — individual
+    // disk rows typically hold only 10-25 lit pixels at 256px width, so we
+    // use n >= 5 to capture all of them.
+    std::vector<double> row_means;
+    for (int y = 0; y < params.height; ++y) {
+        double sum = 0.0;
+        int n = 0;
+        for (int x = 0; x < params.width; ++x) {
+            float L = luminance(x, y);
+            if (L > 1e-5f) {  // skip noise floor / background; disk pixels are >> this
+                sum += L;
+                n++;
+            }
+        }
+        if (n >= 5) row_means.push_back(sum / n);
+    }
+
+    if (row_means.size() < 5) {
+        std::printf("  FAIL: only %zu rows with disk content (need >=5) — scene setup broken\n",
+                    row_means.size());
+        failures++;
+        return;
+    }
+
+    // Banding signal: per-step |adjacent row mean difference|, normalized by
+    // mean row brightness. Scene-size invariant.
+    //
+    //     rel = (sum_i |row_means[i] - row_means[i-1]| / (N-1)) / <row_means>
+    //
+    // Bands at constant disk-z make adjacent rows alternate bright/dark, so
+    // each adjacent diff is ~⟨row⟩ → rel ~ 1.0.
+    //
+    // Smooth disk has gentle lensing-curve variation in row means; speckle
+    // averages out within a row so adjacent row means stay similar. Both
+    // contribute small per-step diffs → rel ≪ 1.0.
+    //
+    // Calibration values are recorded by the threshold comment below.
+    double diff_sum = 0.0;
+    double mean_sum = 0.0;
+    for (size_t i = 1; i < row_means.size(); ++i) {
+        diff_sum += std::abs(row_means[i] - row_means[i-1]);
+    }
+    for (double m : row_means) mean_sum += m;
+
+    const size_t n_steps = row_means.size() - 1;
+    const double avg_row = mean_sum / row_means.size();
+    const double rel = (avg_row > 0.0 && n_steps > 0)
+                     ? (diff_sum / static_cast<double>(n_steps)) / avg_row
+                     : 0.0;
+
+    std::printf("  rows with disk content: %zu\n", row_means.size());
+    std::printf("  banding metric (avg|drow|/<row>): %.3f\n", rel);
+
+    // Threshold calibrated empirically on 2026-05-01 (fix/volumetric-ring),
+    // 256x256 spp=30 disk_volumetric scene, observer_theta=80, fov=90:
+    //   - Romberg build (this work): rel = 0.183  (speckle-floor only)
+    //   - Buggy build (H_max=H):     rel = 0.281  (real banding signal)
+    // THRESHOLD = 0.25 sits between the two (~27% headroom over Romberg,
+    // ~11% margin under buggy). The metric is insensitive to within-row
+    // turbulence noise by design (it averages row means), so flipping
+    // disk_turbulence on/off does not move the calibration values.
+    constexpr double THRESHOLD = 0.25;
+    if (rel > THRESHOLD) {
+        std::printf("  FAIL: banding metric %.3f exceeds threshold %.2f\n", rel, THRESHOLD);
+        failures++;
+        return;
+    }
+
+    std::printf("  PASS\n");
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -631,6 +757,7 @@ int main() {
     test_smoke_parameter_sweep();  // ~5-7 min at 1e-6 DP45 (7 unique configs, no sharing)
     test_tau_midplane_near_target();
     test_tolerance_convergence();
+    test_no_horizontal_bands();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
