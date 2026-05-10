@@ -181,28 +181,38 @@ The `max(z_max(r) + 0.5*H(r))` is computed by sampling the LUT at endpoints
 plus midpoint of the segment's r-range (3 LUT queries). Conservative because
 LUTs are smooth-ish across r at the resolution the bound requires.
 
-### 5.4 Curvature pad — momentum-aware
+### 5.4 Curvature pad — velocity-aware
 
 Both endpoints can be above the disk top while the trajectory dips below.
 The conservative `|z|`-min for the segment uses both a chord-based and a
-momentum-based estimate.
+velocity-based estimate.
 
 Notation: `z_prev`, `z_curr` are the Cartesian z-coordinates derived from
-`GeodesicState` (`r * cos(θ)`); `pz_prev`, `pz_curr` are the corresponding
-covariant z-momenta derived from `(p_r, p_θ)` via the same chain rule that
-the renderer already uses; `dλ_full` is the proper-time duration of the
-full integrator step (`λ_curr − λ_prev`).
+`GeodesicState` (`r * cos(θ)`); `vz_prev`, `vz_curr` are the corresponding
+contravariant z-velocities `dz/dλ`, derived from the contravariant
+position-derivatives `(dr/dλ, dθ/dλ)` returned by
+`RK4::derivatives_kerr(metric, state)` via the same chain rule the
+renderer's existing step clamp uses (`src/geodesic_tracer.cpp:147-152`):
+`dz/dλ = cos(θ) · dr/dλ − r · sin(θ) · dθ/dλ`.
+`dλ_full` is the proper-time duration of the full integrator step
+(`λ_curr − λ_prev`).
+
+`GeodesicState::momentum` stores covariant `p_μ`; using it directly in the
+chain rule would conflate energy with velocity (units mismatch by a factor
+of inverse-metric-component, ~Σ for Kerr). Tier B remains conservative
+either way, but using contravariant velocities gives a tight, physically
+meaningful bound.
 
 ```cpp
 const double dz_chord = std::abs(z_prev - z_curr);
-const double dz_swing = 0.5 * std::abs(pz_prev - pz_curr) * dλ_full;
+const double dz_swing = 0.5 * std::abs(vz_prev - vz_curr) * dλ_full;
 const double pad      = std::max(opts.curvature_pad * dz_chord, dz_swing);
 const double abs_z_min = std::max(0.0,
                                   std::min(std::abs(z_prev), std::abs(z_curr)) - pad);
 ```
 
 The `dz_swing` term protects against trajectories where the chord is small
-but `p_z` is large — i.e., a ray that enters and re-exits the disk top
+but `|dz/dλ|` is large — i.e., a ray that enters and re-exits the disk top
 within one step. For such rays the chord-based pad alone underestimates the
 trajectory's `|z|` excursion.
 

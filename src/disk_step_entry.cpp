@@ -56,6 +56,78 @@ bool endpoint_predicate(const GeodesicState& prev,
     return crossed_midplane || inside_now || near_disk;
 }
 
+/// Tier B segment-bound test. Conservative bounding-region check for whether
+/// the geodesic step `(prev, curr)` could intersect the disk volume envelope.
+/// Returns true if the segment "could" intersect (caller must subdivide);
+/// returns false ONLY when the segment is conclusively outside (rejection
+/// guaranteed safe).
+///
+/// Uses a velocity-aware curvature pad: the conservative |z|-min along the
+/// segment accounts for trajectories where the chord between endpoints is
+/// small but |dz/dλ| is large (e.g. a ray that enters and re-exits the disk
+/// top within one step). dz_swing = 0.5 * |Δ(dz/dλ)| * dλ captures this.
+/// dz/dλ is derived from RK4::derivatives_kerr — see the same chain rule at
+/// src/geodesic_tracer.cpp:147-152 used by the renderer's step clamp.
+///
+/// See docs/superpowers/specs/2026-05-10-disk-step-entry-design.md §5.3-5.4.
+bool segment_could_intersect_disk(const GeodesicState& prev,
+                                  const GeodesicState& curr,
+                                  double dlambda_full,
+                                  const VolumetricDisk& disk,
+                                  const Kerr& metric,
+                                  double curvature_pad)
+{
+    const double r_prev = prev.position[1];
+    const double r_curr = curr.position[1];
+    const double theta_prev = prev.position[2];
+    const double theta_curr = curr.position[2];
+
+    const double z_prev = r_prev * std::cos(theta_prev);
+    const double z_curr = r_curr * std::cos(theta_curr);
+
+    // r-range bound from the chord. Reject fast if disjoint from disk r-cylinder.
+    const double r_min = std::min(r_prev, r_curr);
+    const double r_max = std::max(r_prev, r_curr);
+    const double disk_r_lo = disk.r_horizon();
+    const double disk_r_hi = disk.r_max() + 0.5 * disk.outer_taper_width();
+    if (r_max < disk_r_lo || r_min > disk_r_hi) return false;
+
+    // GeodesicState::momentum stores covariant p_μ. The chain rule
+    //   dz/dlambda = cos(theta) * dr/dlambda - r * sin(theta) * dtheta/dlambda
+    // requires CONTRAVARIANT position-derivatives, which we get from
+    // RK4::derivatives_kerr (same source the renderer's step clamp uses
+    // at src/geodesic_tracer.cpp:147-152). Using p_μ directly would
+    // conflate energy with velocity (units mismatch by ~Σ for Kerr).
+    const auto deriv_prev = RK4::derivatives_kerr(metric, prev);
+    const auto deriv_curr = RK4::derivatives_kerr(metric, curr);
+    const double vz_prev = std::cos(theta_prev) * deriv_prev.position[1]
+                         - r_prev * std::sin(theta_prev) * deriv_prev.position[2];
+    const double vz_curr = std::cos(theta_curr) * deriv_curr.position[1]
+                         - r_curr * std::sin(theta_curr) * deriv_curr.position[2];
+
+    const double dz_chord = std::abs(z_prev - z_curr);
+    const double dz_swing = 0.5 * std::abs(vz_prev - vz_curr) * dlambda_full;
+    const double pad      = std::max(curvature_pad * dz_chord, dz_swing);
+
+    double abs_z_min = std::min(std::abs(z_prev), std::abs(z_curr)) - pad;
+    if (z_prev * z_curr < 0.0) abs_z_min = 0.0;       // crosses midplane
+    if (abs_z_min < 0.0)       abs_z_min = 0.0;
+
+    // Disk envelope: max(z_max(r) + 0.5*H(r)) over the segment's r-range.
+    // Sample at 3 r-points (endpoints + midpoint) — conservative because
+    // LUTs are smooth-ish at the resolution this bound requires.
+    auto envelope_at = [&](double r) {
+        const double r_clamped = std::clamp(r, disk_r_lo, disk_r_hi);
+        return disk.z_max_at(r_clamped) + 0.5 * disk.scale_height(r_clamped);
+    };
+    const double env_lo  = envelope_at(r_min);
+    const double env_hi  = envelope_at(r_max);
+    const double env_mid = envelope_at(0.5 * (r_min + r_max));
+    const double env_max = std::max({env_lo, env_hi, env_mid});
+
+    return abs_z_min <= env_max;
+}
+
 } // anonymous namespace
 
 DiskStepEntryResult check_disk_step_entry(

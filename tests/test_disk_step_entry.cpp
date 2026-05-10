@@ -133,10 +133,63 @@ static void test_endpoint_predicate_equivalence() {
     }
 }
 
+// Probe the Tier B path indirectly via the public API. After Task 5 wires
+// Tier C, "Tier B fires" means subdivide is invoked, observable via
+// substep_invocations > 0. Pre-Task-5 these tests just exercise the path
+// to ensure no crash and that Tier-A-still-applies semantics are intact.
+
+static void test_segment_bound_rejects_far_above() {
+    const VolumetricDisk& disk = shared_disk();
+    Kerr metric = make_metric();
+    RK4 integrator = make_integrator();
+
+    // Both endpoints with |z| ≈ 20 (well above disk top, even at hot inner radii).
+    // No midplane crossing, no inside_now, no near_disk → Tier A returns false.
+    // Pre-Task-5: orchestrator returns {false, {}, 0}. After Task 5: still
+    // false (Tier B rejects), invocations=0.
+    GeodesicState prev = make_state(20.0, 0.05);   // theta near 0 → z ≈ r*cos ≈ 20
+    GeodesicState curr = make_state(20.0, 0.10);
+
+    DiskStepEntryResult r = check_disk_step_entry(
+        prev, curr, /*dlambda_full=*/0.5, disk, metric, integrator);
+
+    EXPECT_TRUE(!r.should_raymarch,
+                "segment far above disk should not raymarch");
+    EXPECT_TRUE(r.substep_invocations == 0,
+                "no subdivision counter increments for far-above segment");
+}
+
+static void test_segment_bound_passes_when_dipping() {
+    const VolumetricDisk& disk = shared_disk();
+    Kerr metric = make_metric();
+    RK4 integrator = make_integrator();
+    constexpr double half_pi = std::numbers::pi / 2.0;
+
+    // Endpoints just above disk top; large p_theta makes dz_swing dominate the
+    // pad, which (after Task 5) will trigger Tier B → Tier C subdivision.
+    // Pre-Task-5: orchestrator only runs Tier A. Tier A's `near_disk` may or
+    // may not fire depending on disk parameters at r=10M; this is a smoke
+    // test that just confirms no crash. Real assertions land in Task 5.
+    GeodesicState prev = make_state(10.0, half_pi - 0.10, /*pr=*/0.0,
+                                    /*ptheta=*/-0.5);
+    GeodesicState curr = make_state(10.0, half_pi - 0.08, /*pr=*/0.0,
+                                    /*ptheta=*/-0.5);
+
+    DiskStepEntryResult r = check_disk_step_entry(
+        prev, curr, /*dlambda_full=*/2.0, disk, metric, integrator);
+
+    // Pre-Task-5 smoke check: no crash, fields are well-formed.
+    (void)r;
+    std::printf("  test_segment_bound_passes_when_dipping smoke: should_raymarch=%d invocations=%d\n",
+                r.should_raymarch ? 1 : 0, r.substep_invocations);
+}
+
 int main() {
     std::printf("Running test_disk_step_entry...\n");
     test_endpoints_inside_disk_should_raymarch();
     test_endpoint_predicate_equivalence();
+    test_segment_bound_rejects_far_above();
+    test_segment_bound_passes_when_dipping();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

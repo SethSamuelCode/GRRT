@@ -412,6 +412,7 @@ bool segment_could_intersect_disk(const GeodesicState& prev,
                                   const GeodesicState& curr,
                                   double dlambda_full,
                                   const VolumetricDisk& disk,
+                                  const Kerr& metric,
                                   double curvature_pad)
 {
     const double r_prev = prev.position[1];
@@ -431,17 +432,22 @@ bool segment_could_intersect_disk(const GeodesicState& prev,
     const double disk_r_hi = disk.r_max() + 0.5 * disk.outer_taper_width();
     if (r_max < disk_r_lo || r_min > disk_r_hi) return false;
 
-    // Compute |z|_min over the segment with momentum-aware pad.
-    // pz_prev / pz_curr are derived from (p_r, p_theta) via:
-    //     dz/dlambda = cos(theta)*p_r - r*sin(theta)*p_theta
-    // (covariant chain rule used by the renderer's existing step clamp).
-    const double pz_prev = std::cos(theta_prev) * prev.momentum[1]
-                         - r_prev * std::sin(theta_prev) * prev.momentum[2];
-    const double pz_curr = std::cos(theta_curr) * curr.momentum[1]
-                         - r_curr * std::sin(theta_curr) * curr.momentum[2];
+    // Compute |z|_min over the segment with velocity-aware pad.
+    // GeodesicState::momentum stores covariant p_μ. The chain rule
+    //     dz/dlambda = cos(theta) * dr/dlambda - r * sin(theta) * dtheta/dlambda
+    // requires CONTRAVARIANT position-derivatives, which we get from
+    // RK4::derivatives_kerr (same source the renderer's step clamp uses
+    // at src/geodesic_tracer.cpp:147-152). Using p_μ directly would
+    // conflate energy with velocity (units mismatch by ~Σ for Kerr).
+    const auto deriv_prev = RK4::derivatives_kerr(metric, prev);
+    const auto deriv_curr = RK4::derivatives_kerr(metric, curr);
+    const double vz_prev = std::cos(theta_prev) * deriv_prev.position[1]
+                         - r_prev * std::sin(theta_prev) * deriv_prev.position[2];
+    const double vz_curr = std::cos(theta_curr) * deriv_curr.position[1]
+                         - r_curr * std::sin(theta_curr) * deriv_curr.position[2];
 
     const double dz_chord = std::abs(z_prev - z_curr);
-    const double dz_swing = 0.5 * std::abs(pz_prev - pz_curr) * dlambda_full;
+    const double dz_swing = 0.5 * std::abs(vz_prev - vz_curr) * dlambda_full;
     const double pad      = std::max(curvature_pad * dz_chord, dz_swing);
 
     double abs_z_min = std::min(std::abs(z_prev), std::abs(z_curr)) - pad;
@@ -613,7 +619,7 @@ SubdivResult subdivide(const GeodesicState& prev,
     }
 
     // Tier B on each half — recurse only on halves that might intersect.
-    if (segment_could_intersect_disk(prev, mid, dl_half, disk, curvature_pad)) {
+    if (segment_could_intersect_disk(prev, mid, dl_half, disk, metric, curvature_pad)) {
         SubdivResult left = subdivide(prev, mid, dl_half, depth_remaining - 1,
                                       disk, metric, integrator, curvature_pad);
         invocations += left.invocations;
@@ -621,7 +627,7 @@ SubdivResult subdivide(const GeodesicState& prev,
             return { true, left.refined, invocations };
         }
     }
-    if (segment_could_intersect_disk(mid, curr, dl_half, disk, curvature_pad)) {
+    if (segment_could_intersect_disk(mid, curr, dl_half, disk, metric, curvature_pad)) {
         SubdivResult right = subdivide(mid, curr, dl_half, depth_remaining - 1,
                                        disk, metric, integrator, curvature_pad);
         invocations += right.invocations;
@@ -707,7 +713,7 @@ DiskStepEntryResult check_disk_step_entry(
 
     // Tier B: cheap segment bound. If false, segment provably outside disk.
     if (!segment_could_intersect_disk(prev_state, new_state, dlambda_full,
-                                      disk, opts.curvature_pad)) {
+                                      disk, metric, opts.curvature_pad)) {
         return { false, {}, 0 };
     }
 
