@@ -6,19 +6,9 @@
 #include "grrt/geodesic/geodesic_tracer.h"
 #include <atomic>
 #include <cmath>
-#include <cstdint>
 #include <vector>
 
 namespace grrt {
-
-// Simple hash for deterministic per-pixel jitter (no external RNG state needed)
-static double pixel_hash(int i, int j, int s, int channel) {
-    uint32_t h = static_cast<uint32_t>(i * 73856093u ^ j * 19349663u ^ s * 83492791u ^ channel * 45678917u);
-    h ^= h >> 16;
-    h *= 0x45d9f3bu;
-    h ^= h >> 16;
-    return (h & 0xFFFFu) / 65536.0;
-}
 
 Renderer::Renderer(const Camera& camera, const GeodesicTracer& tracer,
                    const AccretionDisk* disk, const CelestialSphere* sphere,

@@ -715,14 +715,17 @@ static void test_no_horizontal_bands() {
     std::printf("  rows with disk content: %zu\n", row_means.size());
     std::printf("  banding metric (avg|drow|/<row>): %.3f\n", rel);
 
-    // Threshold calibrated empirically on 2026-05-01 (fix/volumetric-ring),
+    // Threshold calibrated empirically on 2026-05-01/05-02 (fix/volumetric-ring),
     // 256x256 spp=30 disk_volumetric scene, observer_theta=80, fov=90:
-    //   - Romberg build (this work): rel = 0.183  (speckle-floor only)
-    //   - Buggy build (H_max=H):     rel = 0.281  (real banding signal)
-    // THRESHOLD = 0.25 sits between the two (~27% headroom over Romberg,
-    // ~11% margin under buggy). The metric is insensitive to within-row
-    // turbulence noise by design (it averages row means), so flipping
-    // disk_turbulence on/off does not move the calibration values.
+    //   - Romberg + Stratified jitter (pre-Sobol): rel = 0.183 (speckle floor)
+    //   - Romberg + Sobol+Owen (current):          rel = 0.211 (Sobol spreads
+    //                                              disk over more pixels with
+    //                                              lower peak luminance — see
+    //                                              Sobol design doc)
+    //   - Buggy build (H_max=H):                   rel = 0.281 (real banding)
+    // THRESHOLD = 0.25 has 16% headroom over the current Sobol baseline and
+    // clearly fails the buggy regime. The metric is insensitive to within-row
+    // turbulence noise by design (it averages row means).
     constexpr double THRESHOLD = 0.25;
     if (rel > THRESHOLD) {
         std::printf("  FAIL: banding metric %.3f exceeds threshold %.2f\n", rel, THRESHOLD);
