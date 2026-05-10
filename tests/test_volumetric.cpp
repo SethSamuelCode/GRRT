@@ -1,7 +1,10 @@
 #include "grrt/scene/volumetric_disk.h"
+#include "grrt/api.h"
 #include <cstdio>
 #include <cmath>
+#include <cstdlib>
 #include <algorithm>
+#include <vector>
 
 int failures = 0;
 
@@ -527,6 +530,83 @@ void test_tau_midplane_near_target() {
     }
 }
 
+// Render a small image at three tolerances and verify default vs tight converges.
+static void test_tolerance_convergence() {
+    auto render_at_tol = [](double tol) -> std::vector<float> {
+        GRRTParams params{};
+        // Minimal scene matching the user's bug repro
+        params.width = 64;
+        params.height = 64;
+        params.metric_type = GRRT_METRIC_KERR;
+        params.mass = 1.0;
+        params.spin = 0.998;
+        params.observer_r = 50.0;
+        params.observer_theta = 80.0;
+        params.fov = 90.0;
+        params.disk_enabled = 1;
+        params.disk_volumetric = 1;
+        params.disk_temperature = 1e7;
+        params.disk_outer = 20.0;
+        params.disk_alpha = 0.1;
+        params.disk_turbulence = 0.0;  // disable noise for reproducibility
+        params.disk_seed = 42;
+        params.disk_force = 1;
+        params.background_type = GRRT_BG_BLACK;
+        params.integrator_max_steps = 10000;
+        params.integrator_tolerance = 1e-8;
+        params.samples_per_pixel = 4;
+        params.thread_count = 0;
+        params.backend = GRRT_BACKEND_CPU;
+        params.raymarch_tol = tol;
+
+        GRRTContext* ctx = grrt_create(&params);
+        if (!ctx) {
+            std::printf("FAIL: grrt_create returned null at tol=%g\n", tol);
+            std::exit(1);
+        }
+        std::vector<float> fb(static_cast<size_t>(params.width * params.height * 4), 0.0f);
+        grrt_render(ctx, fb.data());
+        grrt_destroy(ctx);
+        return fb;
+    };
+
+    std::printf("\n=== Tolerance-convergence integration test ===\n");
+    auto ref   = render_at_tol(1e-3);
+    auto def   = render_at_tol(1e-2);
+    auto loose = render_at_tol(1e-1);
+
+    auto max_diff = [&](const std::vector<float>& a, const std::vector<float>& b) {
+        float m = 0.0f;
+        for (size_t i = 0; i < a.size(); ++i) {
+            // Compare RGB only, skip alpha (every 4th).
+            if (i % 4 == 3) continue;
+            m = std::max(m, std::abs(a[i] - b[i]));
+        }
+        return m;
+    };
+
+    const float diff_def   = max_diff(def,   ref);
+    const float diff_loose = max_diff(loose, ref);
+
+    std::printf("test_tolerance_convergence: max|def-ref|=%.4e, max|loose-ref|=%.4e\n",
+                diff_def, diff_loose);
+
+    // Default (1e-2) must be within 1% of reference (1e-3) on linear-light.
+    if (diff_def > 0.01f) {
+        std::printf("  FAIL: default tol does not converge to reference (diff=%.4e)\n", diff_def);
+        failures++;
+    } else {
+        std::printf("  PASS: default tol converges to reference\n");
+    }
+    // Loose (1e-1) is allowed up to 5%.
+    if (diff_loose > 0.05f) {
+        std::printf("  FAIL: loose tol diverges too far from reference (diff=%.4e)\n", diff_loose);
+        failures++;
+    } else {
+        std::printf("  PASS: loose tol within 5%% of reference\n");
+    }
+}
+
 int main() {
     test_construction();
     test_density_profile();
@@ -550,6 +630,7 @@ int main() {
     test_refine_n_z_caps_with_warning();
     test_smoke_parameter_sweep();  // ~5-7 min at 1e-6 DP45 (7 unique configs, no sharing)
     test_tau_midplane_near_target();
+    test_tolerance_convergence();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
