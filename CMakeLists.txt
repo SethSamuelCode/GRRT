@@ -32,6 +32,7 @@ add_library(grrt SHARED
     src/fits_writer.cpp
     src/romberg_step.cpp
     src/sobol_sampler.cpp
+    src/disk_step_entry.cpp
 )
 target_include_directories(grrt PUBLIC include/ ${CMAKE_BINARY_DIR}/include PRIVATE third_party/)
 target_compile_definitions(grrt PRIVATE GRRT_BUILDING_DLL)
@@ -150,6 +151,9 @@ target_link_libraries(test-romberg-step PRIVATE grrt)
 
 add_executable(test-sobol-sampler tests/test_sobol_sampler.cpp)
 target_link_libraries(test-sobol-sampler PRIVATE grrt)
+
+add_executable(test-disk-step-entry tests/test_disk_step_entry.cpp)
+target_link_libraries(test-disk-step-entry PRIVATE grrt)
 
 if(GRRT_ENABLE_CUDA)
     add_executable(grrt-cuda-test cuda/tests/test_cuda.cu)

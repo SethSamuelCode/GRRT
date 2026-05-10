@@ -155,8 +155,8 @@ static RK4  make_integrator() { return RK4{}; }
 static GeodesicState make_state(double r, double theta, double pr = 0.0,
                                 double ptheta = 0.0) {
     GeodesicState s;
-    s.position = Vec4(0.0, r, theta, 0.0);          // (t, r, theta, phi)
-    s.momentum = Vec4(-1.0, pr, ptheta, 0.0);       // (-E=-1, p_r, p_theta, p_phi)
+    s.position = Vec4{{0.0, r, theta, 0.0}};        // (t, r, theta, phi)
+    s.momentum = Vec4{{-1.0, pr, ptheta, 0.0}};     // (-E=-1, p_r, p_theta, p_phi)
     return s;
 }
 
@@ -206,7 +206,7 @@ Expected: builds without errors.
 
 Run:
 ```
-./build/Release/test_disk_step_entry.exe
+./build/Release/test-disk-step-entry.exe
 ```
 Expected: FAIL with `endpoints inside disk should trigger raymarch`. The stub returns false.
 
@@ -295,7 +295,7 @@ DiskStepEntryResult check_disk_step_entry(
 Run:
 ```
 cmake --build build --config Release
-./build/Release/test_disk_step_entry.exe
+./build/Release/test-disk-step-entry.exe
 ```
 Expected: `endpoints inside disk should trigger raymarch` PASSES.
 
@@ -377,7 +377,7 @@ Add a call to `test_endpoint_predicate_equivalence()` in `main()`.
 Run:
 ```
 cmake --build build --config Release
-./build/Release/test_disk_step_entry.exe
+./build/Release/test-disk-step-entry.exe
 ```
 Expected: 0 failures.
 
@@ -528,7 +528,7 @@ Add calls to both tests in `main()`. (`test_segment_bound_passes_when_dipping` i
 Run:
 ```
 cmake --build build --config Release
-./build/Release/test_disk_step_entry.exe
+./build/Release/test-disk-step-entry.exe
 ```
 Expected: 0 failures.
 
@@ -656,7 +656,7 @@ Add to `main()`. Don't fail.
 Run:
 ```
 cmake --build build --config Release
-./build/Release/test_disk_step_entry.exe
+./build/Release/test-disk-step-entry.exe
 ```
 Expected: 0 failures (no behavior change yet — orchestrator still only calls Tier A).
 
@@ -811,7 +811,7 @@ Add `test_subdivide_finds_interior_entry`, `test_subdivide_depth_limit_respected
 Run:
 ```
 cmake --build build --config Release
-./build/Release/test_disk_step_entry.exe
+./build/Release/test-disk-step-entry.exe
 ```
 Expected: 0 failures.
 
