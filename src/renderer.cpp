@@ -1,4 +1,5 @@
 #include "grrt/render/renderer.h"
+#include "grrt/render/sobol_sampler.h"
 #include "grrt/scene/accretion_disk.h"
 #include "grrt/scene/celestial_sphere.h"
 #include "grrt/color/spectrum.h"
@@ -29,12 +30,11 @@ Renderer::Renderer(const Camera& camera, const GeodesicTracer& tracer,
 
 void Renderer::render(float* framebuffer, int width, int height,
                       ProgressCallback progress_cb) const {
-    // Stratified jittered sampling: divide pixel into sqrt(spp) x sqrt(spp) grid,
-    // jitter within each cell. For non-square spp, use the closest square.
-    const int grid = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(spp_))));
-    const int actual_spp = grid * grid;
-    const double inv_spp = 1.0 / actual_spp;
-    const double cell = 1.0 / grid;
+    // Owen-scrambled Sobol 2D sub-pixel sampling. spp_ is the exact sample
+    // count (no floor(sqrt(spp))^2 rounding); each sample's offset comes
+    // from sobol_sample_2d which guarantees low discrepancy and per-pixel
+    // decorrelation (no patterns across neighboring pixels).
+    const double inv_spp = 1.0 / spp_;
 
     const int total_pixels = width * height;
     std::atomic<int> pixels_done{0};
@@ -45,24 +45,19 @@ void Renderer::render(float* framebuffer, int width, int height,
         const int i = pixel % width;
 
         Vec3 accum;
-        for (int sy = 0; sy < grid; ++sy) {
-            for (int sx = 0; sx < grid; ++sx) {
-                const int s = sy * grid + sx;
-                // Stratified jitter: sample within sub-cell
-                const double jx = pixel_hash(i, j, s, 0);
-                const double jy = pixel_hash(i, j, s, 1);
-                const double px = i + (sx + jx) * cell;
-                const double py = j + (sy + jy) * cell;
+        for (int s = 0; s < spp_; ++s) {
+            const SobolSample sob = sobol_sample_2d(i, j, s);
+            const double px = i + sob.x;
+            const double py = j + sob.y;
 
-                GeodesicState state = camera_.ray_for_pixel(px, py);
-                TraceResult result = tracer_.trace(state, disk_, spectrum_);
+            GeodesicState state = camera_.ray_for_pixel(px, py);
+            TraceResult result = tracer_.trace(state, disk_, spectrum_);
 
-                Vec3 color = result.accumulated_color;
-                if (result.termination == RayTermination::Escaped && sphere_) {
-                    color += sphere_->sample(result.final_position);
-                }
-                accum = accum + color;
+            Vec3 color = result.accumulated_color;
+            if (result.termination == RayTermination::Escaped && sphere_) {
+                color += sphere_->sample(result.final_position);
             }
+            accum = accum + color;
         }
 
         const int idx = pixel * 4;
@@ -85,10 +80,7 @@ void Renderer::render_spectral(double* spectral_buffer, int width, int height,
                                 const std::vector<double>& frequency_bins,
                                 ProgressCallback progress_cb) const {
     const int num_bins = static_cast<int>(frequency_bins.size());
-    const int grid = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(spp_))));
-    const int actual_spp = grid * grid;
-    const double inv_spp = 1.0 / actual_spp;
-    const double cell = 1.0 / grid;
+    const double inv_spp = 1.0 / spp_;
 
     const int total_pixels = width * height;
     std::atomic<int> pixels_done{0};
@@ -104,20 +96,16 @@ void Renderer::render_spectral(double* spectral_buffer, int width, int height,
 
             std::fill(accum.begin(), accum.end(), 0.0);
 
-            for (int sy = 0; sy < grid; ++sy) {
-                for (int sx = 0; sx < grid; ++sx) {
-                    const int s = sy * grid + sx;
-                    const double jx = pixel_hash(i, j, s, 0);
-                    const double jy = pixel_hash(i, j, s, 1);
-                    const double px = i + (sx + jx) * cell;
-                    const double py = j + (sy + jy) * cell;
+            for (int s = 0; s < spp_; ++s) {
+                const SobolSample sob = sobol_sample_2d(i, j, s);
+                const double px = i + sob.x;
+                const double py = j + sob.y;
 
-                    GeodesicState state = camera_.ray_for_pixel(px, py);
-                    SpectralTraceResult result = tracer_.trace_spectral(state, frequency_bins);
+                GeodesicState state = camera_.ray_for_pixel(px, py);
+                SpectralTraceResult result = tracer_.trace_spectral(state, frequency_bins);
 
-                    for (int k = 0; k < num_bins; ++k) {
-                        accum[k] += result.spectral_intensity[k];
-                    }
+                for (int k = 0; k < num_bins; ++k) {
+                    accum[k] += result.spectral_intensity[k];
                 }
             }
 
@@ -142,10 +130,7 @@ void Renderer::render_spectral_streaming(int width, int height,
                                           RowCallback row_cb,
                                           ProgressCallback progress_cb) const {
     const int num_bins  = static_cast<int>(frequency_bins.size());
-    const int grid      = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(spp_))));
-    const int actual_spp = grid * grid;
-    const double inv_spp = 1.0 / actual_spp;
-    const double cell    = 1.0 / grid;
+    const double inv_spp = 1.0 / spp_;
 
     int rows_done = 0;
 
@@ -159,20 +144,16 @@ void Renderer::render_spectral_streaming(int width, int height,
         for (int i = 0; i < width; ++i) {
             std::fill(accum.begin(), accum.end(), 0.0);
 
-            for (int sy = 0; sy < grid; ++sy) {
-                for (int sx = 0; sx < grid; ++sx) {
-                    const int s = sy * grid + sx;
-                    const double jx = pixel_hash(i, j, s, 0);
-                    const double jy = pixel_hash(i, j, s, 1);
-                    const double px = i + (sx + jx) * cell;
-                    const double py = j + (sy + jy) * cell;
+            for (int s = 0; s < spp_; ++s) {
+                const SobolSample sob = sobol_sample_2d(i, j, s);
+                const double px = i + sob.x;
+                const double py = j + sob.y;
 
-                    GeodesicState state = camera_.ray_for_pixel(px, py);
-                    SpectralTraceResult result = tracer_.trace_spectral(state, frequency_bins);
+                GeodesicState state = camera_.ray_for_pixel(px, py);
+                SpectralTraceResult result = tracer_.trace_spectral(state, frequency_bins);
 
-                    for (int k = 0; k < num_bins; ++k) {
-                        accum[k] += result.spectral_intensity[k];
-                    }
+                for (int k = 0; k < num_bins; ++k) {
+                    accum[k] += result.spectral_intensity[k];
                 }
             }
 
