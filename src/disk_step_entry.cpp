@@ -184,7 +184,12 @@ SubdivResult subdivide(const GeodesicState& prev,
                        double curvature_pad)
 {
     if (depth_remaining == 0) {
-        // Conservative policy: return curr; raymarch handles non-entry cheaply.
+        // Conservative policy (spec §6.1): return should_raymarch=true with
+        // refined=curr, even when Tier A on the unsplit (prev, curr) would
+        // have been false. The deliberate over-approximation biases toward
+        // false-positive raymarches; the raymarch loop's own is_in_volume()
+        // check short-circuits in ~1µs when there's no actual entry, so the
+        // cost is bounded.
         return { true, curr, 1 };
     }
 
@@ -234,16 +239,45 @@ SubdivResult subdivide(const GeodesicState& prev,
 DiskStepEntryResult check_disk_step_entry(
     const GeodesicState& prev_state,
     const GeodesicState& new_state,
-    double /*dlambda_full*/,
+    double dlambda_full,
     const VolumetricDisk& disk,
-    const Kerr& /*metric*/,
-    const RK4& /*integrator*/,
-    const DiskStepEntryOptions& /*opts*/)
+    const Kerr& metric,
+    const RK4& integrator,
+    const DiskStepEntryOptions& opts)
 {
+    // Defensive: degenerate disk → no entry possible (spec §6.3).
+    if (disk.r_max() <= disk.r_horizon()) {
+        return { false, {}, 0 };
+    }
+
+    // Tier A: existing endpoint predicate. Fast path; preserves byte-exact
+    // behavior on the no-bug case (spec §3 goal).
     if (endpoint_predicate(prev_state, new_state, disk)) {
         return { true, new_state, 0 };
     }
-    return { false, {}, 0 };
+
+    // Degenerate dlambda → can't substep. Tier A only (spec §6.3).
+    if (dlambda_full <= 0.0) {
+        return { false, {}, 0 };
+    }
+
+    // Tier B: cheap segment bound. If false, segment provably outside disk.
+    if (!segment_could_intersect_disk(prev_state, new_state, dlambda_full,
+                                      disk, metric, opts.curvature_pad)) {
+        return { false, {}, 0 };
+    }
+
+    // Tier C: subdivide with adaptive depth limit (spec §5.5).
+    const double r_prev = prev_state.position[1];
+    const double r_curr = new_state.position[1];
+    const int depth_limit = compute_adaptive_depth(
+        dlambda_full, r_prev, r_curr, disk,
+        opts.depth_limit_floor, opts.depth_limit_cap);
+
+    SubdivResult sr = subdivide(prev_state, new_state, dlambda_full,
+                                depth_limit, disk, metric, integrator,
+                                opts.curvature_pad);
+    return { sr.should_raymarch, sr.refined, sr.invocations };
 }
 
 } // namespace grrt

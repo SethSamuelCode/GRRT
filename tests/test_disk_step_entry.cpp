@@ -48,9 +48,15 @@ static GeodesicState make_state(double r, double theta, double pr = 0.0,
     return s;
 }
 
-// First failing test: stub returns should_raymarch=false even when
-// endpoints are clearly inside the disk. Will turn green when the
-// endpoint predicate is wired up in Task 2.
+// Disk envelope at radius r — env = z_max(r) + 0.5*H(r). Tests that need
+// to place endpoints relative to the disk surface use this so they stay
+// valid as the disk model evolves.
+static double disk_envelope_at(const VolumetricDisk& disk, double r) {
+    return disk.z_max_at(r) + 0.5 * disk.scale_height(r);
+}
+
+// Sanity: endpoints squarely inside the disk volume must trigger
+// raymarch via Tier A's `inside_now` clause.
 static void test_endpoints_inside_disk_should_raymarch() {
     const VolumetricDisk& disk = shared_disk();
     Kerr metric = make_metric();
@@ -133,10 +139,9 @@ static void test_endpoint_predicate_equivalence() {
     }
 }
 
-// Probe the Tier B path indirectly via the public API. After Task 5 wires
-// Tier C, "Tier B fires" means subdivide is invoked, observable via
-// substep_invocations > 0. Pre-Task-5 these tests just exercise the path
-// to ensure no crash and that Tier-A-still-applies semantics are intact.
+// Tier B path verification through the public API. With the orchestrator
+// fully wired, "Tier B fires" means subdivide is invoked — observable via
+// substep_invocations > 0 in the rejecting test below.
 
 static void test_segment_bound_rejects_far_above() {
     const VolumetricDisk& disk = shared_disk();
@@ -159,37 +164,153 @@ static void test_segment_bound_rejects_far_above() {
                 "no subdivision counter increments for far-above segment");
 }
 
+// Orchestrator's degenerate-dlambda guard: when the integrator step is
+// zero or negative (e.g., main-loop's first iteration where prev == new),
+// substepping is meaningless. Tier A still gets a shot, but Tier B/C are
+// skipped per spec §6.3. Endpoints above the disk envelope so Tier A is
+// false → orchestrator should return {false, {}, 0}.
+static void test_degenerate_dlambda_returns_no_raymarch() {
+    const VolumetricDisk& disk = shared_disk();
+    Kerr metric = make_metric();
+    RK4 integrator = make_integrator();
+    constexpr double half_pi = std::numbers::pi / 2.0;
+
+    constexpr double r_test = 10.0;
+    const double env = disk_envelope_at(disk, r_test);
+    const double theta = half_pi - std::asin(2.0 * env / r_test);
+
+    GeodesicState prev = make_state(r_test, theta);
+    GeodesicState curr = make_state(r_test, theta);   // identical state
+
+    DiskStepEntryResult r = check_disk_step_entry(
+        prev, curr, /*dlambda_full=*/0.0, disk, metric, integrator);
+
+    EXPECT_TRUE(!r.should_raymarch,
+                "dlambda_full=0 with above-disk endpoints must not raymarch");
+    EXPECT_TRUE(r.substep_invocations == 0,
+                "no Tier C invocations for zero-dlambda case");
+}
+
 static void test_segment_bound_passes_when_dipping() {
     const VolumetricDisk& disk = shared_disk();
     Kerr metric = make_metric();
     RK4 integrator = make_integrator();
     constexpr double half_pi = std::numbers::pi / 2.0;
 
-    // Endpoints just above disk top; large p_theta makes dz_swing dominate the
-    // pad, which (after Task 5) will trigger Tier B → Tier C subdivision.
-    // Pre-Task-5: orchestrator only runs Tier A. Tier A's `near_disk` may or
-    // may not fire depending on disk parameters at r=10M; this is a smoke
-    // test that just confirms no crash. Real assertions land in Task 5.
-    GeodesicState prev = make_state(10.0, half_pi - 0.10, /*pr=*/0.0,
-                                    /*ptheta=*/-0.5);
-    GeodesicState curr = make_state(10.0, half_pi - 0.08, /*pr=*/0.0,
-                                    /*ptheta=*/-0.5);
+    // Construct endpoints relative to the actual disk envelope at r=10M.
+    // Both above near_disk threshold (z_max + H), so Tier A is FALSE.
+    // Large opposing p_theta values produce a large dz_swing, forcing
+    // Tier B to pass via the velocity term (not the chord term). Once
+    // Tier B passes, Tier C runs; either Tier A fires on a substep or
+    // depth exhaustion's conservative policy returns {true, curr, 1}.
+    // Either way, should_raymarch=true.
+    constexpr double r_test = 10.0;
+    const double env = disk_envelope_at(disk, r_test);
+    const double theta_prev = half_pi - std::asin(2.0 * env / r_test);
+    const double theta_curr = half_pi - std::asin(1.5 * env / r_test);
+
+    GeodesicState prev = make_state(r_test, theta_prev,
+                                    /*pr=*/0.0, /*ptheta=*/+10.0);
+    GeodesicState curr = make_state(r_test, theta_curr,
+                                    /*pr=*/0.0, /*ptheta=*/-10.0);
 
     DiskStepEntryResult r = check_disk_step_entry(
-        prev, curr, /*dlambda_full=*/2.0, disk, metric, integrator);
+        prev, curr, /*dlambda_full=*/0.5, disk, metric, integrator);
 
-    // Pre-Task-5 smoke check: no crash, fields are well-formed.
-    (void)r;
-    std::printf("  test_segment_bound_passes_when_dipping smoke: should_raymarch=%d invocations=%d\n",
+    EXPECT_TRUE(r.should_raymarch,
+                "dipping segment with large dz_swing should raymarch");
+    std::printf("  dipping case: should_raymarch=%d invocations=%d (env=%.4g)\n",
+                r.should_raymarch ? 1 : 0, r.substep_invocations, env);
+}
+
+// Constructed wedge case: endpoints just above the disk surface with large
+// p_theta steering the trajectory into the disk volume mid-step. Verify
+// that the orchestrator returns should_raymarch=true. Either Tier A fires
+// (near_disk margin), or Tier B+C find the interior entry. If Tier C ran,
+// substep_invocations > 0.
+static void test_subdivide_finds_interior_entry() {
+    const VolumetricDisk& disk = shared_disk();
+    Kerr metric = make_metric();
+    RK4 integrator = make_integrator();
+    constexpr double half_pi = std::numbers::pi / 2.0;
+
+    // Endpoints relative to actual disk envelope at r=8M. Both above
+    // near_disk threshold (Tier A FALSE). With opts.curvature_pad cranked
+    // to 2.0, the chord-based pad reaches below env even with zero
+    // p_theta — Tier B passes via the chord term (distinct from the
+    // dz_swing exercise in test_segment_bound_passes_when_dipping).
+    constexpr double r_test = 8.0;
+    const double env = disk_envelope_at(disk, r_test);
+    const double theta_prev = half_pi - std::asin(2.0 * env / r_test);
+    const double theta_curr = half_pi - std::asin(1.5 * env / r_test);
+
+    GeodesicState prev = make_state(r_test, theta_prev);
+    GeodesicState curr = make_state(r_test, theta_curr);
+
+    DiskStepEntryOptions opts;
+    opts.curvature_pad = 2.0;     // pad = 2.0 * 0.5*env = env, > 0.5*env required
+
+    DiskStepEntryResult r = check_disk_step_entry(
+        prev, curr, /*dlambda_full=*/0.5, disk, metric, integrator, opts);
+
+    EXPECT_TRUE(r.should_raymarch,
+                "interior dip segment should produce should_raymarch=true");
+    std::printf("  interior-entry case: should_raymarch=%d invocations=%d (env=%.4g)\n",
+                r.should_raymarch ? 1 : 0, r.substep_invocations, env);
+}
+
+// Pathological depth exhaustion: depth_limit_cap=1 forces subdivide() to
+// terminate almost immediately. With Tier B passing repeatedly (segment
+// near disk surface), conservative policy (spec §6.1) returns
+// {should_raymarch=true, refined=curr, invocations=1} — depth_remaining
+// hits 0 on the first subdivide call.
+static void test_subdivide_depth_limit_respected() {
+    const VolumetricDisk& disk = shared_disk();
+    Kerr metric = make_metric();
+    RK4 integrator = make_integrator();
+    constexpr double half_pi = std::numbers::pi / 2.0;
+
+    // Same disk-relative geometry as test_subdivide_finds_interior_entry
+    // (forces Tier B to pass), then squeeze depth_limit_cap=1 so Tier C's
+    // recursion exhausts on the first level and conservative policy
+    // (spec §6.1) takes over.
+    constexpr double r_test = 8.0;
+    const double env = disk_envelope_at(disk, r_test);
+    const double theta_prev = half_pi - std::asin(2.0 * env / r_test);
+    const double theta_curr = half_pi - std::asin(1.5 * env / r_test);
+
+    GeodesicState prev = make_state(r_test, theta_prev);
+    GeodesicState curr = make_state(r_test, theta_curr);
+
+    DiskStepEntryOptions opts;
+    opts.curvature_pad     = 2.0;   // force Tier B to pass
+    opts.depth_limit_floor = 1;
+    opts.depth_limit_cap   = 1;
+
+    DiskStepEntryResult r = check_disk_step_entry(
+        prev, curr, /*dlambda_full=*/0.5, disk, metric, integrator, opts);
+
+    // With Tier B forced to pass and depth_limit=1, Tier C runs once.
+    // Either Tier A fires on a substep half (rare here) or depth
+    // exhausts → conservative policy → {true, curr, ≤4}.
+    EXPECT_TRUE(r.should_raymarch,
+                "Tier C with cap=1 must return should_raymarch=true");
+    EXPECT_TRUE(r.substep_invocations >= 1,
+                "Tier C should have run (substep_invocations >= 1)");
+    EXPECT_TRUE(r.substep_invocations <= 4,
+                "depth_limit=1 should produce ≤4 subdivide invocations");
+    std::printf("  depth_limit=1 case: should_raymarch=%d invocations=%d\n",
                 r.should_raymarch ? 1 : 0, r.substep_invocations);
 }
 
 // Note on synthetic states: make_state above does NOT satisfy the null
 // geodesic Hamiltonian constraint g^{μν} p_μ p_ν = 0. That is fine for
 // Tier A (purely positional) and Tier B (positional + chain-rule velocity)
-// tests. Tier C substeps integrate these states, producing non-physical
-// trajectories — Task 5 introduces physically valid states for end-to-end
-// Tier C assertions. Pre-Task-5 Tier C tests are placeholders only.
+// tests. Tier C substeps integrate these states, producing trajectories
+// that are mathematically well-defined but not physical null geodesics.
+// The orchestrator's behavioral assertions (should_raymarch=true) hold
+// regardless of substep physicality because the conservative-policy
+// fallback (spec §6.1) returns true on depth exhaustion.
 
 static void test_adaptive_depth_math() {
     // Mirror compute_adaptive_depth's math directly (it lives in anonymous
@@ -223,7 +344,10 @@ int main() {
     test_endpoints_inside_disk_should_raymarch();
     test_endpoint_predicate_equivalence();
     test_segment_bound_rejects_far_above();
+    test_degenerate_dlambda_returns_no_raymarch();
     test_segment_bound_passes_when_dipping();
+    test_subdivide_finds_interior_entry();
+    test_subdivide_depth_limit_respected();
     test_adaptive_depth_math();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
