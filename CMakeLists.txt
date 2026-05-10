@@ -147,6 +147,9 @@ target_link_libraries(test-spectral PRIVATE grrt)
 add_executable(test-romberg-step tests/test_romberg_step.cpp)
 target_link_libraries(test-romberg-step PRIVATE grrt)
 
+add_executable(test-sobol-sampler tests/test_sobol_sampler.cpp)
+target_link_libraries(test-sobol-sampler PRIVATE grrt)
+
 if(GRRT_ENABLE_CUDA)
     add_executable(grrt-cuda-test cuda/tests/test_cuda.cu)
     target_include_directories(grrt-cuda-test PRIVATE include/ cuda/ ${CMAKE_BINARY_DIR}/include)
