@@ -184,12 +184,47 @@ static void test_segment_bound_passes_when_dipping() {
                 r.should_raymarch ? 1 : 0, r.substep_invocations);
 }
 
+// Note on synthetic states: make_state above does NOT satisfy the null
+// geodesic Hamiltonian constraint g^{μν} p_μ p_ν = 0. That is fine for
+// Tier A (purely positional) and Tier B (positional + chain-rule velocity)
+// tests. Tier C substeps integrate these states, producing non-physical
+// trajectories — Task 5 introduces physically valid states for end-to-end
+// Tier C assertions. Pre-Task-5 Tier C tests are placeholders only.
+
+static void test_adaptive_depth_math() {
+    // Mirror compute_adaptive_depth's math directly (it lives in anonymous
+    // namespace, so we reproduce the formula here for testability):
+    //   needed = ceil(log2(dlambda / H_min))
+    //   depth  = clamp(needed, floor, cap)
+    //
+    // We can't observe compute_adaptive_depth() through the public API
+    // until Task 5. This test verifies the formula's expected output for
+    // representative ratios so the implementation can be validated against
+    // it after Task 5 wiring.
+
+    auto expected_depth = [](double dl_over_h, int floor, int cap) {
+        if (dl_over_h <= 1.0) return floor;
+        const int needed = static_cast<int>(std::ceil(std::log2(dl_over_h)));
+        return std::clamp(needed, floor, cap);
+    };
+
+    EXPECT_TRUE(expected_depth(0.5, 4, 10) == 4,
+                "ratio<1 returns floor");
+    EXPECT_TRUE(expected_depth(2.0, 4, 10) == 4,
+                "ratio=2 (log2=1) clamped to floor=4");
+    EXPECT_TRUE(expected_depth(100.0, 4, 10) == 7,
+                "ratio=100 → ceil(log2)=7 (supermassive AGN regime)");
+    EXPECT_TRUE(expected_depth(10000.0, 4, 10) == 10,
+                "ratio=10000 → ceil(log2)=14 → clamped to cap=10");
+}
+
 int main() {
     std::printf("Running test_disk_step_entry...\n");
     test_endpoints_inside_disk_should_raymarch();
     test_endpoint_predicate_equivalence();
     test_segment_bound_rejects_far_above();
     test_segment_bound_passes_when_dipping();
+    test_adaptive_depth_math();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

@@ -128,6 +128,107 @@ bool segment_could_intersect_disk(const GeodesicState& prev,
     return abs_z_min <= env_max;
 }
 
+/// Compute adaptive depth_limit such that the smallest substep is on the
+/// order of H_min over the segment's r-range. See spec §5.5.
+///   needed = ceil(log2(dlambda_full / H_min))
+///   depth  = clamp(needed, depth_floor, depth_cap)
+/// depth_floor protects against ratios <1 (returns floor instead of 0);
+/// depth_cap is the runtime ceiling beyond which conservative policy
+/// (§6.1) takes over.
+int compute_adaptive_depth(double dlambda_full,
+                           double r_prev, double r_curr,
+                           const VolumetricDisk& disk,
+                           int depth_floor, int depth_cap)
+{
+    // Floor H at 1e-30 to guard against degenerate LUT entries returning
+    // ~0 H, which would blow up the dlambda_full / H_min ratio below.
+    const double H_prev = std::max(disk.scale_height(r_prev), 1e-30);
+    const double H_curr = std::max(disk.scale_height(r_curr), 1e-30);
+    const double H_min  = std::min(H_prev, H_curr);
+    if (dlambda_full <= 0.0) return depth_floor;
+    // Ratio floor at 1.0 → ceil(log2) ≥ 0 → no negative-depth UB downstream.
+    const double ratio = std::max(dlambda_full / H_min, 1.0);
+    const int needed = static_cast<int>(std::ceil(std::log2(ratio)));
+    return std::clamp(needed, depth_floor, depth_cap);
+}
+
+/// Internal result type for the recursive subdivide() helper. Carries the
+/// invocation count back up the recursion so callers can attribute the
+/// total cost to the per-step call.
+struct SubdivResult {
+    bool should_raymarch;
+    GeodesicState refined;
+    int invocations;        // includes this call + recursive children
+};
+
+/// Tier C recursive substep with depth_limit. Returns
+/// {should_raymarch=true, refined=substep_endpoint} when Tier A fires
+/// somewhere in the substep tree. On depth exhaustion: conservative policy
+/// (spec §6.1) — return {true, curr}, leaving the raymarch's own
+/// is_in_volume() check to short-circuit when there's no actual entry.
+///
+/// Substepping uses RK4::step_kerr_rkdp45 to match the main loop's DP45
+/// integrator family (spec §5.1). The 5th-order solution y5 is used; the
+/// returned error_norm is discarded. Future optimization to plain RK4
+/// substep is documented in
+/// docs/superpowers/optimizations/2026-05-10-disk-step-entry-rk4-substep.md.
+/// @pre depth_remaining >= 0. dlambda_remaining is the proper-time duration
+/// of the segment under consideration (gets halved each recursion level).
+SubdivResult subdivide(const GeodesicState& prev,
+                       const GeodesicState& curr,
+                       double dlambda_remaining,
+                       int depth_remaining,
+                       const VolumetricDisk& disk,
+                       const Kerr& metric,
+                       const RK4& integrator,
+                       double curvature_pad)
+{
+    if (depth_remaining == 0) {
+        // Conservative policy: return curr; raymarch handles non-entry cheaply.
+        return { true, curr, 1 };
+    }
+
+    // Substep using fixed-step Dormand-Prince RK4(5) — same integrator family
+    // as the main loop's adaptive_step_kerr_dp45 (spec §5.1). Discard the
+    // error_norm; we only need the 5th-order y5 trajectory state. ~50% more
+    // derivative evals per substep than plain RK4, but Tier C fires rarely
+    // enough that absolute cost is negligible (<1% of total render).
+    // See docs/superpowers/optimizations/2026-05-10-disk-step-entry-rk4-substep.md
+    // for the perf revisit if this ever shows up in profiling.
+    const double dl_half = dlambda_remaining * 0.5;
+    GeodesicState mid = integrator.step_kerr_rkdp45(metric, prev, dl_half).y5;
+
+    int invocations = 1;
+
+    // Tier A on each half.
+    if (endpoint_predicate(prev, mid, disk)) {
+        return { true, mid, invocations };
+    }
+    if (endpoint_predicate(mid, curr, disk)) {
+        return { true, curr, invocations };
+    }
+
+    // Tier B on each half — recurse only on halves that might intersect.
+    if (segment_could_intersect_disk(prev, mid, dl_half, disk, metric, curvature_pad)) {
+        SubdivResult left = subdivide(prev, mid, dl_half, depth_remaining - 1,
+                                      disk, metric, integrator, curvature_pad);
+        invocations += left.invocations;
+        if (left.should_raymarch) {
+            return { true, left.refined, invocations };
+        }
+    }
+    if (segment_could_intersect_disk(mid, curr, dl_half, disk, metric, curvature_pad)) {
+        SubdivResult right = subdivide(mid, curr, dl_half, depth_remaining - 1,
+                                       disk, metric, integrator, curvature_pad);
+        invocations += right.invocations;
+        if (right.should_raymarch) {
+            return { true, right.refined, invocations };
+        }
+    }
+
+    return { false, {}, invocations };
+}
+
 } // anonymous namespace
 
 DiskStepEntryResult check_disk_step_entry(

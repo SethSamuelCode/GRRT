@@ -563,7 +563,7 @@ In `src/disk_step_entry.cpp`, after `segment_could_intersect_disk`:
 int compute_adaptive_depth(double dlambda_full,
                            double r_prev, double r_curr,
                            const VolumetricDisk& disk,
-                           int floor, int cap)
+                           int depth_floor, int depth_cap)
 {
     const double H_prev = std::max(disk.scale_height(r_prev), 1e-30);
     const double H_curr = std::max(disk.scale_height(r_curr), 1e-30);
