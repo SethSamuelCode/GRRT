@@ -22,7 +22,7 @@ struct SobolSample {
 /// @param pixel_y integer pixel y-coordinate (row index)
 /// @param sample_index 0-based index of the sample within the pixel (0 <= s < spp)
 /// @return sub-pixel offset in [0, 1)^2
-GRRT_EXPORT SobolSample sobol_sample_2d(int pixel_x, int pixel_y, int sample_index);
+[[nodiscard]] GRRT_EXPORT SobolSample sobol_sample_2d(int pixel_x, int pixel_y, int sample_index);
 
 } // namespace grrt
 
