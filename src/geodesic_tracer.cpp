@@ -1,6 +1,7 @@
 #include "grrt/geodesic/geodesic_tracer.h"
 #include "grrt/geodesic/rk4.h"
 #include "grrt/geodesic/romberg_step.h"
+#include "grrt/geodesic/disk_step_entry.h"
 #include "grrt/spacetime/kerr.h"
 #include "grrt/scene/accretion_disk.h"
 #include "grrt/scene/volumetric_disk.h"
@@ -162,46 +163,32 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
 
         // Adaptive Dormand-Prince 4(5) — 7 derivative evaluations
         // instead of 12 for step-doubling RK4, with PI step control.
+        // Capture pre-integrator dλ as a conservative upper bound for the
+        // disk-entry helper's Tier B/C segment-bound and substep refinement.
+        const double dlambda_used = dlambda;
         {
             auto result = integrator_.adaptive_step_kerr_dp45(metric_, state, dlambda, tolerance_);
             state = result.state;
             dlambda = result.next_dlambda;
         }
 
-        // Volumetric disk entry detection.  Three cases to catch:
-        // (a) θ crossed π/2 (midplane crossing — most common)
-        // (b) Endpoint landed inside the volume
-        // (c) Ray passed through the volume without crossing the midplane
-        //     (tangential pass: both endpoints outside, but the minimum |z|
-        //     along the step was inside ±3H).  We detect this conservatively
-        //     by checking if either endpoint's |z| is within 3H of the
-        //     midplane at the endpoint's r.
+        // Volumetric disk entry detection — delegated to check_disk_step_entry,
+        // which runs Tier A (endpoint predicate, byte-equivalent to the original
+        // inline test), then Tier B (segment-bound) and Tier C (recursive
+        // substep) when needed to catch tangential passes and through-bracket
+        // entries that the endpoint test alone would miss.
         if (vol_disk_) {
             // Skip all disk interaction if fully opaque — nothing more can contribute.
             const bool opaque = (running_T[0] < 1e-6 && running_T[1] < 1e-6 && running_T[2] < 1e-6);
             if (!opaque) {
-                const double theta_prev = prev.position[2];
-                const double theta_new = state.position[2];
-                const double d_prev = theta_prev - half_pi;
-                const double d_new = theta_new - half_pi;
-                const double r_new = state.position[1];
-                const double r_prev = prev.position[1];
+                const DiskStepEntryResult entry_check = check_disk_step_entry(
+                    prev, state, dlambda_used, *vol_disk_, metric_, integrator_);
 
-                const double z_new = r_new * std::cos(theta_new);
-                const double z_prev = r_prev * std::cos(theta_prev);
-                const bool crossed_midplane = (d_prev * d_new < 0.0)
-                                           && std::abs(d_prev - d_new) > 1e-12;
-                const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
-                const double zm_new = vol_disk_->z_max_at(r_new);
-                const double H_new = vol_disk_->scale_height(r_new);
-                const double H_prev = vol_disk_->scale_height(r_prev);
-                const bool near_disk = (std::abs(z_new) < zm_new + 1.0 * H_new
-                                     || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + 1.0 * H_prev)
-                                    && r_new >= vol_disk_->r_horizon()
-                                    && r_new <= vol_disk_->r_max() + 0.5 * vol_disk_->outer_taper_width();
-                const bool should_raymarch = crossed_midplane || inside_now || near_disk;
-
-                if (should_raymarch) {
+                if (entry_check.should_raymarch) {
+                    const double r_prev = prev.position[1];
+                    // Use refined endpoint so the r-range guard tightens after
+                    // Tier C subdivision surfaces an interior detection.
+                    const double r_new  = entry_check.refined_endpoint.position[1];
                     const double r_lo = std::min(r_prev, r_new);
                     const double r_hi = std::max(r_prev, r_new);
                     if (r_hi >= vol_disk_->r_horizon() && r_lo <= vol_disk_->r_max()) {
