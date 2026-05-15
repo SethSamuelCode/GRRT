@@ -407,6 +407,9 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
             }
         }
 
+        // Capture pre-integrator dλ as a conservative upper bound for the
+        // disk-entry helper's Tier B/C segment-bound and substep refinement.
+        const double dlambda_used = dlambda;
         auto result = integrator_.adaptive_step_kerr_dp45(metric_, state, dlambda, tolerance_);
         state = result.state;
         dlambda = result.next_dlambda;
@@ -414,30 +417,25 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
         const double theta_new = state.position[2];
         const double r_new = state.position[1];
         const double z_new = r_new * std::cos(theta_new);
-        const double z_prev2 = prev.position[1] * std::cos(prev.position[2]);
 
         const char* event = "  ";
         bool should_raymarch = false;
+        DiskStepEntryResult entry_check{};
+        // Defensive default; only the should_raymarch==true branch reads this,
+        // and the helper overwrites both fields atomically before that branch
+        // becomes reachable.
+        entry_check.refined_endpoint = state;
 
+        // Volumetric disk entry detection — delegated to check_disk_step_entry
+        // (Tier A endpoint test + Tier B segment-bound + Tier C recursive substep).
         if (vol_disk_) {
             // Skip all disk interaction if fully opaque — nothing more can contribute.
             const bool opaque = (running_T[0] < 1e-6 && running_T[1] < 1e-6 && running_T[2] < 1e-6);
             if (!opaque) {
-                const double d_prev = prev.position[2] - half_pi;
-                const double d_new = theta_new - half_pi;
-                const bool crossed = (d_prev * d_new < 0.0) && std::abs(d_prev - d_new) > 1e-12;
-                const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
-                const double zm_new = vol_disk_->z_max_at(r_new);
-                const double H_new = vol_disk_->scale_height(r_new);
-                const double H_prev2 = vol_disk_->scale_height(prev.position[1]);
-                const bool near = (std::abs(z_new) < zm_new + 1.0 * H_new
-                                || std::abs(z_prev2) < vol_disk_->z_max_at(prev.position[1]) + 1.0 * H_prev2)
-                               && r_new >= vol_disk_->r_horizon() && r_new <= vol_disk_->r_max() + 0.5 * vol_disk_->outer_taper_width();
-                should_raymarch = crossed || inside_now || near;
-
-                if (crossed)     event = "CROSS";
-                else if (inside_now) event = "INSIDE";
-                else if (near)   event = "NEAR";
+                entry_check = check_disk_step_entry(
+                    prev, state, dlambda_used, *vol_disk_, metric_, integrator_);
+                should_raymarch = entry_check.should_raymarch;
+                if (should_raymarch) event = "ENTRY";
             }
 
             const double H = vol_disk_->scale_height(r_new);
@@ -451,8 +449,11 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
         }
 
         if (should_raymarch && vol_disk_) {
-            const double r_lo = std::min(prev.position[1], r_new);
-            const double r_hi = std::max(prev.position[1], r_new);
+            // Use refined endpoint so the r-range guard tightens after
+            // Tier C subdivision surfaces an interior detection.
+            const double r_new_refined = entry_check.refined_endpoint.position[1];
+            const double r_lo = std::min(prev.position[1], r_new_refined);
+            const double r_hi = std::max(prev.position[1], r_new_refined);
             if (r_hi >= vol_disk_->r_horizon() && r_lo <= vol_disk_->r_max()) {
                 GeodesicState entry = prev;
                 const double re = entry.position[1];
@@ -500,7 +501,6 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
                                                    const std::vector<double>& frequency_bins) const {
     const int num_bins = static_cast<int>(frequency_bins.size());
     const double r_horizon = metric_.horizon_radius();
-    const double half_pi = std::numbers::pi / 2.0;
 
     std::vector<double> spectral_intensity(num_bins, 0.0);
 
@@ -552,36 +552,25 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
             }
         }
 
+        // Capture pre-integrator dλ as a conservative upper bound for the
+        // disk-entry helper's Tier B/C segment-bound and substep refinement.
+        const double dlambda_used = dlambda;
         {
             auto result = integrator_.adaptive_step_kerr_dp45(metric_, state, dlambda, tolerance_);
             state = result.state;
             dlambda = result.next_dlambda;
         }
 
-        // Volumetric disk entry detection — identical to trace()
+        // Volumetric disk entry detection — delegated to check_disk_step_entry
+        // (Tier A endpoint test + Tier B segment-bound + Tier C recursive substep).
         {
-            const double theta_prev = prev.position[2];
-            const double theta_new = state.position[2];
-            const double d_prev = theta_prev - half_pi;
-            const double d_new = theta_new - half_pi;
-            const double r_new = state.position[1];
-            const double r_prev = prev.position[1];
-
-            const double z_new = r_new * std::cos(theta_new);
-            const double z_prev = r_prev * std::cos(theta_prev);
-            const bool crossed_midplane = (d_prev * d_new < 0.0)
-                                       && std::abs(d_prev - d_new) > 1e-12;
-            const bool inside_now = vol_disk_->inside_volume(r_new, z_new);
-            const double zm_new = vol_disk_->z_max_at(r_new);
-            const double H_new = vol_disk_->scale_height(r_new);
-            const double H_prev_s = vol_disk_->scale_height(r_prev);
-            const bool near_disk = (std::abs(z_new) < zm_new + 1.0 * H_new
-                                 || std::abs(z_prev) < vol_disk_->z_max_at(r_prev) + 1.0 * H_prev_s)
-                                && r_new >= vol_disk_->r_horizon()
-                                && r_new <= vol_disk_->r_max() + 0.5 * vol_disk_->outer_taper_width();
-            const bool should_raymarch = crossed_midplane || inside_now || near_disk;
-
-            if (should_raymarch) {
+            const DiskStepEntryResult entry_check = check_disk_step_entry(
+                prev, state, dlambda_used, *vol_disk_, metric_, integrator_);
+            if (entry_check.should_raymarch) {
+                const double r_prev = prev.position[1];
+                // Use refined endpoint so the r-range guard tightens after
+                // Tier C subdivision surfaces an interior detection.
+                const double r_new  = entry_check.refined_endpoint.position[1];
                 const double r_lo = std::min(r_prev, r_new);
                 const double r_hi = std::max(r_prev, r_new);
                 if (r_hi >= vol_disk_->r_horizon() && r_lo <= vol_disk_->r_max()) {
