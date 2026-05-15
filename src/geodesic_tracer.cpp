@@ -183,6 +183,8 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
             if (!opaque) {
                 const DiskStepEntryResult entry_check = check_disk_step_entry(
                     prev, state, dlambda_used, *vol_disk_, metric_, integrator_);
+                substep_invocation_count_.fetch_add(entry_check.substep_invocations,
+                                                    std::memory_order_relaxed);
 
                 if (entry_check.should_raymarch) {
                     const double r_prev = prev.position[1];
@@ -197,8 +199,16 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
                         if (re >= vol_disk_->r_horizon() * 0.9
                             && re <= vol_disk_->r_max() * 1.5) {
                             raymarch_volumetric(entry, color, running_J, running_T);
-                            state = entry;
-                            continue;
+                            // Only revert state to entry if raymarch advanced it. Otherwise the
+                            // raymarch early-exited (e.g., is_in_volume(prev) was false because
+                            // Tier B/C over-detected on a conservative bound) — keep the
+                            // integrator's post-step state to avoid an infinite revert loop.
+                            if (entry.position[1] != prev.position[1]
+                                || entry.position[2] != prev.position[2]) {
+                                state = entry;
+                                continue;
+                            }
+                            // else: fall through; state retains the integrator's post-step value.
                         }
                     }
                 }
@@ -434,6 +444,8 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
             if (!opaque) {
                 entry_check = check_disk_step_entry(
                     prev, state, dlambda_used, *vol_disk_, metric_, integrator_);
+                substep_invocation_count_.fetch_add(entry_check.substep_invocations,
+                                                    std::memory_order_relaxed);
                 should_raymarch = entry_check.should_raymarch;
                 if (should_raymarch) event = "ENTRY";
             }
@@ -467,8 +479,16 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
                         cur_color[ch] = running_J[ch] * nu_rgb[ch] * nu_rgb[ch] * nu_rgb[ch];
                     std::printf("  -> RAYMARCH exit  color=(%.4e %.4e %.4e)\n",
                         cur_color[0], cur_color[1], cur_color[2]);
-                    state = entry;
-                    continue;
+                    // Only revert state to entry if raymarch advanced it. Otherwise the
+                    // raymarch early-exited (e.g., is_in_volume(prev) was false because
+                    // Tier B/C over-detected on a conservative bound) — keep the
+                    // integrator's post-step state to avoid an infinite revert loop.
+                    if (entry.position[1] != prev.position[1]
+                        || entry.position[2] != prev.position[2]) {
+                        state = entry;
+                        continue;
+                    }
+                    // else: fall through; state retains the integrator's post-step value.
                 }
             }
         }
@@ -566,6 +586,8 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
         {
             const DiskStepEntryResult entry_check = check_disk_step_entry(
                 prev, state, dlambda_used, *vol_disk_, metric_, integrator_);
+            substep_invocation_count_.fetch_add(entry_check.substep_invocations,
+                                                std::memory_order_relaxed);
             if (entry_check.should_raymarch) {
                 const double r_prev = prev.position[1];
                 // Use refined endpoint so the r-range guard tightens after
@@ -579,8 +601,16 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
                     if (re >= vol_disk_->r_horizon() * 0.9
                         && re <= vol_disk_->r_max() * 1.5) {
                         raymarch_volumetric_spectral(entry, frequency_bins, J, T_trans, tau_acc);
-                        state = entry;
-                        continue;
+                        // Only revert state to entry if raymarch advanced it. Otherwise the
+                        // raymarch early-exited (e.g., is_in_volume(prev) was false because
+                        // Tier B/C over-detected on a conservative bound) — keep the
+                        // integrator's post-step state to avoid an infinite revert loop.
+                        if (entry.position[1] != prev.position[1]
+                            || entry.position[2] != prev.position[2]) {
+                            state = entry;
+                            continue;
+                        }
+                        // else: fall through; state retains the integrator's post-step value.
                     }
                 }
             }

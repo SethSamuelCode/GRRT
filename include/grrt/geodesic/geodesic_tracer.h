@@ -4,6 +4,7 @@
 #include "grrt/geodesic/integrator.h"
 #include "grrt/math/vec3.h"
 #include "grrt_export.h"
+#include <atomic>
 #include <vector>
 
 namespace grrt {
@@ -55,6 +56,13 @@ public:
     SpectralTraceResult trace_spectral(GeodesicState state,
                                        const std::vector<double>& frequency_bins) const;
 
+    /// Number of Tier C subdivide() invocations consumed since construction.
+    /// Diagnostic: read after a render to estimate how much grazing-trajectory
+    /// refinement was needed. Atomic — safe for OpenMP-parallel render loops.
+    long substep_invocation_count() const {
+        return substep_invocation_count_.load(std::memory_order_relaxed);
+    }
+
 private:
     const Kerr& metric_;
     const RK4& integrator_;
@@ -65,6 +73,7 @@ private:
     double horizon_epsilon_ = 0.01;
     const VolumetricDisk* vol_disk_ = nullptr;
     double raymarch_tol_ = 1e-2;
+    mutable std::atomic<long> substep_invocation_count_{0};
 
     void raymarch_volumetric(GeodesicState& state, Vec3& color,
                              double J_rgb[3], double T_rgb[3]) const;
