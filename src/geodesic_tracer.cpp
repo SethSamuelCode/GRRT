@@ -194,22 +194,17 @@ TraceResult GeodesicTracer::trace(GeodesicState state,
                     const double r_lo = std::min(r_prev, r_new);
                     const double r_hi = std::max(r_prev, r_new);
                     if (r_hi >= vol_disk_->r_horizon() && r_lo <= vol_disk_->r_max()) {
-                        // Start raymarch from refined_endpoint (helper's surfaced near-disk state)
-                        // rather than prev. This gives raymarch a starting position where
-                        // inside_volume() is more likely true, so its initial ds_proposed picks
-                        // the fine-resolution branch (H/16) and captures disk content transversally.
-                        GeodesicState entry = entry_check.refined_endpoint;
+                        GeodesicState entry = prev;
                         const double re = entry.position[1];
                         if (re >= vol_disk_->r_horizon() * 0.9
                             && re <= vol_disk_->r_max() * 1.5) {
                             raymarch_volumetric(entry, color, running_J, running_T);
-                            // Only revert state to entry if raymarch advanced it from the starting
-                            // refined_endpoint. Otherwise the raymarch was a no-op (e.g.,
-                            // is_in_volume(refined_endpoint) was false because the helper's bound
-                            // was conservative) — keep the integrator's post-step state to avoid
-                            // an infinite revert loop.
-                            if (entry.position[1] != entry_check.refined_endpoint.position[1]
-                                || entry.position[2] != entry_check.refined_endpoint.position[2]) {
+                            // Only revert state to entry if raymarch advanced it. Otherwise the
+                            // raymarch early-exited (e.g., is_in_volume(prev) was false because
+                            // Tier B/C over-detected on a conservative bound) — keep the
+                            // integrator's post-step state to avoid an infinite revert loop.
+                            if (entry.position[1] != prev.position[1]
+                                || entry.position[2] != prev.position[2]) {
                                 state = entry;
                                 continue;
                             }
@@ -472,11 +467,7 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
             const double r_lo = std::min(prev.position[1], r_new_refined);
             const double r_hi = std::max(prev.position[1], r_new_refined);
             if (r_hi >= vol_disk_->r_horizon() && r_lo <= vol_disk_->r_max()) {
-                // Start raymarch from refined_endpoint (helper's surfaced near-disk state)
-                // rather than prev. This gives raymarch a starting position where
-                // inside_volume() is more likely true, so its initial ds_proposed picks
-                // the fine-resolution branch (H/16) and captures disk content transversally.
-                GeodesicState entry = entry_check.refined_endpoint;
+                GeodesicState entry = prev;
                 const double re = entry.position[1];
                 if (re >= vol_disk_->r_horizon() * 0.9 && re <= vol_disk_->r_max() * 1.5) {
                     std::printf("  -> RAYMARCH entry r=%.4f z=%.4f\n", re,
@@ -488,13 +479,12 @@ TraceResult GeodesicTracer::trace_debug(GeodesicState state,
                         cur_color[ch] = running_J[ch] * nu_rgb[ch] * nu_rgb[ch] * nu_rgb[ch];
                     std::printf("  -> RAYMARCH exit  color=(%.4e %.4e %.4e)\n",
                         cur_color[0], cur_color[1], cur_color[2]);
-                    // Only revert state to entry if raymarch advanced it from the starting
-                    // refined_endpoint. Otherwise the raymarch was a no-op (e.g.,
-                    // is_in_volume(refined_endpoint) was false because the helper's bound
-                    // was conservative) — keep the integrator's post-step state to avoid
-                    // an infinite revert loop.
-                    if (entry.position[1] != entry_check.refined_endpoint.position[1]
-                        || entry.position[2] != entry_check.refined_endpoint.position[2]) {
+                    // Only revert state to entry if raymarch advanced it. Otherwise the
+                    // raymarch early-exited (e.g., is_in_volume(prev) was false because
+                    // Tier B/C over-detected on a conservative bound) — keep the
+                    // integrator's post-step state to avoid an infinite revert loop.
+                    if (entry.position[1] != prev.position[1]
+                        || entry.position[2] != prev.position[2]) {
                         state = entry;
                         continue;
                     }
@@ -606,22 +596,17 @@ SpectralTraceResult GeodesicTracer::trace_spectral(GeodesicState state,
                 const double r_lo = std::min(r_prev, r_new);
                 const double r_hi = std::max(r_prev, r_new);
                 if (r_hi >= vol_disk_->r_horizon() && r_lo <= vol_disk_->r_max()) {
-                    // Start raymarch from refined_endpoint (helper's surfaced near-disk state)
-                    // rather than prev. This gives raymarch a starting position where
-                    // inside_volume() is more likely true, so its initial ds_proposed picks
-                    // the fine-resolution branch (H/16) and captures disk content transversally.
-                    GeodesicState entry = entry_check.refined_endpoint;
+                    GeodesicState entry = prev;
                     const double re = entry.position[1];
                     if (re >= vol_disk_->r_horizon() * 0.9
                         && re <= vol_disk_->r_max() * 1.5) {
                         raymarch_volumetric_spectral(entry, frequency_bins, J, T_trans, tau_acc);
-                        // Only revert state to entry if raymarch advanced it from the starting
-                        // refined_endpoint. Otherwise the raymarch was a no-op (e.g.,
-                        // is_in_volume(refined_endpoint) was false because the helper's bound
-                        // was conservative) — keep the integrator's post-step state to avoid
-                        // an infinite revert loop.
-                        if (entry.position[1] != entry_check.refined_endpoint.position[1]
-                            || entry.position[2] != entry_check.refined_endpoint.position[2]) {
+                        // Only revert state to entry if raymarch advanced it. Otherwise the
+                        // raymarch early-exited (e.g., is_in_volume(prev) was false because
+                        // Tier B/C over-detected on a conservative bound) — keep the
+                        // integrator's post-step state to avoid an infinite revert loop.
+                        if (entry.position[1] != prev.position[1]
+                            || entry.position[2] != prev.position[2]) {
                             state = entry;
                             continue;
                         }
