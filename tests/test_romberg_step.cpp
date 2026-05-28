@@ -201,7 +201,8 @@ static void test_mid_state_is_half_step() {
     EXPECT_NEAR(r.mid_state.momentum[3], expected_mid.momentum[3], 1e-12);  // L = p_phi
 }
 
-// Test 5: the empty-channel path must still set a valid (finite) mid_state.
+// Test 5: the empty-channel path must populate mid_state with the half-step
+// state, asserted by equality (not merely finiteness — see body comment).
 static void test_mid_state_empty_channels() {
     ConstantSampler sampler{1.0};
     Kerr metric(1.0, 0.0);
