@@ -1,6 +1,7 @@
 #include "grrt/geodesic/geodesic_tracer.h"
 #include "grrt/geodesic/rk4.h"
 #include "grrt/geodesic/romberg_step.h"
+#include "grrt/geodesic/raymarch_step_control.h"
 #include "grrt/geodesic/disk_step_entry.h"
 #include "grrt/spacetime/kerr.h"
 #include "grrt/scene/accretion_disk.h"
@@ -268,7 +269,7 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& /*color*/,
                        : std::min(std::abs(z_start) / 8.0, H_start * 2.0);
 
     int step_count = 0;
-    constexpr int MAX_STEPS = 4096;
+    constexpr int MAX_STEPS = 16384;   // headroom for fine transit stepping (thin disks)
 
     while (step_count < MAX_STEPS) {
         // Hard exits — match prior logic.
@@ -292,30 +293,57 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& /*color*/,
                 continue;
             }
         }
+
+        // z-resolution control: a step whose signed z-interval overlaps the
+        // disk envelope must not jump more than H/4 in z, or its midpoint
+        // (where we sample the source function) won't reliably land inside the
+        // disk. Reject and halve ds, reusing the shrink-and-retry loop. Gated
+        // on envelope overlap so empty-space steps stay coarse. (Floor uses the
+        // midpoint-r scale height; the max_err block above floors on start-r —
+        // intentional: each reject loop terminates against its own floor.)
+        {
+            const double z0 = state.position[1]
+                            * std::cos(state.position[2]);
+            const double z1 = rs.end_state.position[1]
+                            * std::cos(rs.end_state.position[2]);
+            const double r_for_H = rs.mid_state.position[1];
+            const double H_z   = vol_disk_->scale_height(r_for_H);
+            const double env_z = vol_disk_->z_max_at(r_for_H) + H_z;
+            const double ds_floor_z = H_z / 256.0;
+            if (step_needs_z_refinement(z0, z1, 0.25 * H_z, env_z)
+                && ds_proposed > ds_floor_z) {
+                ds_proposed = std::max(ds_proposed * 0.5, ds_floor_z);
+                continue;
+            }
+        }
         step_count++;
 
         // Accepted: per-channel radiative transfer using rs.dtau.
-        // Compute source function at the END of the half-step path.
-        const GeodesicState& end = rs.end_state;
-        const double r_end       = end.position[1];
-        const double theta_end   = end.position[2];
-        const double phi_end     = end.position[3];
-        const double z_end       = r_end * std::cos(theta_end);
+        // Sample the source function at the step MIDPOINT (not the end). For a
+        // transversal disk transit the end can lie outside the disk (density 0)
+        // even though the path crossed dense material; the midpoint lands at
+        // representative density. dtau (the optical depth over the step) is
+        // unchanged — only the source sampling point moves. See spec §5.3.
+        const GeodesicState& mid = rs.mid_state;
+        const double r_mid       = mid.position[1];
+        const double theta_mid   = mid.position[2];
+        const double phi_mid     = mid.position[3];
+        const double z_mid       = r_mid * std::cos(theta_mid);
 
-        const double rho_cgs = vol_disk_->density_cgs(r_end, z_end, phi_end);
-        const double T_local = vol_disk_->temperature(r_end, std::abs(z_end));
+        const double rho_cgs = vol_disk_->density_cgs(r_mid, z_mid, phi_mid);
+        const double T_local = vol_disk_->temperature(r_mid, std::abs(z_mid));
         if (rho_cgs > 0.0 && T_local > 0.0) {
-            // Redshift factor at the end-state.
+            // Redshift factor at the mid-state.
             double ut_emit = 0.0, ur_emit = 0.0, uphi_emit = 0.0;
-            if (r_end >= vol_disk_->r_isco()) {
-                vol_disk_->circular_velocity(r_end, ut_emit, uphi_emit);
+            if (r_mid >= vol_disk_->r_isco()) {
+                vol_disk_->circular_velocity(r_mid, ut_emit, uphi_emit);
             } else {
-                vol_disk_->plunging_velocity(r_end, theta_end, ut_emit, ur_emit, uphi_emit);
+                vol_disk_->plunging_velocity(r_mid, theta_mid, ut_emit, ur_emit, uphi_emit);
             }
-            const double p_dot_u_emit = end.momentum[0] * ut_emit
-                                       + end.momentum[1] * ur_emit
-                                       + end.momentum[3] * uphi_emit;
-            const double p_dot_u_obs  = end.momentum[0] * ut_obs;
+            const double p_dot_u_emit = mid.momentum[0] * ut_emit
+                                       + mid.momentum[1] * ur_emit
+                                       + mid.momentum[3] * uphi_emit;
+            const double p_dot_u_obs  = mid.momentum[0] * ut_obs;
             const double g_factor     = p_dot_u_emit / p_dot_u_obs;
 
             for (int ch = 0; ch < 3; ++ch) {
@@ -338,10 +366,23 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& /*color*/,
         state = rs.end_state;
         r = state.position[1];
 
-        // Step-size growth: well under tolerance → grow, capped at 1·H.
+        // Step-size growth: well under tolerance → grow. Cap at H/4 while the
+        // ray is inside the disk envelope, else cap at H. Point test here (on
+        // the post-advance END state), not the interval test used for rejection.
+        // This caps thrash only for a ray ALREADY inside the disk. It does NOT
+        // prevent grow-then-reject on a transversal *approach* (both step
+        // endpoints outside the envelope): there growth is allowed up to H and
+        // the z-resolution gate halves it back down on entry — still correct (no
+        // emission missed), just a bounded ~log2(H/floor) reject burst. The gate,
+        // not this cap, is what guarantees the entry crossing is captured.
         if (rs.max_err < raymarch_tol_ / 8.0) {
-            const double H_now = vol_disk_->scale_height(r);
-            ds_proposed = std::min(ds_proposed * 2.0, H_now);
+            const double z_now   = r * std::cos(state.position[2]);
+            const double H_now   = vol_disk_->scale_height(r);
+            const double env_now = vol_disk_->z_max_at(r) + H_now;
+            const double grow_cap = (std::abs(z_now) < env_now)
+                                  ? (0.25 * H_now)
+                                  : H_now;
+            ds_proposed = std::min(ds_proposed * 2.0, grow_cap);
         }
     }
 
