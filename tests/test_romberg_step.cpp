@@ -172,11 +172,66 @@ static void test_romberg_order_convergence() {
     }
 }
 
+// Test 4: mid_state must equal the geodesic state at the half-step junction,
+// i.e. integrator.step_kerr(metric, start, ds/2). This is the point
+// raymarch_volumetric samples the source function at (midpoint-S sampling).
+static void test_mid_state_is_half_step() {
+    ConstantSampler sampler{1.0};
+    Kerr metric(1.0, 0.0);
+    RK4 integrator;
+
+    GeodesicState start;
+    start.position = {0.0, 10.0, 1.5707963267948966, 0.0};
+    start.momentum = {-0.8, 1.0, 0.0, 0.0};  // null radial geodesic at r=10, M=1
+
+    constexpr double channels[] = {550e-7};
+    const double ds = 0.1;
+
+    RombergStep r = romberg_step(start, ds,
+                                  std::span<const double>{channels, 1},
+                                  sampler, metric, integrator);
+
+    const GeodesicState expected_mid =
+        integrator.step_kerr(metric, start, 0.5 * ds);
+
+    EXPECT_NEAR(r.mid_state.position[1], expected_mid.position[1], 1e-12);
+    EXPECT_NEAR(r.mid_state.position[2], expected_mid.position[2], 1e-12);
+    EXPECT_NEAR(r.mid_state.momentum[1], expected_mid.momentum[1], 1e-12);
+    EXPECT_NEAR(r.mid_state.momentum[0], expected_mid.momentum[0], 1e-12);  // E = -p_t
+    EXPECT_NEAR(r.mid_state.momentum[3], expected_mid.momentum[3], 1e-12);  // L = p_phi
+}
+
+// Test 5: the empty-channel path must still set a valid (finite) mid_state.
+static void test_mid_state_empty_channels() {
+    ConstantSampler sampler{1.0};
+    Kerr metric(1.0, 0.0);
+    RK4 integrator;
+
+    GeodesicState start;
+    start.position = {0.0, 10.0, 1.5707963267948966, 0.0};
+    start.momentum = {-0.8, 1.0, 0.0, 0.0};
+
+    const double ds = 0.1;
+    RombergStep r = romberg_step(start, ds,
+                                  std::span<const double>{}, // zero channels
+                                  sampler, metric, integrator);
+
+    // mid_state must equal the half-step even on the empty-channel path. A
+    // finiteness-only check would pass on a default-constructed (0.0) state and
+    // so would NOT catch the empty-channel mid_state assignment being dropped.
+    const GeodesicState expected_mid =
+        integrator.step_kerr(metric, start, 0.5 * ds);
+    EXPECT_NEAR(r.mid_state.position[1], expected_mid.position[1], 1e-12);
+    EXPECT_NEAR(r.mid_state.momentum[1], expected_mid.momentum[1], 1e-12);
+}
+
 int main() {
     std::printf("Running test_romberg_step...\n");
     test_constant_integrand();
     test_multi_channel_batching();
     test_romberg_order_convergence();
+    test_mid_state_is_half_step();
+    test_mid_state_empty_channels();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

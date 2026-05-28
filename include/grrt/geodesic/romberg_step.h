@@ -21,6 +21,7 @@ constexpr int MAX_ROMBERG_CHANNELS = 32;
 /// Result of one Romberg-controlled raymarch step.
 struct RombergStep {
     GeodesicState end_state;                           ///< Geodesic state at end of accepted half-step path.
+    GeodesicState mid_state;                           ///< Geodesic state at the step midpoint (junction of the two half-steps).
     std::array<double, MAX_ROMBERG_CHANNELS> dtau;     ///< Per-channel Δτ from the half-step pass (more accurate).
     double max_err;                                    ///< Max over channels of |Δτ_full − Δτ_half|.
     double ds_taken;                                   ///< = ds_proposed (helper does not shrink; caller does).

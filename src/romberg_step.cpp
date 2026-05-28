@@ -35,6 +35,10 @@ RombergStep romberg_step(
 
     if (out.n_channels <= 0) {
         // Empty channel list: nothing to integrate. Still advance state.
+        // Single-step advances here (no accuracy requirement): end_state is a
+        // direct full step, NOT a composition of two half-steps as on the main
+        // path. mid_state is simply the half-step point.
+        out.mid_state = integrator.step_kerr(metric, start_state, 0.5 * ds_proposed);
         out.end_state = integrator.step_kerr(metric, start_state, ds_proposed);
         out.max_err = 0.0;
         return out;
@@ -72,6 +76,7 @@ RombergStep romberg_step(
     const GeodesicState end_half = integrator.step_kerr(metric, mid,         half);
     sampler.sample_integrand(mid,      channels_nu_obs, span_mid);
     sampler.sample_integrand(end_half, channels_nu_obs, span_end_h);
+    out.mid_state = mid;
 
     // Composite trapezoid Δτ_half[ch] = 0.5·(i_start + 2·i_mid + i_end_half) · half
     for (int ch = 0; ch < out.n_channels; ++ch) {
