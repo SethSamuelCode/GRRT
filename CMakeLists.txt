@@ -155,6 +155,9 @@ target_link_libraries(test-sobol-sampler PRIVATE grrt)
 add_executable(test-disk-step-entry tests/test_disk_step_entry.cpp)
 target_link_libraries(test-disk-step-entry PRIVATE grrt)
 
+add_executable(test-raymarch-step-control tests/test_raymarch_step_control.cpp)
+target_link_libraries(test-raymarch-step-control PRIVATE grrt)
+
 if(GRRT_ENABLE_CUDA)
     add_executable(grrt-cuda-test cuda/tests/test_cuda.cu)
     target_include_directories(grrt-cuda-test PRIVATE include/ cuda/ ${CMAKE_BINARY_DIR}/include)
