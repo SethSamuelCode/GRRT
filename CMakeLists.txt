@@ -158,6 +158,10 @@ target_link_libraries(test-disk-step-entry PRIVATE grrt)
 add_executable(test-raymarch-step-control tests/test_raymarch_step_control.cpp)
 target_link_libraries(test-raymarch-step-control PRIVATE grrt)
 
+# Diagnostic tool: dump the volumetric-disk LUTs to CSV (banding investigation).
+add_executable(dump-disk-lut tools/dump_disk_lut.cpp)
+target_link_libraries(dump-disk-lut PRIVATE grrt)
+
 if(GRRT_ENABLE_CUDA)
     add_executable(grrt-cuda-test cuda/tests/test_cuda.cu)
     target_include_directories(grrt-cuda-test PRIVATE include/ cuda/ ${CMAKE_BINARY_DIR}/include)

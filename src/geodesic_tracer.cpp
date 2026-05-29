@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <numbers>
 #include <span>
 
@@ -382,6 +383,18 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& /*color*/,
                 J[ch] += T[ch] * S * (1.0 - exp_dtau);
                 T[ch] *= exp_dtau;
             }
+        }
+
+        // DEBUG probe (env-gated): per-step raymarch sampling. Off unless
+        // GRRT_RM_LOG is set, so full renders are unaffected (the check is a
+        // cached bool — evaluated once). Enable for --debug-pixel probing:
+        //   GRRT_RM_LOG=1 grrt-cli ... --debug-pixel X Y
+        static const bool rm_log = std::getenv("GRRT_RM_LOG") != nullptr;
+        if (rm_log) {
+            std::fprintf(stderr,
+                "[RM] s=%d %s z=%+.5f r=%.4f ds=%.5f rho=%.3e T=%.1f dtau1=%.3e J1=%.4e\n",
+                step_count, inside ? "IN " : "out", z_mid, r_mid, ds, rho_cgs, T_local,
+                rs.dtau[1], J[1]);
         }
 
         state = rs.end_state;

@@ -5,6 +5,7 @@
 #include <iterator>
 #include <numbers>
 #include <cstdio>
+#include <cstdlib>
 #include <utility>
 #include <limits>
 
@@ -605,6 +606,10 @@ VolumetricDisk::ColumnSolution VolumetricDisk::solve_column(
     constexpr double RHO_FLOOR        = 1e-18;  // (was 1e-15)
     constexpr int    MAX_OUTER_ITERS  = 8;
 
+    // DEBUG (env+radius gated): log the vertical-ODE RHS terms for one column.
+    const bool col_log = (std::getenv("GRRT_COL_LOG") != nullptr)
+                       && std::abs(r - 8.26) < 0.01;
+
     ColumnSolution out;
     out.rho_z.assign(n_z, 1.0);
     out.T_z.assign(n_z, T_eff);
@@ -806,6 +811,24 @@ VolumetricDisk::ColumnSolution VolumetricDisk::solve_column(
                 rho_cur = std::max(rho_next, RHO_FLOOR);
                 z_samples.push_back(z_cur);
                 rho_samples.push_back(rho_cur);
+                if (col_log) {
+                    const double zf = z_cur / dz;
+                    const int i = std::clamp(static_cast<int>(zf), 0, n_z - 2);
+                    const double tt = zf - i;
+                    const double cs2_d  = k_B * ((1.0-tt)*out.T_z[i] + tt*out.T_z[i+1])
+                                        / (((1.0-tt)*mu_z[i] + tt*mu_z[i+1]) * m_p);
+                    const double dcs2_d = (1.0-tt)*d_cs2_dz[i] + tt*d_cs2_dz[i+1];
+                    const double dfE_d  = (1.0-tt)*d_fE_dz[i]  + tt*d_fE_dz[i+1];
+                    const double cs2g   = cs2_d / (c_cgs * c_cgs);
+                    const double grav = -rho_cur * Omz2 * z_cur;
+                    const double gas  = -rho_cur * (dcs2_d / (c_cgs * c_cgs));
+                    const double rad  = -(dfE_d / (rho_cgs_ref * c_cgs * c_cgs));
+                    std::fprintf(stderr,
+                        "[COL] o=%d z=%.5f rho=%.3e grav=%+.3e gas=%+.3e rad=%+.3e "
+                        "cs2g=%.3e drho=%+.3e\n",
+                        outer, z_cur, rho_cur, grav, gas, rad, cs2g,
+                        (grav + gas + rad) / std::max(cs2g, 1e-30));
+                }
                 const double scale_factor = (err_rel > 1e-30)
                     ? std::clamp(0.9 * std::pow(dp45_tol / err_rel, 0.2), 0.2, 5.0)
                     : 5.0;
