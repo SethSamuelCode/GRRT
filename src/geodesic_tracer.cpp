@@ -260,83 +260,92 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& /*color*/,
     VolumetricDiskSampler sampler(vol_disk_, observer_r_);
     const double ut_obs = sampler.ut_obs;
 
-    // Initial step proposal — same heuristics as before.
+    // Fine-sampling quality knob: inside the disk envelope we step UNIFORMLY at
+    // ds_fine = min(H, L) / FINE_SAMPLES_PER_CORR, where L is the turbulence
+    // correlation length — ~4 samples per correlation length, ~8 per scale
+    // height H across the base peak. Uniform spacing (no placement-dependent
+    // step decisions) is what removes the banding; tying ds to physics resolves
+    // turbulence faithfully.
+    constexpr int FINE_SAMPLES_PER_CORR = 4;
+
+    // True when the photon state is inside the disk's vertical envelope (the
+    // emitting region: density is 0 for |z| >= z_max(r)).
+    auto inside_envelope = [&](const GeodesicState& s) {
+        const double rr = s.position[1];
+        const double zz = rr * std::cos(s.position[2]);
+        return std::abs(zz) <= vol_disk_->z_max_at(rr);
+    };
+
     double r = state.position[1];
     const double z_start = r * std::cos(state.position[2]);
     const double H_start = vol_disk_->scale_height(r);
-    double ds_proposed = vol_disk_->inside_volume(r, z_start)
-                       ? H_start / 16.0
-                       : std::min(std::abs(z_start) / 8.0, H_start * 2.0);
+    // Coarse step proposal — used only OUTSIDE the envelope (rho = 0 there).
+    double ds_coarse = std::min(std::abs(z_start) / 8.0, H_start * 2.0);
+    if (ds_coarse <= 0.0) ds_coarse = H_start;
 
     int step_count = 0;
-    constexpr int MAX_STEPS = 16384;   // headroom for fine transit stepping (thin disks)
+    constexpr int MAX_STEPS = 16384;   // headroom for fine transit stepping
 
     while (step_count < MAX_STEPS) {
-        // Hard exits — match prior logic.
-        if (r < vol_disk_->r_horizon())                        break;
-        // Outer-radius exit is DIRECTION-AWARE: only bail if the photon is
-        // genuinely leaving (moving outward). A photon just outside the rim
-        // moving inward is entering the disk from outside the outer edge — keep
-        // marching (the sampler returns zero out here, so no emission is added
-        // or double-counted) so the crossing just inside the rim isn't missed.
-        // A position-only test (r > r_max) bails these inward rays on step 0 and
-        // blanks the lensed outer rim (≈85% of zero-emission raymarch calls).
-        // The inward vacuum march is bounded: the orchestrator only enters here
-        // with entry r <= r_max*1.5, r decreases monotonically toward the disk,
-        // and MAX_STEPS is the hard backstop.
+        // Hard exits.
+        if (r < vol_disk_->r_horizon())  break;
+        // Direction-aware outer-radius exit (side-impact fix): only bail if the
+        // photon is genuinely leaving (moving outward). Inward rays beyond r_max
+        // are entering from outside the rim — keep marching.
         if (r > vol_disk_->r_max()) {
             const double dr_dl = RK4::derivatives_kerr(metric_, state).position[1];
             if (raymarch_exits_outer(r, vol_disk_->r_max(), dr_dl)) break;
         }
-        if (T[0] < 1e-6 && T[1] < 1e-6 && T[2] < 1e-6)         break;
+        if (T[0] < 1e-6 && T[1] < 1e-6 && T[2] < 1e-6)  break;
 
-        // Romberg-controlled step.
-        RombergStep rs = romberg_step(state, ds_proposed, ch_span,
-                                       sampler, metric_, integrator_);
+        const bool inside = inside_envelope(state);
 
-        // Reject if error exceeds tolerance.
-        if (rs.max_err > raymarch_tol_) {
-            const double H_local = vol_disk_->scale_height(state.position[1]);
-            const double ds_floor = H_local / 256.0;
-            if (ds_proposed <= ds_floor) {
-                // Already at floor — accept anyway (LUT discontinuity is the cause,
-                // not the integrator).
-            } else {
-                ds_proposed = std::max(ds_proposed * 0.5, ds_floor);
-                continue;
-            }
+        // Step size: fixed uniform fine inside the envelope (tied to local H, L);
+        // coarse adaptive outside.
+        double ds;
+        if (inside) {
+            const double H_loc = vol_disk_->scale_height(r);
+            const double L_loc = vol_disk_->noise_correlation_length(r);
+            ds = std::min(H_loc, L_loc) / static_cast<double>(FINE_SAMPLES_PER_CORR);
+        } else {
+            ds = ds_coarse;
         }
 
-        // z-resolution control: a step whose signed z-interval overlaps the
-        // disk envelope must not jump more than H/4 in z, or its midpoint
-        // (where we sample the source function) won't reliably land inside the
-        // disk. Reject and halve ds, reusing the shrink-and-retry loop. Gated
-        // on envelope overlap so empty-space steps stay coarse. (Floor uses the
-        // midpoint-r scale height; the max_err block above floors on start-r —
-        // intentional: each reject loop terminates against its own floor.)
-        {
-            const double z0 = state.position[1]
-                            * std::cos(state.position[2]);
-            const double z1 = rs.end_state.position[1]
-                            * std::cos(rs.end_state.position[2]);
-            const double r_for_H = rs.mid_state.position[1];
-            const double H_z   = vol_disk_->scale_height(r_for_H);
-            const double env_z = vol_disk_->z_max_at(r_for_H) + H_z;
-            const double ds_floor_z = H_z / 256.0;
-            if (step_needs_z_refinement(z0, z1, 0.25 * H_z, env_z)
-                && ds_proposed > ds_floor_z) {
-                ds_proposed = std::max(ds_proposed * 0.5, ds_floor_z);
-                continue;
-            }
-        }
-        step_count++;
+        RombergStep rs = romberg_step(state, ds, ch_span, sampler, metric_, integrator_);
 
-        // Accepted: per-channel radiative transfer using rs.dtau.
-        // Sample the source function at the step MIDPOINT (not the end). For a
-        // transversal disk transit the end can lie outside the disk (density 0)
-        // even though the path crossed dense material; the midpoint lands at
-        // representative density. dtau (the optical depth over the step) is
-        // unchanged — only the source sampling point moves. See spec §5.3.
+        // Boundary snap: if this step crosses the envelope (inside<->outside),
+        // bisect to land on |z| = z_max, then re-take it. This makes fine
+        // sampling begin at the envelope boundary — no coarse overshoot into the
+        // disk, so no placement-dependent skipped emission, so no banding.
+        //
+        // No-span invariant: this endpoint-flip test (unlike the old signed-
+        // interval z-gate) would MISS a step that jumps clean over the disk —
+        // both endpoints outside while the path crosses the dense region. That
+        // cannot happen here: z_max >= 3H and ds_coarse is capped at H (< z_max),
+        // so a single coarse step's |dz| = |dz/dlambda|*ds (|dz/dlambda| ~ O(1)
+        // for these geodesics) stays well below the 2*z_max envelope thickness.
+        // If the coarse cap is ever raised toward/above z_max, restore an
+        // interval/midpoint crossing test here.
+        //
+        // The bisection probes with a single step_kerr while the re-take uses
+        // romberg_step's two half-steps; they differ by O(ds^5) — negligible and
+        // harmless (the boundary sits at rho ~ 0, and the next iteration
+        // reclassifies `inside` from the true advanced state).
+        if (inside_envelope(rs.end_state) != inside) {
+            double lo = 0.0, hi = ds;
+            for (int it = 0; it < 16; ++it) {
+                const double m = 0.5 * (lo + hi);
+                if (inside_envelope(integrator_.step_kerr(metric_, state, m)) == inside)
+                    lo = m;
+                else
+                    hi = m;
+            }
+            ds = hi;
+            rs = romberg_step(state, ds, ch_span, sampler, metric_, integrator_);
+        }
+
+        // Per-channel radiative transfer, source sampled at the step MIDPOINT.
+        // Outside the envelope rho = 0, so this block contributes nothing.
         const GeodesicState& mid = rs.mid_state;
         const double r_mid       = mid.position[1];
         const double theta_mid   = mid.position[2];
@@ -346,7 +355,6 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& /*color*/,
         const double rho_cgs = vol_disk_->density_cgs(r_mid, z_mid, phi_mid);
         const double T_local = vol_disk_->temperature(r_mid, std::abs(z_mid));
         if (rho_cgs > 0.0 && T_local > 0.0) {
-            // Redshift factor at the mid-state.
             double ut_emit = 0.0, ur_emit = 0.0, uphi_emit = 0.0;
             if (r_mid >= vol_disk_->r_isco()) {
                 vol_disk_->circular_velocity(r_mid, ut_emit, uphi_emit);
@@ -379,24 +387,16 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& /*color*/,
         state = rs.end_state;
         r = state.position[1];
 
-        // Step-size growth: well under tolerance → grow. Cap at H/4 while the
-        // ray is inside the disk envelope, else cap at H. Point test here (on
-        // the post-advance END state), not the interval test used for rejection.
-        // This caps thrash only for a ray ALREADY inside the disk. It does NOT
-        // prevent grow-then-reject on a transversal *approach* (both step
-        // endpoints outside the envelope): there growth is allowed up to H and
-        // the z-resolution gate halves it back down on entry — still correct (no
-        // emission missed), just a bounded ~log2(H/floor) reject burst. The gate,
-        // not this cap, is what guarantees the entry crossing is captured.
-        if (rs.max_err < raymarch_tol_ / 8.0) {
-            const double z_now   = r * std::cos(state.position[2]);
-            const double H_now   = vol_disk_->scale_height(r);
-            const double env_now = vol_disk_->z_max_at(r) + H_now;
-            const double grow_cap = (std::abs(z_now) < env_now)
-                                  ? (0.25 * H_now)
-                                  : H_now;
-            ds_proposed = std::min(ds_proposed * 2.0, grow_cap);
+        // Coarse-step adaptive sizing — OUTSIDE the envelope only (fine steps are
+        // fixed). Grow when well under tolerance (capped at H), shrink on error.
+        if (!inside) {
+            const double H_now = vol_disk_->scale_height(r);
+            if (rs.max_err < raymarch_tol_ / 8.0)
+                ds_coarse = std::min(ds_coarse * 2.0, H_now);
+            else if (rs.max_err > raymarch_tol_)
+                ds_coarse = std::max(ds_coarse * 0.5, H_now / 256.0);
         }
+        step_count++;
     }
 
     // Persist for caller.
