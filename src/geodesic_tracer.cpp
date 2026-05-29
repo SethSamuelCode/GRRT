@@ -274,7 +274,20 @@ void GeodesicTracer::raymarch_volumetric(GeodesicState& state, Vec3& /*color*/,
     while (step_count < MAX_STEPS) {
         // Hard exits — match prior logic.
         if (r < vol_disk_->r_horizon())                        break;
-        if (r > vol_disk_->r_max())                            break;
+        // Outer-radius exit is DIRECTION-AWARE: only bail if the photon is
+        // genuinely leaving (moving outward). A photon just outside the rim
+        // moving inward is entering the disk from outside the outer edge — keep
+        // marching (the sampler returns zero out here, so no emission is added
+        // or double-counted) so the crossing just inside the rim isn't missed.
+        // A position-only test (r > r_max) bails these inward rays on step 0 and
+        // blanks the lensed outer rim (≈85% of zero-emission raymarch calls).
+        // The inward vacuum march is bounded: the orchestrator only enters here
+        // with entry r <= r_max*1.5, r decreases monotonically toward the disk,
+        // and MAX_STEPS is the hard backstop.
+        if (r > vol_disk_->r_max()) {
+            const double dr_dl = RK4::derivatives_kerr(metric_, state).position[1];
+            if (raymarch_exits_outer(r, vol_disk_->r_max(), dr_dl)) break;
+        }
         if (T[0] < 1e-6 && T[1] < 1e-6 && T[2] < 1e-6)         break;
 
         // Romberg-controlled step.

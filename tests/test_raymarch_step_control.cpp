@@ -55,6 +55,27 @@ int main() {
     check("fine_far_from_disk",
           step_needs_z_refinement(0.50, 0.5005, qH, env), false);
 
+    // --- raymarch_exits_outer: direction-aware outer-radius exit ---
+    constexpr double rmax = 20.0;
+
+    // Inside the disk radius: never exits, regardless of radial direction.
+    check("inside_moving_in",  raymarch_exits_outer(10.0, rmax, -1.0), false);
+    check("inside_moving_out", raymarch_exits_outer(10.0, rmax, +1.0), false);
+
+    // Outside the rim, moving OUTWARD (genuinely leaving): exit.
+    check("outside_moving_out", raymarch_exits_outer(21.0, rmax, +0.5), true);
+
+    // Outside the rim, moving INWARD (entering from outside): do NOT exit —
+    // this is the side-impact case the fix exists for. Must keep marching.
+    check("outside_moving_in",  raymarch_exits_outer(21.0, rmax, -0.5), false);
+
+    // Exactly at the rim: still in range, do not exit (strict r > r_max).
+    check("at_boundary",        raymarch_exits_outer(20.0, rmax, +1.0), false);
+
+    // Outside, radially stationary (dr=0): not inbound, so exiting is correct —
+    // a photon at a radial turning point above the rim is not entering the disk.
+    check("outside_stationary", raymarch_exits_outer(20.5, rmax, 0.0), true);
+
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
