@@ -74,6 +74,16 @@ void test_construction() {
     else { std::printf("  PASS\n"); }
 }
 
+void test_noise_correlation_length() {
+    std::printf("\n=== noise_correlation_length ===\n");
+    const auto& disk = shared_disk_default();   // turbulence=1.0, noise_scale=0, c_corr=0.5
+    const double r = 10.0;
+    const double H = disk.scale_height(r);
+    const double L = disk.noise_correlation_length(r);
+    // Defaults: noise_scale=0 -> L = c_corr * H = 0.5 * H.
+    check("L == 0.5*H", L, 0.5 * H, 1e-9);
+}
+
 void test_density_profile() {
     std::printf("\n=== Density profile (no noise) ===\n");
     const auto& disk = shared_disk_no_noise();
@@ -738,6 +748,7 @@ static void test_no_horizontal_bands() {
 
 int main() {
     test_construction();
+    test_noise_correlation_length();
     test_density_profile();
     test_temperature_profile();
     test_taper();

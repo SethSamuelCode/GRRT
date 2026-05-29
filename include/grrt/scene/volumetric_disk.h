@@ -24,7 +24,7 @@ struct VolumetricParams {
     // --- Noise composition (CHANGED semantics) ---
     double turbulence  = 1.0;   ///< Dimensionless boost on physically-derived σ_s.
                                 ///< 1.0 = pure physical. 0.0 = axisymmetric.
-    double noise_scale = 0.0;   ///< Multiplier on c_corr·H(r). 0 = auto.
+    double noise_scale = 0.0;   ///< Override correlation length as noise_scale·H(r). 0 = auto (use c_corr).
 
     // --- Noise physics (NEW — data-derived defaults) ---
     double noise_compressive_b              = 0.0;  ///< 0 = derive from peak β
@@ -88,6 +88,12 @@ public:
 
     /// Scale height H(r) [geometric units]. Frozen at H(r_isco) for r < r_isco.
     double scale_height(double r) const;
+
+    /// Turbulence correlation length L(r) [geometric units] — the spatial scale
+    /// of the fractal density noise (= c_corr·H(r), or noise_scale·H(r) when
+    /// noise_scale > 0). The raymarch sizes its fine step against this so the
+    /// turbulence is resolved. Independent of the `turbulence` amplitude.
+    double noise_correlation_length(double r) const;
 
     /// Total density at (r, z, phi) including taper and turbulent noise [geometric, scaled].
     double density(double r, double z, double phi) const;

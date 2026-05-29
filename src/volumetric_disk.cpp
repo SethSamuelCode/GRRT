@@ -277,6 +277,13 @@ double VolumetricDisk::scale_height(double r) const {
     return interp_radial(H_lut_, r);
 }
 
+double VolumetricDisk::noise_correlation_length(double r) const {
+    const double H = scale_height(r);
+    const double c_corr = (params_.noise_correlation_length_factor > 0.0)
+                        ? params_.noise_correlation_length_factor : 0.5;
+    return (params_.noise_scale > 0.0) ? params_.noise_scale * H : c_corr * H;
+}
+
 double VolumetricDisk::z_max_at(double r) const {
     return interp_radial(z_max_lut_, r);
 }
@@ -291,12 +298,9 @@ double VolumetricDisk::density(double r, double z, double phi) const {
     const double rho_norm = interp_2d(rho_profile_lut_, r, z_abs);
     const double base     = rho_mid * rho_norm * rho_scale_ * taper(r);
 
-    const double H_local = scale_height(r);
-    const double c_corr  = (params_.noise_correlation_length_factor > 0.0)
-                         ? params_.noise_correlation_length_factor : 0.5;
-    const double L = (params_.noise_scale > 0.0)
-                   ? params_.noise_scale * H_local
-                   : c_corr * H_local;
+    // Single source of truth for the turbulence correlation length (also
+    // exposed for the raymarch's fine-step sizing).
+    const double L = noise_correlation_length(r);
     if (L <= 0.0) return base;
 
     const double nx = r * std::cos(phi) / L;
