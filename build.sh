@@ -6,6 +6,14 @@ BUILD_DIR="$SCRIPT_DIR/build"
 CONFIG=Release
 CUDA=OFF
 
+# Windows uses the multi-config Visual Studio generator (binaries land in
+# build/<Config>/ with a .exe suffix); Linux uses a single-config Makefile
+# generator (binary lands directly in build/, no suffix).
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) PLATFORM=windows ;;
+    *)                    PLATFORM=linux ;;
+esac
+
 usage() {
     echo "Usage: $0 [clean|debug|cuda|help]"
     echo "  clean  - Remove build directory"
@@ -46,7 +54,13 @@ cmake -B "$BUILD_DIR" -S "$SCRIPT_DIR" \
     -DGRRT_ENABLE_CUDA="$CUDA"
 
 echo "Building..."
-cmake --build "$BUILD_DIR" --config "$CONFIG" -- -j"$(nproc)"
+cmake --build "$BUILD_DIR" --config "$CONFIG" --parallel "$(nproc)"
+
+if [ "$PLATFORM" = windows ]; then
+    CLI_PATH="$BUILD_DIR/$CONFIG/grrt-cli.exe"
+else
+    CLI_PATH="$BUILD_DIR/grrt-cli"
+fi
 
 echo ""
-echo "Build complete: $BUILD_DIR/grrt-cli"
+echo "Build complete: $CLI_PATH"
