@@ -64,6 +64,25 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
                   / denom;
     }
 
+    // Effective physical mass [M_sun]. The VolumetricParams default (10.0) is the
+    // single source of truth for "unset"; a non-physical mass_solar <= 0 would
+    // zero the length scale and blow up later unit conversions (Ω_cgs = Ω·c/r_g),
+    // so warn loudly and recover rather than substitute silently.
+    double mass_solar_eff = params_.mass_solar;
+    if (mass_solar_eff <= 0.0) {
+        emit(WarningSeverity::Promptable, "mass_solar_invalid",
+             "mass_solar <= 0 is non-physical; using 10 M_sun for the length scale");
+        mass_solar_eff = 10.0;
+    }
+
+    // Physical length scale (Approach A): r_g = G·M_phys/c^2 [cm].
+    // Geometric lengths (H, z) become cm via × r_g — this is what makes the
+    // vertical optical-depth integral dimensionally honest.
+    {
+        using namespace constants;
+        r_g_ = G_cgs * (mass_solar_eff * M_sun) / (c_cgs * c_cgs);
+    }
+
     std::printf("[VolumetricDisk] Building opacity LUTs...\n");
     opacity_luts_ = build_opacity_luts(1e-18, 1e-6, 3000.0, 1e8,
                                        params_.opacity_nu_min, params_.opacity_nu_max);

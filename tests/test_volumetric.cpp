@@ -488,6 +488,21 @@ void test_smoke_parameter_sweep() {
     }
 }
 
+void test_gravitational_radius() {
+    std::printf("\n=== Length scale r_g = GM/c^2 ===\n");
+    const auto& d = shared_disk_default();   // default mass_solar = 10
+    // r_g for 10 M_sun = G·(10·M_sun)/c^2
+    using namespace grrt::constants;
+    const double expected = G_cgs * (10.0 * M_sun) / (c_cgs * c_cgs);
+    std::printf("  r_g = %.4e cm (expected %.4e, ~14.8 km)\n", d.r_g(), expected);
+    check("r_g", d.r_g(), expected, 1e-9);
+    // 10 M_sun -> r_g ~ 1.48e6 cm; bounds catch unit mistakes (m, km, etc.)
+    if (d.r_g() < 1e6 || d.r_g() > 2e6) {
+        std::printf("  FAIL: r_g out of plausible range for 10 M_sun\n");
+        failures++;
+    }
+}
+
 void test_tau_midplane_near_target() {
     std::printf("\n=== τ at midplane ≈ tau_mid at peak-flux radius ===\n");
     const auto& disk = shared_disk_tau_test();
@@ -769,6 +784,7 @@ int main() {
     test_compare_columns_compiles();
     test_refine_n_z_caps_with_warning();
     test_smoke_parameter_sweep();  // ~5-7 min at 1e-6 DP45 (7 unique configs, no sharing)
+    test_gravitational_radius();
     test_tau_midplane_near_target();
     test_tolerance_convergence();
     test_no_horizontal_bands();

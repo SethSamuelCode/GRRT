@@ -152,6 +152,9 @@ public:
     double outer_taper_width() const { return outer_taper_width_; }
     double r_isco() const { return r_isco_; }
     double r_horizon() const { return r_horizon_; }
+    /// Gravitational radius r_g = G·(mass_solar·M_sun)/c^2 [cm].
+    /// Converts a geometric length (units of M) to cm: L_cm = L_geom · r_g.
+    double r_g() const { return r_g_; }
     double rho_scale() const { return rho_scale_; }
     const SimplexNoise3D& noise() const { return noise_; }
     double E_isco() const { return E_isco_; }
@@ -189,6 +192,7 @@ public:
 private:
     double mass_, spin_, r_outer_, peak_temperature_;
     double r_isco_, r_horizon_;
+    double r_g_ = 0.0;     ///< Gravitational radius GM/c^2 [cm] — geometric→cm length scale
     double r_min_;              ///< Inner bound (slightly outside horizon)
     double outer_taper_width_ = 0.0;   ///< Resolved width of the outer radial taper [M]
     VolumetricParams params_;
