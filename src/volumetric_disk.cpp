@@ -83,6 +83,24 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
         r_g_ = G_cgs * (mass_solar_eff * M_sun) / (c_cgs * c_cgs);
     }
 
+    // Physical accretion rate (Approach A): Mdot = f_Edd·L_Edd/(η c²) [g/s],
+    // or a direct override. η = 1 − E_isco (radiative efficiency); L_Edd is the
+    // Eddington luminosity 4πG M m_p c/σ_T (the c is in the numerator).
+    // Diagnostic now; anchors Σ in the column BVP later. Reuses mass_solar_eff.
+    {
+        using namespace constants;
+        const double eta = 1.0 - E_isco_;
+        const double L_Edd = 4.0 * std::numbers::pi * G_cgs * (mass_solar_eff * M_sun)
+                           * m_p * c_cgs / sigma_T;
+        if (params_.mdot_override > 0.0) {
+            mdot_ = params_.mdot_override;
+        } else if (eta > 0.0) {
+            mdot_ = params_.eddington_fraction * L_Edd / (eta * c_cgs * c_cgs);
+        } else {
+            mdot_ = 0.0;  // eta <= 0 is unreachable for physical Kerr (E_isco < 1 always)
+        }
+    }
+
     std::printf("[VolumetricDisk] Building opacity LUTs...\n");
     opacity_luts_ = build_opacity_luts(1e-18, 1e-6, 3000.0, 1e8,
                                        params_.opacity_nu_min, params_.opacity_nu_max);

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <algorithm>
+#include <numbers>
 #include <vector>
 
 int failures = 0;
@@ -761,6 +762,33 @@ static void test_no_horizontal_bands() {
     std::printf("  PASS\n");
 }
 
+void test_accretion_rate() {
+    std::printf("\n=== Accretion rate Mdot from f_Edd ===\n");
+    const auto& d = shared_disk_default();   // mass_solar=10, f_Edd=0.1 (defaults)
+    using namespace grrt::constants;
+    // Reference from the same relation, using the disk's own E_isco:
+    //   η = 1 − E_isco ;  L_Edd = 4πG M m_p c / σ_T ;  Mdot = f_Edd L_Edd/(η c²)
+    const double eta   = 1.0 - d.E_isco();
+    const double L_Edd = 4.0 * std::numbers::pi * G_cgs * (10.0 * M_sun)
+                       * m_p * c_cgs / sigma_T;
+    const double mdot_ref = 0.1 * L_Edd / (eta * c_cgs * c_cgs);
+    std::printf("  Mdot = %.4e g/s (ref %.4e, eta=%.4f)\n", d.mdot(), mdot_ref, eta);
+    check("Mdot vs relation", d.mdot(), mdot_ref, 1e-6);
+    // Independent order/value sanity (a=0.998, 10 M_sun, f_Edd=0.1 → ~4.4e17 g/s):
+    if (d.mdot() < 3.5e17 || d.mdot() > 5.5e17) {
+        std::printf("  FAIL: Mdot outside expected order of magnitude\n");
+        failures++;
+    }
+
+    // mdot_override path: a direct Mdot must be used verbatim (escape hatch).
+    {
+        grrt::VolumetricParams p;
+        p.mdot_override = 1.234e18;
+        const grrt::VolumetricDisk d2(1.0, 0.998, 30.0, 1e7, p);
+        check("mdot_override respected", d2.mdot(), 1.234e18, 1e-12);
+    }
+}
+
 int main() {
     test_construction();
     test_noise_correlation_length();
@@ -785,6 +813,7 @@ int main() {
     test_refine_n_z_caps_with_warning();
     test_smoke_parameter_sweep();  // ~5-7 min at 1e-6 DP45 (7 unique configs, no sharing)
     test_gravitational_radius();
+    test_accretion_rate();
     test_tau_midplane_near_target();
     test_tolerance_convergence();
     test_no_horizontal_bands();

@@ -155,6 +155,9 @@ public:
     /// Gravitational radius r_g = G·(mass_solar·M_sun)/c^2 [cm].
     /// Converts a geometric length (units of M) to cm: L_cm = L_geom · r_g.
     double r_g() const { return r_g_; }
+    /// Physical accretion rate Mdot [g/s]: f_Edd·L_Edd/(η c²), or mdot_override
+    /// if set. η = 1 − E_isco; L_Edd = 4πG M_phys m_p c/σ_T.
+    double mdot() const { return mdot_; }
     double rho_scale() const { return rho_scale_; }
     const SimplexNoise3D& noise() const { return noise_; }
     double E_isco() const { return E_isco_; }
@@ -193,6 +196,7 @@ private:
     double mass_, spin_, r_outer_, peak_temperature_;
     double r_isco_, r_horizon_;
     double r_g_ = 0.0;     ///< Gravitational radius GM/c^2 [cm] — geometric→cm length scale
+    double mdot_ = 0.0;    ///< Physical accretion rate [g/s] — from f_Edd or mdot_override
     double r_min_;              ///< Inner bound (slightly outside horizon)
     double outer_taper_width_ = 0.0;   ///< Resolved width of the outer radial taper [M]
     VolumetricParams params_;
