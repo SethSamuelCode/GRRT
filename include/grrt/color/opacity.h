@@ -43,6 +43,13 @@ struct OpacityLUTs {
     GRRT_EXPORT double lookup_kappa_es(double rho_cgs, double T) const;
     GRRT_EXPORT double lookup_kappa_ross(double rho_cgs, double T) const;
     GRRT_EXPORT double lookup_mu(double rho_cgs, double T) const;
+
+    /// Rosseland opacity and its logarithmic gradients at (rho_cgs, T), via
+    /// central finite differences on the log-spaced table. d/dlnrho and d/dlnT
+    /// are dimensionless; convert to dkappa/drho = (d/dlnrho)/rho when needed.
+    /// Default opacity-derivative supplier for the column-BVP Newton Jacobian.
+    GRRT_EXPORT void kappa_ross_with_grad(double rho_cgs, double T,
+        double& kR, double& dkR_dlnrho, double& dkR_dlnT) const;
 };
 
 GRRT_EXPORT OpacityLUTs build_opacity_luts(double rho_min, double rho_max,

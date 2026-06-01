@@ -364,4 +364,26 @@ double OpacityLUTs::lookup_mu(double rho_cgs, double T) const {
     return v00*(1-frho)*(1-fT) + v01*(1-frho)*fT + v10*frho*(1-fT) + v11*frho*fT;
 }
 
+void OpacityLUTs::kappa_ross_with_grad(double rho_cgs, double T,
+        double& kR, double& dkR_dlnrho, double& dkR_dlnT) const {
+    kR = lookup_kappa_ross(rho_cgs, T);
+    constexpr double h = 0.01;            // step in natural-log space
+    const double ln10 = std::log(10.0);
+    // d(kappa_ross)/d ln(x) by a 2-point difference in log10 units, shifted to
+    // one-sided near a table edge so the stencil never straddles a clamped lookup
+    // (which would silently corrupt the slope -> a wrong Newton Jacobian element
+    // with no diagnostic). For an interior point this is the centered difference.
+    auto dln = [&](double lx, double lo, double hi, auto eval) -> double {
+        const double step = h / ln10;                 // h (ln) expressed in log10 units
+        double a = lx - step, b = lx + step;          // centered stencil
+        if (a < lo)      { a = lo;  b = lo + 2.0 * step; }   // forward at low edge
+        else if (b > hi) { b = hi;  a = hi - 2.0 * step; }   // backward at high edge
+        return (eval(std::pow(10.0, b)) - eval(std::pow(10.0, a))) / ((b - a) * ln10);
+    };
+    dkR_dlnrho = dln(std::log10(rho_cgs), log_rho_min, log_rho_max,
+                     [&](double r) { return lookup_kappa_ross(r, T); });
+    dkR_dlnT   = dln(std::log10(T), log_T_min, log_T_max,
+                     [&](double t) { return lookup_kappa_ross(rho_cgs, t); });
+}
+
 } // namespace grrt

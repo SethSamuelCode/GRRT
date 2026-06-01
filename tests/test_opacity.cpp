@@ -178,6 +178,58 @@ void test_lut_construction() {
     }
 }
 
+static int test_kappa_ross_gradients() {
+    std::printf("\n=== kappa_ross_with_grad: log-derivatives ===\n");
+    int fails = 0;
+    auto lut = grrt::build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
+    const double rho = 1e-3, T = 1e5;   // a smooth interior point
+
+    double kR, dlnrho, dlnT;
+    lut.kappa_ross_with_grad(rho, T, kR, dlnrho, dlnT);
+
+    // kR must match the plain lookup at the same point.
+    const double kR_plain = lut.lookup_kappa_ross(rho, T);
+    std::printf("  kR=%.4e (plain %.4e)\n", kR, kR_plain);
+    if (std::abs(kR - kR_plain) > 1e-9 * std::max(kR_plain, 1e-30)) {
+        std::printf("  FAIL: kR disagrees with lookup_kappa_ross\n"); fails++;
+    }
+
+    // Independent central difference (different step) must match the supplier's
+    // gradients — catches swapped variables / wrong denominator.
+    const double h = 0.02;
+    const double ref_dlnrho =
+        (lut.lookup_kappa_ross(rho * std::exp(h), T)
+       - lut.lookup_kappa_ross(rho * std::exp(-h), T)) / (2.0 * h);
+    const double ref_dlnT =
+        (lut.lookup_kappa_ross(rho, T * std::exp(h))
+       - lut.lookup_kappa_ross(rho, T * std::exp(-h))) / (2.0 * h);
+    std::printf("  d/dlnrho=%.4e (ref %.4e)  d/dlnT=%.4e (ref %.4e)\n",
+                dlnrho, ref_dlnrho, dlnT, ref_dlnT);
+    if (std::abs(dlnrho - ref_dlnrho) > 0.10 * std::max(std::abs(ref_dlnrho), 1e-12)
+        && std::abs(dlnrho - ref_dlnrho) > 1e-6) {
+        std::printf("  FAIL: d/dlnrho mismatch\n"); fails++;
+    }
+    if (std::abs(dlnT - ref_dlnT) > 0.10 * std::max(std::abs(ref_dlnT), 1e-12)
+        && std::abs(dlnT - ref_dlnT) > 1e-6) {
+        std::printf("  FAIL: d/dlnT mismatch\n"); fails++;
+    }
+    if (!std::isfinite(dlnrho) || !std::isfinite(dlnT)) {
+        std::printf("  FAIL: non-finite gradient\n"); fails++;
+    }
+    // Edge robustness: at the table's upper rho edge the one-sided stencil must
+    // still return a finite slope (the old centered difference would straddle a
+    // clamped lookup here).
+    const double rho_hi = std::pow(10.0, lut.log_rho_max);
+    double kEr, dErho, dErT;
+    lut.kappa_ross_with_grad(rho_hi, T, kEr, dErho, dErT);
+    std::printf("  edge rho=%.3e: d/dlnrho=%.4e d/dlnT=%.4e\n", rho_hi, dErho, dErT);
+    if (!std::isfinite(dErho) || !std::isfinite(dErT) || !std::isfinite(kEr)) {
+        std::printf("  FAIL: non-finite gradient at table edge\n"); fails++;
+    }
+    std::printf("  %s\n", fails == 0 ? "PASS" : "FAIL");
+    return fails;
+}
+
 int main() {
     test_saha_fully_ionized();
     test_saha_partially_ionized();
@@ -189,6 +241,7 @@ int main() {
     test_total_opacity();
     test_planck_nu();
     test_lut_construction();
+    failures += test_kappa_ross_gradients();
 
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
