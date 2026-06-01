@@ -140,6 +140,12 @@ GRRTContext* grrt_create(const GRRTParams* params) {
             if (params->disk_max_n_z > 0)        vp.max_n_z = params->disk_max_n_z;
             if (params->disk_refine_num_frequencies > 0)
                 vp.refine_num_frequencies = params->disk_refine_num_frequencies;
+            // Thread the physical anchor into VolumetricDisk so it can derive
+            // r_g = GM/c² and Mdot independently of the T_peak shortcut above.
+            if (params->mass_solar > 0.0)
+                vp.mass_solar = params->mass_solar;
+            if (params->eddington_fraction > 0.0)
+                vp.eddington_fraction = params->eddington_fraction;
             ctx->vol_disk = std::make_unique<grrt::VolumetricDisk>(
                 params->mass, params->spin,
                 params->disk_outer > 0 ? params->disk_outer : 30.0,

@@ -43,6 +43,12 @@ struct VolumetricParams {
     int max_n_r            = 4096;
     int max_n_z            = 1024;
     int refine_num_frequencies = 8;      ///< Frequency samples for max-envelope
+
+    // --- Physical anchor (NEW — Approach A first-principles) ---
+    double mass_solar         = 10.0;  ///< Black hole mass [M_sun]; sets r_g = GM/c^2.
+    double eddington_fraction = 0.1;   ///< f_Edd in (0,1]. Mdot = f_Edd·L_Edd/(η c²) [g/s],
+                                       ///< L_Edd = 4πG M m_p c/σ_T, η = 1−E_isco.
+    double mdot_override      = 0.0;   ///< Direct Mdot [g/s]; 0 = derive from mass_solar + f_Edd.
 };
 
 enum class WarningSeverity {
