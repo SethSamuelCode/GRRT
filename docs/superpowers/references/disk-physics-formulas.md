@@ -117,6 +117,13 @@ H ≈ c_s / Ω_z         (gas-dominated isothermal limit → Gaussian profile of
 ```
 *Standard. Used as the Newton seed and the analytic limiting-case test.*
 
+## 15b. Characteristic midplane density (opacity-table sizing) — mass-adaptive
+```
+ρ_est = Ṁ · Ω² / (6π α c_s³)        [g/cm³]      c_s² = k_B T_peak/(μ m_p),  Ω in 1/s
+```
+Standard α-disk midplane density `ρ ~ Σ/2H` with `Σ = Ṁ/(3πν)`, `ν = α c_s²/Ω`, `H = c_s/Ω`. Used to **auto-size the opacity table's density range to the black-hole mass** (the disk's real density scales `∝ M^-0.6…-0.7` — Shakura-Sunyaev — so a *fixed* table range cannot span sub-stellar→supermassive). Evaluate Ω at a representative inner radius (e.g. `r_isco`, converted to CGS via `Ω_cgs = Ω_geom·c/r_g`); `μ ≈ 0.6` (the opacity table isn't built yet). Then `rho_max = ρ_est·10²`, `rho_min = ρ_est·10⁻¹⁶` (bracketing margins: radial spread above, photosphere falloff below), `n_rho = max(20, ⌈10·log₁₀(rho_max/rho_min)⌉)` (~10 bins/decade). **Verify mass-scaling:** `ρ_est ∝ M^-5/8` (from Ṁ∝M, Ω²∝M⁻¹ at r∝r_g, c_s³∝M^-3/8) — matches SS. A post-BVP guard warns if any real density falls outside the table.
+*Composition of standard α-disk relations (Shakura-Sunyaev 1973; Frank, King & Raine). Note: the **density axis is forgiving** — opacity is ~power-law in ρ (κ_es∝ρ⁰, κ_ff/κ_bf∝ρ¹) → straight in log-ρ → log-bilinear interpolation is near-exact; the temperature axis (ionization/iron bumps) needs the fine resolution.*
+
 ## 16. Toomre Q (self-gravity check)
 ```
 Q = c_s κ_epi / (π G Σ)  ≈  c_s Ω / (π G Σ)        (κ_epi ≈ Ω for near-Keplerian)

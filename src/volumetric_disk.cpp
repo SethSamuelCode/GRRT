@@ -101,8 +101,37 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
         }
     }
 
-    std::printf("[VolumetricDisk] Building opacity LUTs...\n");
-    opacity_luts_ = build_opacity_luts(1e-18, 1e-6, 3000.0, 1e8,
+    // Mass-adaptive opacity-table density range (Approach A): the disk's real
+    // midplane density scales ~M^-0.6 (Shakura-Sunyaev), so a fixed range cannot
+    // span sub-stellar→supermassive. Estimate the characteristic midplane density
+    //   rho_est = Mdot * Omega^2 / (6π α c_s^3)   (standard α-disk: ρ ~ Σ/2H)
+    // and bracket it. See docs/superpowers/references/disk-physics-formulas.md §15b.
+    double rho_min = 1e-18, rho_max = 1e9;   // fallback if the estimate is unusable
+    {
+        using namespace constants;
+        const double Omega_geom = omega_orb(r_isco_);          // 1/M (geometric)
+        const double Omega_cgs  = Omega_geom * c_cgs / r_g_;   // 1/s
+        const double mu  = mu_fully_ionized;                   // ~0.6; table not built yet
+        const double cs  = std::sqrt(k_B * peak_temperature_ / (mu * m_p));  // cm/s
+        const double alpha = (params_.alpha > 0.0) ? params_.alpha : 0.1;
+        const double rho_est = (cs > 0.0 && r_g_ > 0.0)
+            ? mdot_ * Omega_cgs * Omega_cgs
+              / (6.0 * std::numbers::pi * alpha * cs * cs * cs)
+            : 0.0;
+        rho_mid_est_ = rho_est;
+        if (std::isfinite(rho_est) && rho_est > 0.0) {
+            // Bracket the estimate generously; the post-BVP guard (BVP plan) is
+            // the real check that the computed densities land inside the table.
+            rho_max = rho_est * 1e2;    // +2 decades: radial spread of rho_mid above the ISCO estimate
+            rho_min = rho_est * 1e-16;  // -16 decades: vertical falloff, midplane -> optically-thin atmosphere
+        } else {
+            emit(WarningSeverity::Promptable, "rho_est_invalid",
+                 "midplane density estimate invalid; using fixed opacity range [1e-18,1e9]");
+        }
+    }
+    std::printf("[VolumetricDisk] Building opacity LUTs (rho [%.2e, %.2e])...\n",
+                rho_min, rho_max);
+    opacity_luts_ = build_opacity_luts(rho_min, rho_max, 3000.0, 1e8,
                                        params_.opacity_nu_min, params_.opacity_nu_max);
 
     // --- Refinement-driven LUT construction ---

@@ -762,6 +762,38 @@ static void test_no_horizontal_bands() {
     std::printf("  PASS\n");
 }
 
+void test_opacity_lut_adaptive_range() {
+    std::printf("\n=== Opacity LUT density range is mass-adaptive ===\n");
+    const auto& d = shared_disk_default();   // 10 M_sun
+    const auto& lut = d.opacity_luts();
+    const double rho_est = d.rho_mid_estimate();
+    const double rho_max = std::pow(10.0, lut.log_rho_max);
+    const double rho_min = std::pow(10.0, lut.log_rho_min);
+    std::printf("  10 M_sun: rho_est=%.3e, table=[%.3e, %.3e]\n", rho_est, rho_min, rho_max);
+    if (!(rho_est > 0.0) || !std::isfinite(rho_est)) {
+        std::printf("  FAIL: rho_est non-physical\n"); failures++;
+    }
+    if (!(rho_min < rho_est && rho_est < rho_max)) {
+        std::printf("  FAIL: table does not bracket rho_est\n"); failures++;
+    }
+    const double decades = lut.log_rho_max - lut.log_rho_min;
+    const double bpd = (decades > 0.0) ? lut.n_rho / decades : 0.0;
+    std::printf("  n_rho=%d over %.1f decades = %.1f bins/decade\n", lut.n_rho, decades, bpd);
+    if (bpd < 8.0 || bpd > 12.0) {
+        std::printf("  FAIL: bins/decade off target (~10)\n"); failures++;
+    }
+    // Mass scaling: a supermassive BH must yield a LOWER density estimate (diffuse).
+    // T_peak (1e7 K) and f_Edd (default 0.1) held fixed — only mass_solar changes,
+    // so c_s is constant and rho_est ~ 1/M (Mdot ~ M, Omega_cgs ~ 1/M).
+    grrt::VolumetricParams p; p.mass_solar = 1e8;
+    const grrt::VolumetricDisk smbh(1.0, 0.998, 30.0, 1e7, p);
+    std::printf("  1e8 M_sun: rho_est=%.3e (must be < %.3e)\n", smbh.rho_mid_estimate(), rho_est);
+    if (!(smbh.rho_mid_estimate() < rho_est)) {
+        std::printf("  FAIL: SMBH rho_est not lower than stellar (inverse-mass scaling broken)\n");
+        failures++;
+    }
+}
+
 void test_accretion_rate() {
     std::printf("\n=== Accretion rate Mdot from f_Edd ===\n");
     const auto& d = shared_disk_default();   // mass_solar=10, f_Edd=0.1 (defaults)
@@ -814,6 +846,7 @@ int main() {
     test_smoke_parameter_sweep();  // ~5-7 min at 1e-6 DP45 (7 unique configs, no sharing)
     test_gravitational_radius();
     test_accretion_rate();
+    test_opacity_lut_adaptive_range();
     test_tau_midplane_near_target();
     test_tolerance_convergence();
     test_no_horizontal_bands();

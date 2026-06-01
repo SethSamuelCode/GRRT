@@ -162,9 +162,11 @@ The radial layer provides the column with exactly one thing: the absolute `F(r)`
 
 ## 10. Opacity LUT changes (input table)
 
-- **Range:** widen the density axis from `[1e-18, 1e-6]` to `[1e-18, 1e9] g/cm³` (`volumetric_disk.cpp:68`) so the table represents the disk's true densities; **resolution** `n_rho 100→220` (`opacity.cpp:244`) to keep ~8 bins/decade across the wider range. (`log_interp` already clamps to table edges — `opacity.cpp:221` — so widening + removing the external `[1e-18,1e-6]` clamps is safe.)
+- **Range — mass-adaptive (NOT fixed).** The disk's real density scales `∝ M^-0.6…-0.7` (Shakura-Sunyaev), so a fixed `[1e-18,1e-6]` (or any fixed) range cannot span sub-stellar→supermassive: small BHs run dense, supermassive run diffuse. Instead, **derive the range from a physical density estimate** `ρ_est = Ṁ·Ω²/(6π α c_s³)` (the standard α-disk midplane density; see reference doc §15b) computed at construction from `(M, Ṁ, T_peak, α)` — all available before the opacity build. Set `rho_max = ρ_est·10²`, `rho_min = ρ_est·10⁻¹⁶` (bracketing margins: radial spread above, photosphere falloff below). Fall back to a fixed safe range + warning if `ρ_est` is non-finite/≤0 (e.g. `Ṁ=0`). `ρ_est ∝ M^-5/8`, so the table auto-sizes per mass.
+- **Resolution — derived, ~10 bins/decade.** `n_rho = max(20, ⌈10·log₁₀(rho_max/rho_min)⌉)` inside `build_opacity_luts` — mirroring the existing `n_nu = max(20, nu_decades·10)` pattern (`opacity.cpp:243`). The density axis is forgiving (opacity ~power-law in ρ → near-exact in log-ρ); 10/decade is a clean margin with smoother Jacobian derivatives. (`log_interp` already clamps to table edges — `opacity.cpp:221` — so removing the external `[1e-18,1e-6]` clamps is safe.)
+- **Guard (deferred to the BVP plan):** after the BVP computes real densities, warn if any column's ρ falls outside `[rho_min, rho_max]` — catches an under-bracketed estimate.
 - **Derivatives:** the supplier (§8) computes `∂κ_R/∂ρ, ∂κ_R/∂T` from this table.
-- The Rosseland-mean *physics* (50-point integral, `opacity.cpp:285-299`) is unchanged; widening `n_rho` only modestly increases the one-time table build.
+- The Rosseland-mean *physics* (50-point integral, `opacity.cpp:285-299`) is unchanged.
 
 ## 11. Interface changes
 

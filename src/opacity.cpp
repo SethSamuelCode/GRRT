@@ -241,7 +241,9 @@ OpacityLUTs build_opacity_luts(double rho_min, double rho_max,
     // Scale nu bins: ~10 per decade of frequency, minimum 20
     double nu_decades = std::log10(nu_max) - std::log10(nu_min);
     luts.n_nu = std::max(20, static_cast<int>(nu_decades * 10));
-    luts.n_rho = 100;
+    // ~10 bins per decade of density, min 20 (mirrors the n_nu rule above).
+    double rho_decades = std::log10(rho_max) - std::log10(rho_min);
+    luts.n_rho = std::max(20, static_cast<int>(rho_decades * 10));
     luts.n_T = 100;
     luts.log_nu_min = std::log10(nu_min);
     luts.log_nu_max = std::log10(nu_max);

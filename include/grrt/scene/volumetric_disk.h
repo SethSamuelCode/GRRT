@@ -158,6 +158,10 @@ public:
     /// Physical accretion rate Mdot [g/s]: f_Edd·L_Edd/(η c²), or mdot_override
     /// if set. η = 1 − E_isco; L_Edd = 4πG M_phys m_p c/σ_T.
     double mdot() const { return mdot_; }
+    /// Characteristic midplane density estimate at the ISCO [g/cm^3], computed in
+    /// the constructor to size the opacity table. Returns 0 if the estimate was
+    /// unusable (Mdot<=0 or r_g<=0); the table then used the fixed fallback range.
+    double rho_mid_estimate() const { return rho_mid_est_; }
     double rho_scale() const { return rho_scale_; }
     const SimplexNoise3D& noise() const { return noise_; }
     double E_isco() const { return E_isco_; }
@@ -197,6 +201,7 @@ private:
     double r_isco_, r_horizon_;
     double r_g_ = 0.0;     ///< Gravitational radius GM/c^2 [cm] — geometric→cm length scale
     double mdot_ = 0.0;    ///< Physical accretion rate [g/s] — from f_Edd or mdot_override
+    double rho_mid_est_ = 0.0;  ///< Characteristic midplane density estimate [g/cm^3] (opacity-table sizing)
     double r_min_;              ///< Inner bound (slightly outside horizon)
     double outer_taper_width_ = 0.0;   ///< Resolved width of the outer radial taper [M]
     VolumetricParams params_;

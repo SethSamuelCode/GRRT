@@ -318,99 +318,137 @@ now, will anchor the surface density Σ in the column BVP. Exposed via mdot().
 
 ## Phase 2 — Opacity foundation
 
-### Task 4: Widen the opacity LUT to the disk's real density range
+### Task 4: Mass-adaptive opacity-table density range (derive from ρ_est)
+
+The disk's real midplane density scales `∝ M^-0.6…-0.7` (Shakura-Sunyaev), so a FIXED range cannot span sub-stellar→supermassive (small BHs run dense, supermassive run diffuse). Derive the opacity-table density range from a physical estimate `ρ_est = Ṁ·Ω²/(6π α c_s³)` computed at construction, and make `n_rho` derived (~10 bins/decade). See the verified reference doc §15b.
 
 **Files:**
-- Modify: `src/opacity.cpp:244` (n_rho)
-- Modify: `src/volumetric_disk.cpp:68` (build call site)
+- Modify: `include/grrt/scene/volumetric_disk.h` (add `rho_mid_est_` member + `rho_mid_estimate()` accessor)
+- Modify: `src/volumetric_disk.cpp` (compute ρ_est + adaptive range before the opacity build)
+- Modify: `src/opacity.cpp` (derive `n_rho` ~line 244)
 - Test: `tests/test_volumetric.cpp`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Add the `rho_mid_est_` member + accessor**
 
-Add to `tests/test_volumetric.cpp`:
-
+In `include/grrt/scene/volumetric_disk.h`, after the `mdot_` member add:
 ```cpp
-void test_opacity_lut_covers_disk_density() {
-    std::printf("\n=== Opacity LUT spans the disk's real density range ===\n");
-    const auto& d = shared_disk_default();
+    double rho_mid_est_ = 0.0;  ///< Characteristic midplane density estimate [g/cm^3] (opacity-table sizing)
+```
+After the `mdot()` accessor add:
+```cpp
+    /// Characteristic midplane density estimate [g/cm^3] used to size the opacity table.
+    double rho_mid_estimate() const { return rho_mid_est_; }
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Add to `tests/test_volumetric.cpp` and register in `main`:
+```cpp
+void test_opacity_lut_adaptive_range() {
+    std::printf("\n=== Opacity LUT density range is mass-adaptive ===\n");
+    const auto& d = shared_disk_default();   // 10 M_sun
     const auto& lut = d.opacity_luts();
-    const double rho_max_table = std::pow(10.0, lut.log_rho_max);
-    std::printf("  table rho_max = %.3e g/cm^3 (need >= 1e8)\n", rho_max_table);
-    if (rho_max_table < 1e8) {
-        std::printf("  FAIL: table ceiling below disk density\n");
-        failures++;
+    const double rho_est = d.rho_mid_estimate();
+    const double rho_max = std::pow(10.0, lut.log_rho_max);
+    const double rho_min = std::pow(10.0, lut.log_rho_min);
+    std::printf("  10 M_sun: rho_est=%.3e, table=[%.3e, %.3e]\n", rho_est, rho_min, rho_max);
+    if (!(rho_est > 0.0) || !std::isfinite(rho_est)) {
+        std::printf("  FAIL: rho_est non-physical\n"); failures++;
     }
-    // A lookup at a true midplane density (~1e6), fully ionized, must give
-    // an electron-scattering-floored Rosseland opacity in a physical range.
-    const double kR = lut.lookup_kappa_ross(1e6, 3e6);
-    std::printf("  kappa_ross(1e6, 3e6 K) = %.4f cm^2/g (expect finite, > 0)\n", kR);
-    if (!(kR > 0.0) || !std::isfinite(kR)) {
-        std::printf("  FAIL: kappa_ross at true density non-physical\n");
+    if (!(rho_min < rho_est && rho_est < rho_max)) {
+        std::printf("  FAIL: table does not bracket rho_est\n"); failures++;
+    }
+    const double decades = lut.log_rho_max - lut.log_rho_min;
+    const double bpd = (decades > 0.0) ? lut.n_rho / decades : 0.0;
+    std::printf("  n_rho=%d over %.1f decades = %.1f bins/decade\n", lut.n_rho, decades, bpd);
+    if (bpd < 8.0 || bpd > 12.0) {
+        std::printf("  FAIL: bins/decade off target (~10)\n"); failures++;
+    }
+    // Mass scaling: a supermassive BH must yield a LOWER density estimate (diffuse).
+    // T_peak held fixed to isolate the mass dependence of rho_est.
+    grrt::VolumetricParams p; p.mass_solar = 1e8;
+    const grrt::VolumetricDisk smbh(1.0, 0.998, 30.0, 1e7, p);
+    std::printf("  1e8 M_sun: rho_est=%.3e (must be < %.3e)\n", smbh.rho_mid_estimate(), rho_est);
+    if (!(smbh.rho_mid_estimate() < rho_est)) {
+        std::printf("  FAIL: SMBH rho_est not lower than stellar (inverse-mass scaling broken)\n");
         failures++;
     }
 }
 ```
 
-Register in `main`:
+- [ ] **Step 3: Build and run to verify it FAILS** (compile error — `rho_mid_estimate()` missing if Step 1 skipped; or, with the old fixed range, the table won't bracket `rho_est` and bins/decade is off).
+
+- [ ] **Step 4: Compute ρ_est + adaptive range in the constructor**
+
+In `src/volumetric_disk.cpp`, AFTER the `mdot_` block and BEFORE the `std::printf("[VolumetricDisk] Building opacity LUTs...")` / `build_opacity_luts(...)` call, insert:
 ```cpp
-    test_opacity_lut_covers_disk_density();
+    // Mass-adaptive opacity-table density range (Approach A): the disk's real
+    // midplane density scales ~M^-0.6 (Shakura-Sunyaev), so a fixed range cannot
+    // span sub-stellar→supermassive. Estimate the characteristic midplane density
+    //   rho_est = Mdot * Omega^2 / (6π α c_s^3)   (standard α-disk: ρ ~ Σ/2H)
+    // and bracket it. See docs/superpowers/references/disk-physics-formulas.md §15b.
+    double rho_min = 1e-18, rho_max = 1e9;   // fallback if the estimate is unusable
+    {
+        using namespace constants;
+        const double Omega_geom = omega_orb(r_isco_);          // 1/M (geometric)
+        const double Omega_cgs  = Omega_geom * c_cgs / r_g_;   // 1/s
+        const double mu  = mu_fully_ionized;                   // ~0.6; table not built yet
+        const double cs  = std::sqrt(k_B * peak_temperature_ / (mu * m_p));  // cm/s
+        const double alpha = (params_.alpha > 0.0) ? params_.alpha : 0.1;
+        const double rho_est = (cs > 0.0 && r_g_ > 0.0)
+            ? mdot_ * Omega_cgs * Omega_cgs
+              / (6.0 * std::numbers::pi * alpha * cs * cs * cs)
+            : 0.0;
+        rho_mid_est_ = rho_est;
+        if (std::isfinite(rho_est) && rho_est > 0.0) {
+            rho_max = rho_est * 1e2;    // radial spread above the estimate
+            rho_min = rho_est * 1e-16;  // photosphere falloff below
+        } else {
+            emit(WarningSeverity::Promptable, "rho_est_invalid",
+                 "midplane density estimate invalid; using fixed opacity range [1e-18,1e9]");
+        }
+    }
+```
+Then change the build call (currently `build_opacity_luts(1e-18, 1e-6, 3000.0, 1e8, ...)`) to use the derived range, updating the printf:
+```cpp
+    std::printf("[VolumetricDisk] Building opacity LUTs (rho [%.2e, %.2e])...\n",
+                rho_min, rho_max);
+    opacity_luts_ = build_opacity_luts(rho_min, rho_max, 3000.0, 1e8,
+                                       params_.opacity_nu_min, params_.opacity_nu_max);
 ```
 
-- [ ] **Step 2: Build and run to verify it fails**
+- [ ] **Step 5: Derive `n_rho` (~10 bins/decade) in `opacity.cpp`**
 
-Run:
-```powershell
-cmake --build build --config Release --target test-volumetric
-./build/Release/test-volumetric.exe
-```
-Expected: `test_opacity_lut_covers_disk_density` prints `table rho_max = 1.000e-06` and `FAIL: table ceiling below disk density`.
-
-- [ ] **Step 3: Bump the table resolution in `opacity.cpp`**
-
-`src/opacity.cpp:244` — change:
+In `src/opacity.cpp`, change (around line 244):
 ```cpp
     luts.n_rho = 100;
 ```
-to:
+to (mirroring the `n_nu` rule on the lines just above):
 ```cpp
-    luts.n_rho = 220;   // ~8 bins/decade across the widened [1e-18,1e9] range
+    // ~10 bins per decade of density, min 20 (mirrors the n_nu rule above).
+    double rho_decades = std::log10(rho_max) - std::log10(rho_min);
+    luts.n_rho = std::max(20, static_cast<int>(rho_decades * 10));
 ```
 
-- [ ] **Step 4: Widen the table range at the disk's call site**
+- [ ] **Step 6: Rebuild and run to verify it PASSES**
 
-`src/volumetric_disk.cpp:68` — change:
-```cpp
-    opacity_luts_ = build_opacity_luts(1e-18, 1e-6, 3000.0, 1e8,
-                                       params_.opacity_nu_min, params_.opacity_nu_max);
-```
-to:
-```cpp
-    opacity_luts_ = build_opacity_luts(1e-18, 1e9, 3000.0, 1e8,
-                                       params_.opacity_nu_min, params_.opacity_nu_max);
-```
+Expected: `test_opacity_lut_adaptive_range` PASSes — `rho_est ≈ 3e2` for the 10 M_sun disk, table brackets it (~`[3e-14, 3e4]`), ~10 bins/decade; the 1e8 M_sun disk's `rho_est` far lower (~3e-5). The SMBH disk adds ~1 min. Pre-existing failures (`test_tau_midplane_near_target`, banding 0.570) unchanged.
 
-- [ ] **Step 5: Rebuild and run to verify it passes**
-
-Run:
-```powershell
-cmake --build build --config Release --target test-volumetric
-./build/Release/test-volumetric.exe
-```
-Expected: `test_opacity_lut_covers_disk_density` prints `table rho_max = 1.000e+09`, no FAIL. Note: the current `solve_column` still clamps lookups to `1e-6`, so the rendered disk is essentially unchanged (the widened table only matters once the BVP plan removes those clamps).
-
-- [ ] **Step 6: Hand the commit message to the user**
+- [ ] **Step 7: Hand the commit message to the user**
 
 ```powershell
-git add src/opacity.cpp src/volumetric_disk.cpp tests/test_volumetric.cpp
+git add include/grrt/scene/volumetric_disk.h src/volumetric_disk.cpp src/opacity.cpp tests/test_volumetric.cpp
 ```
 Commit message for the user:
 ```
-feat(opacity): widen disk opacity LUT to the real density range [1e-18,1e9]
+feat(opacity): mass-adaptive opacity-table density range from rho_est
 
-The table spanned only [1e-18,1e-6] g/cm^3, far below the disk's true ~1e6
-density. Widen to 1e9 and bump n_rho 100->220 (~8 bins/decade). Additive
-foundation for the column BVP; current solve_column still clamps, so rendered
-output is unchanged.
+The disk's real midplane density scales ~M^-0.6 (Shakura-Sunyaev), so a fixed
+table range cannot span sub-stellar to supermassive black holes. Derive the
+range from a physical estimate rho_est = Mdot*Omega^2/(6pi*alpha*c_s^3) at
+construction (rho_max=rho_est*1e2, rho_min=rho_est*1e-16), and derive n_rho at
+~10 bins/decade (mirroring the n_nu rule). Falls back to a fixed range with a
+warning if the estimate is unusable. Exposed via rho_mid_estimate().
 ```
 
 ---
