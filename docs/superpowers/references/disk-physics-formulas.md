@@ -158,13 +158,15 @@ The integrator works in geometric units (`G=c=1`, `M=1`); the column physics is 
 - **Optical depth must use CGS lengths:** `τ = ∫ κ[cm²/g] ρ[g/cm³] dz_cm[cm]`. Using geometric `dz` against CGS `κρ` is the original root-cause bug (no length scale) Approach A fixes.
 
 ## 20. Vertical-structure BVP (the Approach-A column solver)
-The grey vertical-structure two-point boundary value problem, **verified against the published open-source formulation** (see credits below). Independent variable: height `z ∈ [0, z₀]` (midplane → surface); solved in practice on the **column-mass fraction** `q = 1 − Σ/Σ₀ ∈ [0,1]`. Variables `P, Q(≡F), T, Σ`; `ρ` from the EOS (§10); `ω_k ≡ Ω_z`.
+The grey vertical-structure two-point boundary value problem, **verified against the published open-source formulation** (see credits below). Independent variable: height `z ∈ [0, z₀]` (midplane → surface); solved in practice on the **column-mass fraction** `q = 1 − Σ/Σ₀ ∈ [0,1]`. Variables `P, Q(≡F), T, Σ`; `ρ` from the EOS (§10).
+
+⚠ **Two distinct frequencies** (the published Newtonian reference uses a single `ω_k` for both; for Kerr they SPLIT and must NOT be conflated): **`Ω`** = orbital angular velocity (drives the viscous *shear* → heating); **`Ω_z`** = vertical epicyclic frequency (the *vertical gravity* `g_z=Ω_z²z`). Newtonian: `Ω = Ω_z`. Kerr: `Ω_z² = Ω²(1 − 4a√M/r^{3/2} + 3a²/r²) ≠ Ω²`. (Code: `omega_orb` vs `omega_z`.)
 
 **Four ODEs:**
 ```
-dP/dz = −ρ ω_k² z                                   hydrostatic (§7)
-dQ/dz = (3/2) ω_k α P                               viscous flux generation (§8)
-dlnT/dlnP = ∇_rad = 3 κ_R P Q /(16 σ ω_k² z T⁴)     radiative diffusion (§9, equivalent to dT⁴/dτ = 3F/4σ)
+dP/dz = −ρ Ω_z² z                                   hydrostatic — vertical gravity uses Ω_z (§7)
+dQ/dz = α P · |r dΩ/dr|                             viscous flux generation — EXACT Kerr shear (Newtonian (3/2)Ω only when a=0) (§8)
+dlnT/dlnP = ∇_rad = 3 κ_R P Q /(16 σ Ω_z² z T⁴)     radiative diffusion (§9, equivalent to dT⁴/dτ = 3F/4σ)
 dΣ/dz = −2 ρ                                        column mass (factor 2 = both disc faces)
 ```
 **Five boundary conditions** (3 at the surface + the surface-pressure condition + 1 at the midplane):
@@ -173,7 +175,7 @@ midplane  z=0 :  Q = 0                              flux symmetry
 surface   z=z₀:  Q = σ_SB T_eff⁴                    all flux escaped
                  T = T_eff                          photosphere temperature
                  Σ = 0                              no mass above the surface
-                 P = (2/3) ω_k² z₀ / κ_R            ⚠ surface pressure from τ=2/3 (g·τ/κ, g=ω_k²z₀)
+                 P = (2/3) Ω_z² z₀ / κ_R            ⚠ surface pressure from τ=2/3 (g·τ/κ, g=Ω_z²z₀)
 ```
 **Unknowns balance:** midplane `(P₀, T₀, Σ₀)` + thickness `z₀` = 4, matched by the 4 surface conditions. **Emergent outputs:** `Σ₀` (surface density → `ρ_mid`), `z₀` (= `z_max`), `τ_mid = ∫κρ dz`, and the `ρ(z)`, `T(z)` profiles. The surface-pressure BC is the trap: it is *where `τ=2/3` enters as a constraint* and is what pins the free parameters — easy to omit.
 

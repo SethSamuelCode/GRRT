@@ -119,7 +119,7 @@ The radial layer provides the column with exactly one thing: the absolute `F(r)`
 **Four ODEs (all cgs):**
 ```
 (1) Hydrostatic:         dP/dz = −ρ · Ω_z²(r) · z
-(2) Viscous heating:     dQ/dz = (3/2) · α · Ω_z(r) · P
+(2) Viscous heating:     dQ/dz = α · P · |r dΩ/dr|   (EXACT Kerr shear; = (3/2)αΩP only for a=0)
 (3) Radiative diffusion: dlnT/dlnP = ∇_rad = 3 κ_R P Q /(16 σ Ω_z² z T⁴)   [grey; ≡ dT⁴/dτ = 3F/4σ]
 (4) Column mass:         dΣ/dz = −2 ρ
 EOS (algebraic):         P = ρ k_B T / (μ(ρ,T) m_p) + (1/3) a T⁴  →  ρ = (P − aT⁴/3)·μ m_p/(k_B T)

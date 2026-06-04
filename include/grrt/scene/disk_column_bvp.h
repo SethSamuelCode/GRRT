@@ -10,7 +10,7 @@ namespace grrt {
 /// Inputs for one disc column's vertical-structure BVP (all CGS).
 struct ColumnInputs {
     double T_eff;        ///< effective temperature [K]
-    double omega_orb;    ///< orbital angular velocity Ω [1/s] (viscous shear)
+    double shear;        ///< Kerr shear rate |r dΩ/dr| [1/s] (drives viscous heating; exact, not (3/2)Ω)
     double omega_z;      ///< vertical epicyclic frequency Ω_z [1/s] (gravity)
     double alpha;        ///< Shakura-Sunyaev viscosity
     double rho_mid_guess;///< midplane density estimate [g/cm^3] (seed; e.g. rho_est)
@@ -45,6 +45,11 @@ GRRT_EXPORT double eos_rho(double P, double T);
 /// Solve the grey vertical-structure BVP for one column (Newton relaxation).
 GRRT_EXPORT ColumnBVPSolution solve_column_bvp(const ColumnInputs& in,
                                                const OpacityLUTs& opacity);
+
+/// Test hook: build a crude EOS-valid state and evaluate the BVP residual on it.
+/// Fills U (length 4N+2) and R (length 4N+2). For unit tests only.
+GRRT_EXPORT void column_residual_test(const ColumnInputs& in, const OpacityLUTs& op,
+                                      std::vector<double>& U, std::vector<double>& R);
 
 } // namespace grrt
 

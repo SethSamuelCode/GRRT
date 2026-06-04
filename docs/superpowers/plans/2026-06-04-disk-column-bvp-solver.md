@@ -69,7 +69,7 @@ namespace grrt {
 /// Inputs for one disc column's vertical-structure BVP (all CGS).
 struct ColumnInputs {
     double T_eff;        ///< effective temperature [K]
-    double omega_orb;    ///< orbital angular velocity Ω [1/s] (viscous shear)
+    double shear;    ///< Kerr shear rate |r dΩ/dr| [1/s] (drives viscous heating; exact, not (3/2)Ω)
     double omega_z;      ///< vertical epicyclic frequency Ω_z [1/s] (gravity)
     double alpha;        ///< Shakura-Sunyaev viscosity
     double rho_mid_guess;///< midplane density estimate [g/cm^3] (seed; e.g. rho_est)
@@ -156,7 +156,7 @@ static void check(const char* name, double got, double expected, double rel_tol)
 static void test_scaffold() {
     std::printf("\n=== scaffold: solve_column_bvp links and returns ===\n");
     grrt::ColumnInputs in{};
-    in.T_eff = 1e5; in.omega_orb = 1e3; in.omega_z = 1e3;
+    in.T_eff = 1e5; in.shear = 1e3; in.omega_z = 1e3;
     in.alpha = 0.1; in.rho_mid_guess = 1.0; in.n_nodes = 16;
     auto lut = grrt::build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
     auto sol = grrt::solve_column_bvp(in, lut);
@@ -304,7 +304,7 @@ using namespace grrt::constants;
 // dX/dq for each ODE at a node, given local state. dz/dq = Sigma0/(2 rho).
 struct Deriv { double dP, dQ, dT, dz; };
 Deriv node_deriv(double P, double Q, double T, double z,
-                 double Sigma0, double alpha, double omega_orb, double omega_z,
+                 double Sigma0, double alpha, double shear, double omega_z,
                  const grrt::OpacityLUTs& op) {
     const double rho = grrt::eos_rho(P, T);
     const double r = (rho > 0.0) ? rho : 1e-30;
@@ -313,7 +313,7 @@ Deriv node_deriv(double P, double Q, double T, double z,
     Deriv d;
     d.dz = dz_dq;
     d.dP = (-r * omega_z*omega_z * z) * dz_dq;               // dP/dz · dz/dq
-    d.dQ = ( (3.0/2.0) * alpha * omega_orb * P) * dz_dq;     // dQ/dz · dz/dq
+    d.dQ = ( alpha * shear * P) * dz_dq;     // dQ/dz · dz/dq; shear = exact Kerr |r dΩ/dr|
     d.dT = (-3.0 * kR * r * Q / (16.0 * sigma_SB * T*T*T)) * dz_dq;
     return d;
 }
@@ -333,8 +333,8 @@ static void column_residual(const std::vector<double>& U, const ColumnInputs& in
     int row = 0;
     // Interior ODE residuals (trapezoidal): X_{i+1} - X_i - dq/2 (f_i + f_{i+1}) = 0
     for (int i = 0; i < N - 1; ++i) {
-        Deriv di = node_deriv(P(i),   Q(i),   T(i),   z(i),   Sigma0, in.alpha, in.omega_orb, in.omega_z, op);
-        Deriv dj = node_deriv(P(i+1), Q(i+1), T(i+1), z(i+1), Sigma0, in.alpha, in.omega_orb, in.omega_z, op);
+        Deriv di = node_deriv(P(i),   Q(i),   T(i),   z(i),   Sigma0, in.alpha, in.shear, in.omega_z, op);
+        Deriv dj = node_deriv(P(i+1), Q(i+1), T(i+1), z(i+1), Sigma0, in.alpha, in.shear, in.omega_z, op);
         R[row++] = P(i+1) - P(i) - 0.5*dq*(di.dP + dj.dP);
         R[row++] = Q(i+1) - Q(i) - 0.5*dq*(di.dQ + dj.dQ);
         R[row++] = T(i+1) - T(i) - 0.5*dq*(di.dT + dj.dT);
@@ -378,7 +378,7 @@ static void test_residual_count_finite() {
     // test hook: add `GRRT_EXPORT void column_residual_test(const ColumnInputs&,
     // const OpacityLUTs&, std::vector<double>& U, std::vector<double>& R);`
     // that builds the seed (Task 4's seeding) and evaluates the residual.
-    grrt::ColumnInputs in{}; in.T_eff = 1e5; in.omega_orb = 1e3; in.omega_z = 1e3;
+    grrt::ColumnInputs in{}; in.T_eff = 1e5; in.shear = 1e3; in.omega_z = 1e3;
     in.alpha = 0.1; in.rho_mid_guess = 1.0; in.n_nodes = 32;
     auto lut = grrt::build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
     std::vector<double> U, R;
@@ -423,7 +423,7 @@ Add `build_seed(in) → U` (anonymous namespace + exposed via `column_residual_t
 ```cpp
 static void test_numerical_jacobian_finite() {
     std::printf("\n=== numerical Jacobian: finite, correct shape ===\n");
-    grrt::ColumnInputs in{}; in.T_eff = 1e5; in.omega_orb = 1e3; in.omega_z = 1e3;
+    grrt::ColumnInputs in{}; in.T_eff = 1e5; in.shear = 1e3; in.omega_z = 1e3;
     in.alpha = 0.1; in.rho_mid_guess = 1.0; in.n_nodes = 24;
     auto lut = grrt::build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
     // Exposed hook: column_numerical_jacobian_test fills a dense (4N+2)^2 matrix.
@@ -468,7 +468,7 @@ static void test_converges_gas_limit() {
     using namespace grrt::constants;
     grrt::ColumnInputs in{};
     in.T_eff = 5e4;              // cool → gas-pressure-dominated
-    in.omega_orb = 2e3; in.omega_z = 2e3; in.alpha = 0.1;
+    in.shear = 2e3; in.omega_z = 2e3; in.alpha = 0.1;
     in.rho_mid_guess = 1e-2; in.n_nodes = 200; in.tol = 1e-8;
     auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
     auto s = grrt::solve_column_bvp(in, lut);
@@ -525,7 +525,7 @@ Jacobian (analytic engine follows in Task 7).
 static void test_physics_invariants() {
     std::printf("\n=== physics invariants on the converged column ===\n");
     using namespace grrt::constants;
-    grrt::ColumnInputs in{}; in.T_eff = 5e4; in.omega_orb = 2e3; in.omega_z = 2e3;
+    grrt::ColumnInputs in{}; in.T_eff = 5e4; in.shear = 2e3; in.omega_z = 2e3;
     in.alpha = 0.1; in.rho_mid_guess = 1e-2; in.n_nodes = 200;
     auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
     auto s = grrt::solve_column_bvp(in, lut);
@@ -540,7 +540,7 @@ static void test_physics_invariants() {
     for (size_t i = 1; i < s.z.size(); ++i) {
         const double dz = std::abs(s.z[i] - s.z[i-1]);
         const double pbar = 0.5*(s.P[i] + s.P[i-1]);
-        dissip += 1.5 * in.alpha * in.omega_orb * pbar * dz;
+        dissip += in.alpha * in.shear * pbar * dz;
     }
     check("∫(3/2)αΩP dz = Q_surf", dissip, Q_surf, 5e-2);
     // Photosphere: optical depth from surface to where T=T_eff is ~2/3
@@ -577,7 +577,7 @@ optically-thick tau_mid. Validates the residual/BC assembly end to end.
 ```cpp
 static void test_analytic_vs_numerical_jacobian() {
     std::printf("\n=== analytic Jacobian matches numerical (cross-check) ===\n");
-    grrt::ColumnInputs in{}; in.T_eff = 5e4; in.omega_orb = 2e3; in.omega_z = 2e3;
+    grrt::ColumnInputs in{}; in.T_eff = 5e4; in.shear = 2e3; in.omega_z = 2e3;
     in.alpha = 0.1; in.rho_mid_guess = 1e-2; in.n_nodes = 24;
     auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
     std::vector<double> Ja, Jn; int n = 0;
@@ -632,7 +632,7 @@ static void test_convergence_sweep() {
     const double oms[]   = {5e2, 2e3, 8e3};
     int ok = 0, total = 0;
     for (double Te : Teffs) for (double om : oms) {
-        grrt::ColumnInputs in{}; in.T_eff = Te; in.omega_orb = om; in.omega_z = om;
+        grrt::ColumnInputs in{}; in.T_eff = Te; in.shear = om; in.omega_z = om;
         in.alpha = 0.1; in.rho_mid_guess = 1e-2; in.n_nodes = 200;
         auto s = grrt::solve_column_bvp(in, lut);
         total++; if (s.converged) ok++;
@@ -647,7 +647,7 @@ static void test_convergence_sweep() {
 static void test_radiation_thickens() {
     std::printf("\n=== radiation-dominated column is thicker than gas-dominated ===\n");
     auto lut = grrt::build_opacity_luts(1e-16, 1e6, 3000.0, 1e8);
-    grrt::ColumnInputs cold{}; cold.T_eff=2e4; cold.omega_orb=2e3; cold.omega_z=2e3;
+    grrt::ColumnInputs cold{}; cold.T_eff=2e4; cold.shear=2e3; cold.omega_z=2e3;
     cold.alpha=0.1; cold.rho_mid_guess=1e-2; cold.n_nodes=200;
     grrt::ColumnInputs hot = cold; hot.T_eff = 1e6;   // radiation-dominated
     auto sc = grrt::solve_column_bvp(cold, lut);

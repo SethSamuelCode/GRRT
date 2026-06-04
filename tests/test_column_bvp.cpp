@@ -32,7 +32,7 @@ static void test_eos() {
 static void test_scaffold() {
     std::printf("\n=== scaffold: solve_column_bvp links and returns ===\n");
     grrt::ColumnInputs in{};
-    in.T_eff = 1e5; in.omega_orb = 1e3; in.omega_z = 1e3;
+    in.T_eff = 1e5; in.shear = 1e3; in.omega_z = 1e3;
     in.alpha = 0.1; in.rho_mid_guess = 1.0; in.n_nodes = 16;
     auto lut = grrt::build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
     auto sol = grrt::solve_column_bvp(in, lut);
@@ -40,9 +40,41 @@ static void test_scaffold() {
     if (sol.q.size() != 16) { std::printf("  FAIL: grid size\n"); failures++; }
 }
 
+static void test_residual_hydrostatic_identity() {
+    std::printf("\n=== residual: hydrostatic identity on a Gaussian column ===\n");
+    using namespace grrt::constants;
+    const double T = 1e5, rho_mid = 1.0, omega_z = 1e3;
+    const double cs2 = k_B * T / (mu_fully_ionized * m_p);
+    const double H = std::sqrt(cs2) / omega_z;
+    const double dz = 0.02 * H;   // finer FD step: O(dz^2) truncation well under the 1e-3 tolerance
+    auto rho = [&](double z){ return rho_mid * std::exp(-z*z/(2*H*H)); };
+    auto P   = [&](double z){ return rho(z) * cs2; };   // isothermal gas
+    const double z = 1.5 * H;
+    const double dPdz = (P(z+dz) - P(z-dz)) / (2*dz);
+    const double resid = dPdz + rho(z) * omega_z*omega_z * z;
+    std::printf("  hydrostatic resid=%.3e (rel %.3e)\n", resid, P(z)/H);
+    if (std::abs(resid) > 1e-3 * (P(z)/H)) { std::printf("  FAIL\n"); failures++; }
+}
+
+static void test_residual_count_finite() {
+    std::printf("\n=== residual: length 4N+2, all finite ===\n");
+    grrt::ColumnInputs in{}; in.T_eff = 1e5; in.shear = 1e3; in.omega_z = 1e3;
+    in.alpha = 0.1; in.rho_mid_guess = 1.0; in.n_nodes = 32;
+    auto lut = grrt::build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
+    std::vector<double> U, R;
+    grrt::column_residual_test(in, lut, U, R);
+    std::printf("  U.size=%zu R.size=%zu (expect %d)\n", U.size(), R.size(), 4*32+2);
+    if ((int)R.size() != 4*32+2) { std::printf("  FAIL: residual length\n"); failures++; }
+    if ((int)U.size() != 4*32+2) { std::printf("  FAIL: state length\n"); failures++; }
+    bool finite = true; for (double x : R) if (!std::isfinite(x)) finite = false;
+    if (!finite) { std::printf("  FAIL: non-finite residual\n"); failures++; }
+}
+
 int main() {
     test_eos();
     test_scaffold();
+    test_residual_hydrostatic_identity();
+    test_residual_count_finite();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
