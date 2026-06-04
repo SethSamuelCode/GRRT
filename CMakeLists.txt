@@ -29,6 +29,7 @@ add_library(grrt SHARED
     src/opacity.cpp
     src/noise.cpp
     src/volumetric_disk.cpp
+    src/disk_column_bvp.cpp
     src/fits_writer.cpp
     src/romberg_step.cpp
     src/sobol_sampler.cpp
@@ -157,6 +158,9 @@ target_link_libraries(test-disk-step-entry PRIVATE grrt)
 
 add_executable(test-raymarch-step-control tests/test_raymarch_step_control.cpp)
 target_link_libraries(test-raymarch-step-control PRIVATE grrt)
+
+add_executable(test-column-bvp tests/test_column_bvp.cpp)
+target_link_libraries(test-column-bvp PRIVATE grrt)
 
 # Diagnostic tool: dump the volumetric-disk LUTs to CSV (banding investigation).
 add_executable(dump-disk-lut tools/dump_disk_lut.cpp)

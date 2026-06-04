@@ -1,0 +1,51 @@
+#ifndef GRRT_DISK_COLUMN_BVP_H
+#define GRRT_DISK_COLUMN_BVP_H
+
+#include "grrt/color/opacity.h"
+#include "grrt_export.h"
+#include <vector>
+
+namespace grrt {
+
+/// Inputs for one disc column's vertical-structure BVP (all CGS).
+struct ColumnInputs {
+    double T_eff;        ///< effective temperature [K]
+    double omega_orb;    ///< orbital angular velocity Ω [1/s] (viscous shear)
+    double omega_z;      ///< vertical epicyclic frequency Ω_z [1/s] (gravity)
+    double alpha;        ///< Shakura-Sunyaev viscosity
+    double rho_mid_guess;///< midplane density estimate [g/cm^3] (seed; e.g. rho_est)
+    int    n_nodes = 150;///< grid points on q ∈ [0,1]
+    int    max_iters = 60;
+    double tol = 1e-8;   ///< Newton convergence: max |ΔU/U|
+};
+
+/// Converged vertical structure on the column-mass-fraction grid q ∈ [0,1]
+/// (index 0 = midplane, n_nodes-1 = surface). All CGS.
+struct ColumnBVPSolution {
+    std::vector<double> q;     ///< grid coordinate [0,1]
+    std::vector<double> z;     ///< height [cm]
+    std::vector<double> P;     ///< pressure [erg/cm^3]
+    std::vector<double> Q;     ///< vertical flux [erg/cm^2/s]
+    std::vector<double> T;     ///< temperature [K]
+    std::vector<double> rho;   ///< density [g/cm^3]
+    double z0 = 0.0;           ///< disc half-thickness [cm]   (= z_max)
+    double Sigma0 = 0.0;       ///< full surface density Σ = 2∫₀^{z₀} ρ dz [g/cm^2]
+    double tau_mid = 0.0;      ///< vertical optical depth midplane↔surface
+    bool   converged = false;  ///< true if Newton met tol
+    int    iters = 0;
+    double final_residual = 0.0;
+    bool   used_fallback = false; ///< true if the analytic-profile fallback was used
+};
+
+/// EOS: density from total pressure and temperature.
+/// ρ = (P − a T⁴/3) · μ m_p / (k_B T). Returns <= 0 if radiation pressure
+/// exceeds total pressure (non-physical input) — caller must guard.
+GRRT_EXPORT double eos_rho(double P, double T);
+
+/// Solve the grey vertical-structure BVP for one column (Newton relaxation).
+GRRT_EXPORT ColumnBVPSolution solve_column_bvp(const ColumnInputs& in,
+                                               const OpacityLUTs& opacity);
+
+} // namespace grrt
+
+#endif

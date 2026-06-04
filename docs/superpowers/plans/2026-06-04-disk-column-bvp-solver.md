@@ -88,16 +88,13 @@ struct ColumnBVPSolution {
     std::vector<double> T;     ///< temperature [K]
     std::vector<double> rho;   ///< density [g/cm^3]
     double z0 = 0.0;           ///< disc half-thickness [cm]   (= z_max)
-    double Sigma0 = 0.0;       ///< midplane column mass / surface density [g/cm^2]
+    double Sigma0 = 0.0;       ///< full surface density Σ = 2∫₀^{z₀} ρ dz [g/cm^2]
     double tau_mid = 0.0;      ///< vertical optical depth midplane↔surface
     bool   converged = false;  ///< true if Newton met tol
     int    iters = 0;
     double final_residual = 0.0;
     bool   used_fallback = false; ///< true if the analytic-profile fallback was used
 };
-
-/// Mean molecular weight for the grey model (fully-ionized solar-ish).
-inline constexpr double kBVP_mu = 0.6;
 
 /// EOS: density from total pressure and temperature.
 /// ρ = (P − a T⁴/3) · μ m_p / (k_B T). Returns <= 0 if radiation pressure
@@ -222,7 +219,7 @@ static void test_eos() {
     using namespace grrt::constants;
     // Gas-pressure-dominated point: choose rho, T; compute P_gas+P_rad; invert.
     const double rho = 1.0, T = 1e5;
-    const double P = rho * k_B * T / (grrt::kBVP_mu * m_p) + (a_rad / 3.0) * std::pow(T, 4);
+    const double P = rho * k_B * T / (grrt::constants::mu_fully_ionized * m_p) + (a_rad / 3.0) * std::pow(T, 4);
     check("eos_rho inverts", grrt::eos_rho(P, T), rho, 1e-12);
     // Radiation pressure exceeding total → non-physical → <= 0.
     const double P_small = (a_rad / 3.0) * std::pow(T, 4) * 0.5; // below P_rad
@@ -245,7 +242,7 @@ double eos_rho(double P, double T) {
     using namespace constants;
     const double P_gas = P - (a_rad / 3.0) * T * T * T * T;   // P - P_rad
     if (P_gas <= 0.0 || T <= 0.0) return 0.0;                 // non-physical
-    return P_gas * kBVP_mu * m_p / (k_B * T);
+    return P_gas * constants::mu_fully_ionized * m_p / (k_B * T);
 }
 ```
 
@@ -281,7 +278,7 @@ static void test_residual_hydrostatic_gaussian() {
     std::printf("\n=== residual: hydrostatic row small on Gaussian column ===\n");
     using namespace grrt::constants;
     const double T = 1e5, rho_mid = 1.0, omega_z = 1e3;
-    const double cs2 = k_B * T / (grrt::kBVP_mu * m_p);
+    const double cs2 = k_B * T / (grrt::constants::mu_fully_ionized * m_p);
     const double H = std::sqrt(cs2) / omega_z;
     // Sample a Gaussian column, compute the discrete hydrostatic residual
     // dP/dz + rho*omega_z^2*z at an interior point; must be ~0 to truncation.
@@ -480,7 +477,7 @@ static void test_converges_gas_limit() {
     if (!s.converged) { std::printf("  FAIL: did not converge\n"); failures++; }
     // Gas-dominated: density profile ~ Gaussian of width H=c_s/Ω_z. Check that
     // the half-density height ≈ H·sqrt(2 ln 2).
-    const double cs = std::sqrt(k_B * in.T_eff / (grrt::kBVP_mu * m_p));
+    const double cs = std::sqrt(k_B * in.T_eff / (grrt::constants::mu_fully_ionized * m_p));
     const double H = cs / in.omega_z;
     // find z where rho = rho_mid/2 (rho_mid at midplane index 0)
     const double rho_mid = s.rho.front();
@@ -721,4 +718,4 @@ Expected: unchanged (the 2 pre-existing `test-volumetric` failures remain; `disk
 
 **Placeholder scan:** Task 3 explicitly flags the `Σ0`/row-count subtlety and instructs the executor to land on the well-posed `4N+2` formulation with an `assert(row==4N+2)` and the count test as the gate — this is a *resolved* decision with a verification, not a "TBD". All other code steps show complete code. The analytic-Jacobian derivation (Task 7) is gated by the cross-check test rather than hand-writing every partial — deliberate (the test is the correctness arbiter), consistent with the option-③ decision.
 
-**Type consistency:** `ColumnInputs`/`ColumnBVPSolution` fields (Task 1) used identically in Tasks 2–9. `eos_rho`, `solve_column_bvp`, the `*_test` hooks (`column_residual_test`, `column_numerical_jacobian_test`, `column_jacobians_test`) are referenced consistently between their defining task and the tests. `kBVP_mu` constant used in EOS + seed + tests.
+**Type consistency:** `ColumnInputs`/`ColumnBVPSolution` fields (Task 1) used identically in Tasks 2–9. `eos_rho`, `solve_column_bvp`, the `*_test` hooks (`column_residual_test`, `column_numerical_jacobian_test`, `column_jacobians_test`) are referenced consistently between their defining task and the tests. `constants::mu_fully_ionized` constant used in EOS + seed + tests.
