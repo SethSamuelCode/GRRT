@@ -15,6 +15,20 @@ static void check(const char* name, double got, double expected, double rel_tol)
     if (!pass) failures++;
 }
 
+static void test_eos() {
+    std::printf("\n=== EOS: rho from (P,T) ===\n");
+    using namespace grrt::constants;
+    // Gas-pressure-dominated point: choose rho, T; compute P_gas+P_rad; invert.
+    const double rho = 1.0, T = 1e5;
+    const double P = rho * k_B * T / (mu_fully_ionized * m_p) + (a_rad / 3.0) * std::pow(T, 4);
+    check("eos_rho inverts", grrt::eos_rho(P, T), rho, 1e-12);
+    // Radiation pressure exceeding total → non-physical → <= 0.
+    const double P_small = (a_rad / 3.0) * std::pow(T, 4) * 0.5; // below P_rad
+    if (grrt::eos_rho(P_small, T) > 0.0) {
+        std::printf("  FAIL: should be <=0 when P < P_rad\n"); failures++;
+    }
+}
+
 static void test_scaffold() {
     std::printf("\n=== scaffold: solve_column_bvp links and returns ===\n");
     grrt::ColumnInputs in{};
@@ -27,6 +41,7 @@ static void test_scaffold() {
 }
 
 int main() {
+    test_eos();
     test_scaffold();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
