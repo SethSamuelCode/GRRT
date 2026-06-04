@@ -114,20 +114,23 @@ The radial layer provides the column with exactly one thing: the absolute `F(r)`
 
 ## 7. The column BVP (per r ≥ r_isco)
 
-**Unknowns** per τ-grid node: `ρ, T, F, z`. `P` and `κ_R` are algebraic in `(ρ,T)`.
+**Formulation verified against Hubeny 1990 / Tavleev, Lipunova & Malanchev 2023** (open vertical-structure code; see reference-doc §20). Variables `P, Q(≡F), T, Σ`; `ρ` from EOS; solved on the **column-mass fraction** `q = 1 − Σ/Σ₀ ∈ [0,1]` (midplane→surface).
 
-**Relations (all cgs):**
+**Four ODEs (all cgs):**
 ```
-(1) Hydrostatic:         dP/dz = −ρ · Ω_z²(r) · z                       [vertical tidal gravity]
-(2) Viscous heating:     dF/dz = (3/2) · α · Ω(r) · P                   [Shakura–Sunyaev dissipation]
-(3) Radiative diffusion: dT/dz = −3 κ_R(ρ,T) ρ F / (4 a c T³)          [grey, Rosseland κ_R]
-(4) EOS (algebraic):     P     = ρ k_B T / (μ(ρ,T) m_p) + (1/3) a T⁴   [gas + radiation]
-(5) Optical depth:       dτ/dz = −κ_R(ρ,T) · ρ                          [defines τ_R grid; surface τ=0]
+(1) Hydrostatic:         dP/dz = −ρ · Ω_z²(r) · z
+(2) Viscous heating:     dQ/dz = (3/2) · α · Ω_z(r) · P
+(3) Radiative diffusion: dlnT/dlnP = ∇_rad = 3 κ_R P Q /(16 σ Ω_z² z T⁴)   [grey; ≡ dT⁴/dτ = 3F/4σ]
+(4) Column mass:         dΣ/dz = −2 ρ
+EOS (algebraic):         P = ρ k_B T / (μ(ρ,T) m_p) + (1/3) a T⁴  →  ρ = (P − aT⁴/3)·μ m_p/(k_B T)
 ```
 
-**Boundary conditions (two-point):**
-- **Surface** (photosphere `τ_R = 2/3`): `T = T_eff(r)`, `F = σ_SB T_eff⁴`
-- **Midplane** (`z = 0`): `F = 0`, `dT/dz = 0`   (reflection symmetry)
+**Five boundary conditions** (3 surface + surface-pressure + 1 midplane):
+```
+midplane z=0 :  Q = 0                                  (flux symmetry)
+surface  z=z₀:  Q = σ_SB T_eff⁴ ;  T = T_eff ;  Σ = 0 ;  P = (2/3) Ω_z² z₀ / κ_R
+```
+The **surface-pressure BC** `P=(2/3)Ω_z²z₀/κ_R` is where `τ=2/3` enters; it pins the free parameters. **Unknowns** `(P₀,T₀,Σ₀,z₀)` balance the 4 surface conditions. **Emergent:** `Σ₀`(→ρ_mid), `z₀`(=z_max), `τ_mid`, profiles.
 
 **Opacity:** grey Rosseland mean `κ_R(ρ,T)` from the existing `kappa_ross_lut` (`opacity.cpp:285-299`), widened in density range (§10). Frequency-dependence lives only in the *rendering* transfer (`lookup_kappa_abs(ν,ρ,T)`), not here — rationale: the Rosseland mean is the exact frequency-average for total energy transport, and the opacity model is continuum-only so there is no line-blanketing to motivate non-grey.
 
@@ -135,9 +138,9 @@ The radial layer provides the column with exactly one thing: the absolute `F(r)`
 
 ## 8. Newton-Raphson solver
 
-- **State vector** `U` = `[ρ, T, F, z]` × `N` nodes (`N ~ 100–300`) plus the global unknown `τ_mid` (total optical depth, an output). Free boundary handled by the **normalized coordinate** `ξ = τ/τ_mid ∈ [0,1]` (fixed domain; `τ_mid` an extra unknown).
-- **Residual** `𝓕(U) = 0`: relations (1)(2)(3)(5) discretized between adjacent nodes (trapezoidal), EOS (4) applied pointwise, plus the 4 boundary conditions.
-- **Jacobian** `J = ∂𝓕/∂U`: **block-tridiagonal**, `4×4` blocks (each node couples only to neighbors) + the `τ_mid` border row/column. Solve `J ΔU = −𝓕` by **block-Thomas**, `O(N·4³)`.
+- **State vector** `U` = `[P, Q, T, z]` × `N` nodes (`N ~ 100–300`) on the fixed column-mass-fraction grid `q ∈ [0,1]`, plus **two global unknowns** `z₀` (thickness) and `Σ₀` (surface density). `ρ` is algebraic from EOS. The fixed `[0,1]` grid means no free-boundary-in-the-coordinate; `z₀, Σ₀` are ordinary border unknowns.
+- **Residual** `𝓕(U) = 0`: the 4 ODEs discretized between adjacent nodes (trapezoidal), EOS applied pointwise, plus the 5 boundary conditions (§7).
+- **Jacobian** `J = ∂𝓕/∂U`: **block-tridiagonal**, `4×4` blocks (each node couples only to neighbors) + the `z₀, Σ₀` border rows/columns. Solve by **block-Thomas**, `O(N·4³)`. **Both Jacobians built (decision: option ③):** the **analytic** block-tridiagonal Jacobian (using `kappa_ross_with_grad`) is the production engine (smooth, fast convergence); a **numerical** Jacobian (finite-difference the residual, exploiting the band) is its permanent **validation test** — a matrix-comparison test asserts they agree, catching any mis-derived block (the one failure mode where Newton still converges to the *right* answer but slowly, so it's invisible from output alone). Build order is numerical-first (gets Newton working + physics-validated), then analytic, then the cross-check, then switch the engine to analytic.
 - **Opacity derivatives** `∂κ_R/∂ρ, ∂κ_R/∂T` enter the (3)(5) blocks, supplied via a **swappable supplier interface** (default: finite-difference / analytic-gradient of the bilinear-interpolated `kappa_ross_lut`; escape hatch: bicubic-smooth supplier, one-file swap).
 - **Robustness:**
   - **Damped step / line search:** `U ← U + λΔU`, `λ≤1` chosen so `ρ,T>0` and the residual norm decreases (absorbs cell-boundary roughness of the finite-diff supplier).

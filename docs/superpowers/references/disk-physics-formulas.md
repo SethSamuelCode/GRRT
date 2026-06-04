@@ -157,6 +157,28 @@ The integrator works in geometric units (`G=c=1`, `M=1`); the column physics is 
 - **Frequency / rate:** geometric time unit is `r_g/c`, so `Ω_cgs = Ω_geom · c / r_g` (same for `Ω_z`).
 - **Optical depth must use CGS lengths:** `τ = ∫ κ[cm²/g] ρ[g/cm³] dz_cm[cm]`. Using geometric `dz` against CGS `κρ` is the original root-cause bug (no length scale) Approach A fixes.
 
+## 20. Vertical-structure BVP (the Approach-A column solver)
+The grey vertical-structure two-point boundary value problem, **verified against the published open-source formulation** (see credits below). Independent variable: height `z ∈ [0, z₀]` (midplane → surface); solved in practice on the **column-mass fraction** `q = 1 − Σ/Σ₀ ∈ [0,1]`. Variables `P, Q(≡F), T, Σ`; `ρ` from the EOS (§10); `ω_k ≡ Ω_z`.
+
+**Four ODEs:**
+```
+dP/dz = −ρ ω_k² z                                   hydrostatic (§7)
+dQ/dz = (3/2) ω_k α P                               viscous flux generation (§8)
+dlnT/dlnP = ∇_rad = 3 κ_R P Q /(16 σ ω_k² z T⁴)     radiative diffusion (§9, equivalent to dT⁴/dτ = 3F/4σ)
+dΣ/dz = −2 ρ                                        column mass (factor 2 = both disc faces)
+```
+**Five boundary conditions** (3 at the surface + the surface-pressure condition + 1 at the midplane):
+```
+midplane  z=0 :  Q = 0                              flux symmetry
+surface   z=z₀:  Q = σ_SB T_eff⁴                    all flux escaped
+                 T = T_eff                          photosphere temperature
+                 Σ = 0                              no mass above the surface
+                 P = (2/3) ω_k² z₀ / κ_R            ⚠ surface pressure from τ=2/3 (g·τ/κ, g=ω_k²z₀)
+```
+**Unknowns balance:** midplane `(P₀, T₀, Σ₀)` + thickness `z₀` = 4, matched by the 4 surface conditions. **Emergent outputs:** `Σ₀` (surface density → `ρ_mid`), `z₀` (= `z_max`), `τ_mid = ∫κρ dz`, and the `ρ(z)`, `T(z)` profiles. The surface-pressure BC is the trap: it is *where `τ=2/3` enters as a constraint* and is what pins the free parameters — easy to omit.
+
+**Credits.** This formulation follows the standard disc vertical-structure treatment of **Hubeny 1990** (ApJ 351, 632) and is verified against the open-source code of **Tavleev, Lipunova & Malanchev 2023**, "Analysis of accretion disc structure and stability using open code for vertical structure," MNRAS (DOI [10.1093/mnras/stad1881](https://doi.org/10.1093/mnras/stad1881), arXiv [2303.02184](https://arxiv.org/abs/2303.02184)). GRRT's solver uses Newton relaxation rather than their shooting/optimization, and grids in column-mass fraction, but the equations and boundary conditions are theirs.
+
 ---
 
 ## Error-trap checklist (read before editing any formula)
@@ -166,3 +188,4 @@ The integrator works in geometric units (`G=c=1`, `M=1`); the column physics is 
 4. **Viscous heating** is `(3/2)αΩP` — the `3/2` is the Keplerian shear, easy to drop.
 5. **Optical depth needs CGS lengths** (`× r_g`), never geometric `dz`.
 6. **Photosphere `τ = 2/3`**, not `1`.
+7. **The vertical-structure BVP needs THREE surface BCs** (§20) — `Q`, `T`, *and* the surface pressure `P=(2/3)ω²z₀/κ`. Omitting the surface-pressure condition leaves the free parameters (`z₀`, `Σ₀`) unpinned and the solver under-determined.

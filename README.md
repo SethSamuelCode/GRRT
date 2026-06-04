@@ -240,3 +240,17 @@ grrt-cli --validate --output validation
 | [stb_image_write](https://github.com/nothings/stb) | Public Domain | PNG/HDR output |
 | OpenMP | LLVM Exception / GPL | CPU parallelism |
 | CUDA Toolkit 12.x | NVIDIA CUDA EULA | GPU backend (optional) |
+
+---
+
+## References & Acknowledgments
+
+The disk physics follows the standard accretion-disc literature:
+
+- **Shakura & Sunyaev 1973** — α-viscosity thin-disc model.
+- **Novikov & Thorne 1973** — relativistic disc flux `F(r)`.
+- **Bardeen, Press & Teukolsky 1972** — Kerr ISCO, orbital energy, plunging geodesics.
+- **Hubeny 1990** (ApJ 351, 632) — vertical structure of accretion-disc atmospheres (the grey two-point boundary value problem).
+- **Tavleev, Lipunova & Malanchev 2023** (MNRAS, [10.1093/mnras/stad1881](https://doi.org/10.1093/mnras/stad1881), [arXiv:2303.02184](https://arxiv.org/abs/2303.02184)) — open-source vertical-structure code; the volumetric disk's column boundary-value formulation (variables, ODEs, and the surface boundary conditions) is verified against their published treatment.
+
+Verified physics formulas for the disk model are collected in `docs/superpowers/references/disk-physics-formulas.md`.
