@@ -87,12 +87,43 @@ static void test_numerical_jacobian_finite() {
     if (maxabs <= 0.0) { std::printf("  FAIL: all-zero Jacobian\n"); failures++; }
 }
 
+static void test_converges_and_conserves() {
+    std::printf("\n=== Newton converges; optically-thick self-heating + energy conservation ===\n");
+    using namespace grrt::constants;
+    grrt::ColumnInputs in{};
+    in.T_eff = 5e4; in.shear = 3e3; in.omega_z = 2e3; in.alpha = 0.1;
+    in.rho_mid_guess = 1e-2; in.n_nodes = 160; in.tol = 1e-8; in.max_iters = 80;
+    auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
+    auto s = grrt::solve_column_bvp(in, lut);
+    std::printf("  converged=%d iters=%d resid=%.2e z0=%.3e Sigma0=%.3e tau_mid=%.2f T_mid/T_eff=%.2f\n",
+                s.converged, s.iters, s.final_residual, s.z0, s.Sigma0, s.tau_mid,
+                s.T.empty()?0.0:s.T.front()/in.T_eff);
+    if (!s.converged) { std::printf("  FAIL: did not converge\n"); failures++; return; }
+    // density monotone non-increasing midplane -> surface
+    for (size_t i = 1; i < s.rho.size(); ++i)
+        if (s.rho[i] > s.rho[i-1]*1.02) { std::printf("  FAIL: non-monotone at %zu\n", i); failures++; break; }
+    // optically-thick disk self-heats: midplane hotter than the photosphere
+    if (!(s.T.front() > in.T_eff)) { std::printf("  FAIL: midplane not hotter than T_eff\n"); failures++; }
+    if (!(s.tau_mid > 1.0)) { std::printf("  FAIL: expected optically thick (tau_mid>1)\n"); failures++; }
+    // ENERGY CONSERVATION (exact): integral of (alpha*shear*P) dz over the column = sigma T_eff^4
+    double dissip = 0.0;
+    for (size_t i = 1; i < s.z.size(); ++i) {
+        const double dz = std::abs(s.z[i] - s.z[i-1]);
+        const double pbar = 0.5 * (s.P[i] + s.P[i-1]);
+        dissip += in.alpha * in.shear * pbar * dz;
+    }
+    const double Q_surf = sigma_SB * std::pow(in.T_eff, 4.0);
+    std::printf("  dissip=%.6e  Q_surf=%.6e  ratio=%.4f\n", dissip, Q_surf, dissip/Q_surf);
+    check("energy conservation int(alpha*shear*P)dz = sigma T_eff^4", dissip, Q_surf, 3e-3);
+}
+
 int main() {
     test_eos();
     test_scaffold();
     test_residual_hydrostatic_identity();
     test_residual_count_finite();
     test_numerical_jacobian_finite();
+    test_converges_and_conserves();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
