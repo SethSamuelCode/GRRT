@@ -117,6 +117,48 @@ static void test_converges_and_conserves() {
     check("energy conservation int(alpha*shear*P)dz = sigma T_eff^4", dissip, Q_surf, 3e-3);
 }
 
+static void test_physics_invariants() {
+    std::printf("\n=== physics invariants: flux BCs, hydrostatic balance, photosphere ===\n");
+    using namespace grrt::constants;
+    grrt::ColumnInputs in{};
+    in.T_eff = 5e4; in.shear = 3e3; in.omega_z = 2e3; in.alpha = 0.1;
+    in.rho_mid_guess = 1e-2; in.n_nodes = 160; in.tol = 1e-8; in.max_iters = 80;
+    auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
+    auto s = grrt::solve_column_bvp(in, lut);
+    if (!s.converged) { std::printf("  FAIL: precondition not converged\n"); failures++; return; }
+
+    // --- Flux boundary conditions (enforced by the residual; confirm in the solution) ---
+    const double Q_surf = sigma_SB * std::pow(in.T_eff, 4.0);
+    if (std::abs(s.Q.front()) > 1e-6 * Q_surf) {
+        std::printf("  FAIL: Q(midplane)=%.3e not ~0 (Q_surf=%.3e)\n", s.Q.front(), Q_surf); failures++;
+    } else { std::printf("  PASS: Q(midplane) ~ 0\n"); }
+    check("Q(surface) = sigma T_eff^4", s.Q.back(), Q_surf, 1e-6);
+    check("T(surface) = T_eff",          s.T.back(), in.T_eff, 1e-6);
+
+    // --- Hydrostatic balance, INDEPENDENT re-check on the converged profile ---
+    //   dP/dz = -rho * Omega_z^2 * z   (re-derived from the unpacked profile, NOT
+    //   the solver's internal q-trapezoidal residual -> a genuine cross-check).
+    //   Uses a non-uniform-grid central difference; expect O(1e-2)-level agreement.
+    double max_hydro_rel = 0.0;
+    for (size_t i = 1; i + 1 < s.z.size(); ++i) {
+        const double dz = s.z[i+1] - s.z[i-1];
+        if (std::abs(dz) < 1e-30) continue;
+        const double dPdz = (s.P[i+1] - s.P[i-1]) / dz;
+        const double rhs  = -s.rho[i] * in.omega_z * in.omega_z * s.z[i];
+        const double scale = std::abs(dPdz) + std::abs(rhs) + 1e-30;
+        max_hydro_rel = std::max(max_hydro_rel, std::abs(dPdz - rhs) / scale);
+    }
+    std::printf("  max hydrostatic relative residual = %.3e (expect < 5e-2)\n", max_hydro_rel);
+    if (max_hydro_rel > 5e-2) { std::printf("  FAIL: hydrostatic balance violated\n"); failures++; }
+
+    // --- Photosphere: surface-pressure BC encodes tau=2/3 (P = (2/3) Omega_z^2 z0 / kappa) ---
+    const double kR_surf = lut.lookup_kappa_ross(std::max(s.rho.back(), 1e-30), std::max(s.T.back(), 3000.0))
+                         + lut.lookup_kappa_es  (std::max(s.rho.back(), 1e-30), std::max(s.T.back(), 3000.0));
+    const double P_phot = (2.0/3.0) * in.omega_z * in.omega_z * s.z0 / kR_surf;
+    check("surface pressure = (2/3) Omega_z^2 z0 / kappa_total  (photosphere tau=2/3)",
+          s.P.back(), P_phot, 1e-3);
+}
+
 int main() {
     test_eos();
     test_scaffold();
@@ -124,6 +166,7 @@ int main() {
     test_residual_count_finite();
     test_numerical_jacobian_finite();
     test_converges_and_conserves();
+    test_physics_invariants();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
