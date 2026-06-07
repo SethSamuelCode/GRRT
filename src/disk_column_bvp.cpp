@@ -93,8 +93,6 @@ static void column_residual(const std::vector<double>& U, const ColumnInputs& in
     assert(row == 4*N + 2);
 }
 
-// --- after column_residual ---
-
 /// Build a gas-pressure Gaussian column seed state (length 4N+2).
 /// Isothermal (T = T_eff), linear z grid up to 4H, Gaussian rho.
 /// Used by both column_residual_test and the numerical Jacobian hook.
@@ -110,6 +108,9 @@ static std::vector<double> build_seed(const ColumnInputs& in) {
     for (int i = 0; i < N; ++i) {
         const double q  = (double)i / (N - 1);                    // 0 midplane → 1 surface
         const double zi = z0 * q;
+        // 1e-20 floor: keep P>0 at the surface node (q=1, exp→0) so the first
+        // residual eval is finite. Distinct from RHO_GHOST_FLOOR (1e-30), which
+        // guards 1/rho on transient Newton iterates.
         const double rho = std::max(rho_mid * std::exp(-zi*zi/(2.0*H*H)), 1e-20);
         const double Ti = in.T_eff;                              // isothermal seed (Newton warms the midplane)
         const double Pi = rho * cs2 + (a_rad/3.0)*Ti*Ti*Ti*Ti;
@@ -127,6 +128,9 @@ static void numerical_jacobian(const std::vector<double>& U, const ColumnInputs&
     J.assign((size_t)n * n, 0.0);
     std::vector<double> Up, Um, Rp, Rm;
     for (int j = 0; j < n; ++j) {
+        // Per-component relative step; central differences are insensitive to the
+        // exact value over a wide range. 1e-7 gives ~1e-9 Jacobian accuracy here,
+        // far inside the <1e-3 tolerance of the Task-7 analytic cross-check.
         const double delta = 1e-7 * std::max(std::abs(U[j]), 1e-30);
         Up = U; Um = U;
         Up[j] += delta; Um[j] -= delta;
