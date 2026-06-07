@@ -35,6 +35,32 @@ inline double kappa_total(const grrt::OpacityLUTs& op, double rho, double T) {
     return op.lookup_kappa_ross(rho, Tk) + op.lookup_kappa_es(rho, Tk);
 }
 
+// Total Rosseland opacity (absorption + electron scattering) and its LOGARITHMIC
+// gradients d/dlnrho, d/dlnT at (rho, T).
+//
+// The gradients are central finite differences of the SAME kappa_total() the
+// residual evaluates (ross + es), in log rho and log T, mirroring its T_LUT_MIN
+// clamp. The step is deliberately SMALL (h = 1e-3 in natural-log): the LUT lookups
+// are bilinear interpolants whose slope is piecewise constant within a cell, so the
+// residual's local derivative is the slope of the current cell. A wide stencil (e.g.
+// the h = 0.01 used by kappa_ross_with_grad) can straddle a cell boundary and return
+// the average of two adjacent cell slopes, disagreeing with the residual's local
+// slope by ~5% near an edge — which would corrupt the opacity-coupled Jacobian rows.
+// h = 1e-3 stays inside a single cell here (cell width ~4e-3 in log10) while staying
+// well clear of roundoff, so the analytic opacity gradient matches the residual's
+// local interpolation slope (validated by the Task-7 numerical cross-check).
+inline void kappa_total_with_grad(const grrt::OpacityLUTs& op, double rho, double T,
+                                  double& k, double& dk_dlnrho, double& dk_dlnT) {
+    const double Tk = std::max(T, T_LUT_MIN);
+    auto kt = [&](double rr, double tt) {
+        return op.lookup_kappa_ross(rr, tt) + op.lookup_kappa_es(rr, tt);
+    };
+    constexpr double h = 1e-3;  // natural-log step; stays within one LUT cell
+    k         = kt(rho, Tk);
+    dk_dlnrho = (kt(rho * std::exp(h), Tk) - kt(rho * std::exp(-h), Tk)) / (2.0 * h);
+    dk_dlnT   = (kt(rho, Tk * std::exp(h)) - kt(rho, Tk * std::exp(-h))) / (2.0 * h);
+}
+
 struct Deriv { double dP, dQ, dT, dz; };
 // dX/dq at a node; dz/dq = Sigma0/(2 rho).
 Deriv node_deriv(double P, double Q, double T, double z,
@@ -124,13 +150,35 @@ static std::vector<double> build_seed(const ColumnInputs& in) {
 static void numerical_jacobian(const std::vector<double>& U, const ColumnInputs& in,
                                const OpacityLUTs& op, std::vector<double>& J) {
     const int n = (int)U.size();
+    const int N = in.n_nodes;
     J.assign((size_t)n * n, 0.0);
+
+    // Per-variable absolute step floors. Some variables are EXACTLY zero at the
+    // seed (Q and z at the midplane, q=0), where a purely relative step collapses
+    // to ~1e-37 and the central difference returns garbage/0 — corrupting those
+    // columns of the reference Jacobian (e.g. the structural -1 in the z-difference
+    // row). Floor each component's step at a small fraction of the column's typical
+    // magnitude for that variable type so the difference stays resolvable.
+    double sP=0, sQ=0, sT=0, sZ=0;
+    for (int i = 0; i < N; ++i) {
+        sP = std::max(sP, std::abs(U[4*i+0])); sQ = std::max(sQ, std::abs(U[4*i+1]));
+        sT = std::max(sT, std::abs(U[4*i+2])); sZ = std::max(sZ, std::abs(U[4*i+3]));
+    }
+    const double floorP = 1e-7 * std::max(sP, 1e-30), floorQ = 1e-7 * std::max(sQ, 1e-30);
+    const double floorT = 1e-7 * std::max(sT, 1e-30), floorZ = 1e-7 * std::max(sZ, 1e-30);
+    const double floorG = 1e-7 * std::max(std::max(std::abs(U[4*N]), std::abs(U[4*N+1])), 1e-30); // z0, Sigma0
+
     std::vector<double> Up, Um, Rp, Rm;
     for (int j = 0; j < n; ++j) {
-        // Per-component relative step; central differences are insensitive to the
-        // exact value over a wide range. 1e-7 gives ~1e-9 Jacobian accuracy here,
-        // far inside the <1e-3 tolerance of the Task-7 analytic cross-check.
-        const double delta = 1e-7 * std::max(std::abs(U[j]), 1e-30);
+        // Per-component relative step with a per-variable absolute floor; central
+        // differences are insensitive to the exact value over a wide range. 1e-7
+        // gives ~1e-9 Jacobian accuracy here, far inside the <1e-3 tolerance of the
+        // Task-7 analytic cross-check.
+        double absfloor;
+        if (j < 4*N) { switch (j & 3) { case 0: absfloor=floorP; break; case 1: absfloor=floorQ; break;
+                                        case 2: absfloor=floorT; break; default: absfloor=floorZ; } }
+        else absfloor = floorG;
+        const double delta = std::max(1e-7 * std::abs(U[j]), absfloor);
         Up = U; Um = U;
         Up[j] += delta; Um[j] -= delta;
         column_residual(Up, in, op, Rp);
@@ -138,6 +186,165 @@ static void numerical_jacobian(const std::vector<double>& U, const ColumnInputs&
         for (int row = 0; row < n; ++row)
             J[(size_t)row * n + j] = (Rp[row] - Rm[row]) / (2.0 * delta);
     }
+}
+
+/// Analytic dense Jacobian J[row*n + col] = ∂R_row/∂U_col, built block by block
+/// from the hand-derived per-node partials of (dP,dQ,dT,dz)/dq. O(n) to assemble
+/// (vs the numerical O(n²)); validated against numerical_jacobian by the Task-7
+/// cross-check (column_jacobians_test). See node_deriv for the dX/dq definitions.
+static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& in,
+                              const OpacityLUTs& op, std::vector<double>& J) {
+    using namespace constants;
+    const int N = in.n_nodes;
+    const int n = 4*N + 2;
+    const double Sigma0 = U[4*N+1];
+    const double z0     = U[4*N];
+    const double dq = 1.0 / (N - 1);
+    const double oz2 = in.omega_z * in.omega_z;
+    const double as  = in.alpha * in.shear;
+
+    J.assign((size_t)n * n, 0.0);
+    auto at = [&](int row, int col) -> double& { return J[(size_t)row * n + col]; };
+
+    // Per-node partials of each dX/dq w.r.t. that node's (P,Q,T) and the global Sigma0.
+    // Layout matches the variable offsets: P=0, Q=1, T=2, z=3.
+    struct NodeJac {
+        // ∂(dP,dQ,dT,dz)/dq w.r.t. [P,Q,T,z] of this node, plus w.r.t. Sigma0.
+        double dP_dP, dP_dz, dP_dS;                 // dP/dq partials (rho cancels)
+        double dQ_dP, dQ_dT, dQ_dS;                 // dQ/dq partials
+        double dT_dP, dT_dQ, dT_dT, dT_dS;          // dT/dq partials
+        double dz_dP, dz_dT, dz_dS;                 // dz/dq partials
+    };
+    auto node_jac = [&](int i) -> NodeJac {
+        const double P = U[4*i+0], Q = U[4*i+1], T = U[4*i+2], z = U[4*i+3];
+        const double rho = std::max(eos_rho(P, T), RHO_GHOST_FLOOR);
+        // EOS derivatives: rho = (P - aT^4/3) mu m_p/(k_B T)
+        const double drho_dP = mu_fully_ionized * m_p / (k_B * T);
+        const double drho_dT = -mu_fully_ionized * m_p * (P + a_rad * T*T*T*T) / (k_B * T * T);
+        // Total opacity + log gradients, then convert to linear partials.
+        double kappa, dk_dlnrho, dk_dlnT;
+        kappa_total_with_grad(op, rho, T, kappa, dk_dlnrho, dk_dlnT);
+        const double dk_dP = (dk_dlnrho / rho) * drho_dP;
+        const double dk_dT = (dk_dlnrho / rho) * drho_dT + dk_dlnT / T;
+
+        NodeJac J{};
+        // dP/dq = -oz2 * z * Sigma0/2   (rho cancels)
+        J.dP_dP = 0.0;
+        J.dP_dz = -oz2 * Sigma0 / 2.0;
+        J.dP_dS = -oz2 * z / 2.0;
+        // dQ/dq = as * P * Sigma0/(2 rho)
+        J.dQ_dP = as * Sigma0 / (2.0 * rho) * (1.0 - (P / rho) * drho_dP);
+        J.dQ_dT = as * P * Sigma0 / 2.0 * (-1.0 / (rho*rho)) * drho_dT;
+        J.dQ_dS = as * P / (2.0 * rho);
+        // dT/dq = -3 kappa Q Sigma0 / (32 sigma T^3)
+        const double T3 = T*T*T;
+        J.dT_dQ = -3.0 * kappa * Sigma0 / (32.0 * sigma_SB * T3);
+        J.dT_dS = -3.0 * kappa * Q / (32.0 * sigma_SB * T3);
+        J.dT_dP = -3.0 * Q * Sigma0 / (32.0 * sigma_SB * T3) * dk_dP;
+        J.dT_dT = -3.0 * Q * Sigma0 / (32.0 * sigma_SB) * (dk_dT / T3 - 3.0 * kappa / (T3 * T));
+        // dz/dq = Sigma0/(2 rho)
+        J.dz_dP = -Sigma0 / (2.0 * rho*rho) * drho_dP;
+        J.dz_dT = -Sigma0 / (2.0 * rho*rho) * drho_dT;
+        J.dz_dS = 1.0 / (2.0 * rho);
+        return J;
+    };
+
+    // --- Trapezoidal ODE rows ---
+    // R_X(i) = X(i+1) - X(i) - 0.5*dq*(dX_i + dX_{i+1}); X in {P(0),Q(1),T(2),z(3)}.
+    int row = 0;
+    for (int i = 0; i < N - 1; ++i) {
+        const NodeJac ji = node_jac(i);
+        const NodeJac jj = node_jac(i+1);
+        const int ci = 4*i;        // base col of node i variables (P,Q,T,z)
+        const int cj = 4*(i+1);    // base col of node i+1 variables
+        const int cS = 4*N + 1;    // Sigma0 column
+        const double h = 0.5 * dq;
+
+        // Helper to write one ODE row for variable Xoff (0=P,1=Q,2=T,3=z).
+        // ∂R/∂var_i = -[X is var] - h*∂dX_i/∂var_i
+        // ∂R/∂var_{i+1} = +[X is var] - h*∂dX_{i+1}/∂var_{i+1}
+        // ∂R/∂Sigma0 = -h*(∂dX_i/∂Sigma0 + ∂dX_{i+1}/∂Sigma0)
+
+        // --- R_P row ---
+        {
+            const int r = row++;
+            at(r, ci+0) += -1.0;            // -[P is P]
+            at(r, cj+0) +=  1.0;            // +[P is P]
+            at(r, ci+3) += -h * ji.dP_dz;   // -h ∂dP_i/∂z_i
+            at(r, cj+3) += -h * jj.dP_dz;   // -h ∂dP_{i+1}/∂z_{i+1}
+            at(r, cS)   += -h * (ji.dP_dS + jj.dP_dS);
+        }
+        // --- R_Q row ---
+        {
+            const int r = row++;
+            at(r, ci+1) += -1.0;
+            at(r, cj+1) +=  1.0;
+            at(r, ci+0) += -h * ji.dQ_dP;
+            at(r, ci+2) += -h * ji.dQ_dT;
+            at(r, cj+0) += -h * jj.dQ_dP;
+            at(r, cj+2) += -h * jj.dQ_dT;
+            at(r, cS)   += -h * (ji.dQ_dS + jj.dQ_dS);
+        }
+        // --- R_T row ---
+        {
+            const int r = row++;
+            at(r, ci+2) += -1.0;
+            at(r, cj+2) +=  1.0;
+            at(r, ci+0) += -h * ji.dT_dP;
+            at(r, ci+1) += -h * ji.dT_dQ;
+            at(r, ci+2) += -h * ji.dT_dT;
+            at(r, cj+0) += -h * jj.dT_dP;
+            at(r, cj+1) += -h * jj.dT_dQ;
+            at(r, cj+2) += -h * jj.dT_dT;
+            at(r, cS)   += -h * (ji.dT_dS + jj.dT_dS);
+        }
+        // --- R_z row ---
+        {
+            const int r = row++;
+            at(r, ci+3) += -1.0;
+            at(r, cj+3) +=  1.0;
+            at(r, ci+0) += -h * ji.dz_dP;
+            at(r, ci+2) += -h * ji.dz_dT;
+            at(r, cj+0) += -h * jj.dz_dP;
+            at(r, cj+2) += -h * jj.dz_dT;
+            at(r, cS)   += -h * (ji.dz_dS + jj.dz_dS);
+        }
+    }
+
+    // --- Boundary-condition rows ---
+    const int cz0 = 4*N;       // z0 column
+    // Surface-node opacity (for the photosphere pressure BC).
+    const double P_s = U[4*(N-1)+0], T_s = U[4*(N-1)+2];
+    const double rho_s = std::max(eos_rho(P_s, T_s), RHO_GHOST_FLOOR);
+    const double drho_s_dP = mu_fully_ionized * m_p / (k_B * T_s);
+    const double drho_s_dT = -mu_fully_ionized * m_p * (P_s + a_rad * T_s*T_s*T_s*T_s) / (k_B * T_s * T_s);
+    double kappa_s, dk_s_dlnrho, dk_s_dlnT;
+    kappa_total_with_grad(op, rho_s, T_s, kappa_s, dk_s_dlnrho, dk_s_dlnT);
+    const double dks_dP = (dk_s_dlnrho / rho_s) * drho_s_dP;
+    const double dks_dT = (dk_s_dlnrho / rho_s) * drho_s_dT + dk_s_dlnT / T_s;
+
+    // R = Q(0):           ∂/∂Q(0) = 1
+    at(row++, 4*0 + 1) = 1.0;
+    // R = z(0):           ∂/∂z(0) = 1
+    at(row++, 4*0 + 3) = 1.0;
+    // R = Q(N-1) - Q_surf:∂/∂Q(N-1) = 1
+    at(row++, 4*(N-1) + 1) = 1.0;
+    // R = T(N-1) - T_eff: ∂/∂T(N-1) = 1
+    at(row++, 4*(N-1) + 2) = 1.0;
+    // R = z(N-1) - z0:    ∂/∂z(N-1) = 1, ∂/∂z0 = -1
+    { const int r = row++; at(r, 4*(N-1) + 3) = 1.0; at(r, cz0) = -1.0; }
+    // R = P(N-1) - (2/3) oz2 z0 / kappa_s:
+    //   ∂/∂P(N-1) = 1 + (2/3) oz2 z0 / kappa^2 * dkappa/dP
+    //   ∂/∂T(N-1) =     (2/3) oz2 z0 / kappa^2 * dkappa/dT
+    //   ∂/∂z0     = -(2/3) oz2 / kappa
+    {
+        const int r = row++;
+        const double f = (2.0/3.0) * oz2 * z0 / (kappa_s * kappa_s);
+        at(r, 4*(N-1) + 0) = 1.0 + f * dks_dP;
+        at(r, 4*(N-1) + 2) =       f * dks_dT;
+        at(r, cz0)         = -(2.0/3.0) * oz2 / kappa_s;
+    }
+    assert(row == n);
 }
 
 void column_residual_test(const ColumnInputs& in, const OpacityLUTs& op,
@@ -151,6 +358,14 @@ void column_numerical_jacobian_test(const ColumnInputs& in, const OpacityLUTs& o
     std::vector<double> U = build_seed(in);
     n = (int)U.size();
     numerical_jacobian(U, in, op, Jdense);
+}
+
+void column_jacobians_test(const ColumnInputs& in, const OpacityLUTs& op,
+                           std::vector<double>& Ja, std::vector<double>& Jn, int& n) {
+    std::vector<double> U = build_seed(in);
+    n = (int)U.size();
+    analytic_jacobian(U, in, op, Ja);
+    numerical_jacobian(U, in, op, Jn);
 }
 
 /// Dense Gaussian elimination with partial pivoting. Solves A x = b; A is
@@ -259,7 +474,9 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
 
     for (int it = 0; it < in.max_iters; ++it) {
         // 1) Jacobian and Newton step  J dU = -R
-        numerical_jacobian(U, in, op, J);
+        // Analytic block Jacobian (O(n) assembly); validated against the numerical
+        // finite-difference Jacobian by the Task-7 cross-check (column_jacobians_test).
+        analytic_jacobian(U, in, op, J);
         Jcopy = J;
         rhs.assign(R.begin(), R.end());
         for (double& r : rhs) r = -r;

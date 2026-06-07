@@ -56,6 +56,11 @@ GRRT_EXPORT void column_residual_test(const ColumnInputs& in, const OpacityLUTs&
 GRRT_EXPORT void column_numerical_jacobian_test(const ColumnInputs& in, const OpacityLUTs& op,
                                                 std::vector<double>& Jdense, int& n);
 
+/// Test hook: at the seed, fill BOTH the analytic (Ja) and numerical (Jn) dense
+/// (4N+2)^2 Jacobians, row-major; n = 4N+2. For the analytic-vs-numerical cross-check.
+GRRT_EXPORT void column_jacobians_test(const ColumnInputs& in, const OpacityLUTs& op,
+                                       std::vector<double>& Ja, std::vector<double>& Jn, int& n);
+
 } // namespace grrt
 
 #endif

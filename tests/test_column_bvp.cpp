@@ -87,6 +87,34 @@ static void test_numerical_jacobian_finite() {
     if (maxabs <= 0.0) { std::printf("  FAIL: all-zero Jacobian\n"); failures++; }
 }
 
+static void test_analytic_vs_numerical_jacobian() {
+    std::printf("\n=== analytic Jacobian matches numerical (cross-check) ===\n");
+    grrt::ColumnInputs in{}; in.T_eff = 5e4; in.shear = 3e3; in.omega_z = 2e3;
+    in.alpha = 0.1; in.rho_mid_guess = 1e-2; in.n_nodes = 24;
+    auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
+    std::vector<double> Ja, Jn; int n = 0;
+    grrt::column_jacobians_test(in, lut, Ja, Jn, n);
+    // Per-row magnitude scale: the residual rows span ~1e0..1e15, so a relative
+    // metric must be guarded by the row scale. An entry whose disagreement is a
+    // negligible fraction of the row's largest entry is numerical roundoff in the
+    // finite-difference reference (e.g. analytic 0 vs a ~1e-4 noise term on a row
+    // with ~1e8 entries), NOT a mis-derived partial — skip those.
+    std::vector<double> rowmax((size_t)n, 0.0);
+    for (int r = 0; r < n; ++r) for (int c = 0; c < n; ++c)
+        rowmax[r] = std::max(rowmax[r], std::abs(Jn[(size_t)r*n+c]));
+    double max_rel = 0.0; int bad_row=-1, bad_col=-1;
+    for (int r = 0; r < n; ++r) for (int c = 0; c < n; ++c) {
+        const double a = Ja[(size_t)r*n+c], num = Jn[(size_t)r*n+c];
+        // Row-scale guard: ignore entries where |a-num| is below 1e-6 of the row's
+        // largest entry (pure finite-difference roundoff, not a real disagreement).
+        const double scale = std::max(std::abs(num), 1e-6 * rowmax[r]);
+        const double rel = std::abs(a - num) / scale;
+        if (rel > max_rel && std::abs(a - num) > 1e-6 * rowmax[r]) { max_rel = rel; bad_row=r; bad_col=c; }
+    }
+    std::printf("  max relative mismatch = %.3e (worst at row %d col %d)\n", max_rel, bad_row, bad_col);
+    if (max_rel > 1e-3) { std::printf("  FAIL: analytic Jacobian disagrees with numerical\n"); failures++; }
+}
+
 static void test_converges_and_conserves() {
     std::printf("\n=== Newton converges; optically-thick self-heating + energy conservation ===\n");
     using namespace grrt::constants;
@@ -165,6 +193,7 @@ int main() {
     test_residual_hydrostatic_identity();
     test_residual_count_finite();
     test_numerical_jacobian_finite();
+    test_analytic_vs_numerical_jacobian();
     test_converges_and_conserves();
     test_physics_invariants();
     std::printf("\n=== %d failures ===\n", failures);
