@@ -70,11 +70,29 @@ static void test_residual_count_finite() {
     if (!finite) { std::printf("  FAIL: non-finite residual\n"); failures++; }
 }
 
+static void test_numerical_jacobian_finite() {
+    std::printf("\n=== numerical Jacobian: finite, correct shape ===\n");
+    grrt::ColumnInputs in{}; in.T_eff = 1e5; in.shear = 1e3; in.omega_z = 1e3;
+    in.alpha = 0.1; in.rho_mid_guess = 1.0; in.n_nodes = 24;
+    auto lut = grrt::build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
+    std::vector<double> Jdense; int n = 0;
+    grrt::column_numerical_jacobian_test(in, lut, Jdense, n);
+    std::printf("  n=%d entries=%zu (expect %d, %d)\n", n, Jdense.size(), 4*24+2, (4*24+2)*(4*24+2));
+    if (n != 4*24+2) { std::printf("  FAIL: size n\n"); failures++; }
+    if ((int)Jdense.size() != (4*24+2)*(4*24+2)) { std::printf("  FAIL: matrix size\n"); failures++; }
+    bool finite = true; for (double x : Jdense) if (!std::isfinite(x)) finite = false;
+    if (!finite) { std::printf("  FAIL: non-finite Jacobian entry\n"); failures++; }
+    // sanity: the Jacobian must be non-trivial (not all zeros)
+    double maxabs = 0.0; for (double x : Jdense) maxabs = std::max(maxabs, std::abs(x));
+    if (maxabs <= 0.0) { std::printf("  FAIL: all-zero Jacobian\n"); failures++; }
+}
+
 int main() {
     test_eos();
     test_scaffold();
     test_residual_hydrostatic_identity();
     test_residual_count_finite();
+    test_numerical_jacobian_finite();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

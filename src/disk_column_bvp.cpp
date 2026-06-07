@@ -93,27 +93,61 @@ static void column_residual(const std::vector<double>& U, const ColumnInputs& in
     assert(row == 4*N + 2);
 }
 
-void column_residual_test(const ColumnInputs& in, const OpacityLUTs& op,
-                          std::vector<double>& U, std::vector<double>& R) {
+// --- after column_residual ---
+
+/// Build a gas-pressure Gaussian column seed state (length 4N+2).
+/// Isothermal (T = T_eff), linear z grid up to 4H, Gaussian rho.
+/// Used by both column_residual_test and the numerical Jacobian hook.
+static std::vector<double> build_seed(const ColumnInputs& in) {
     using namespace constants;
     const int N = in.n_nodes;
     const double cs2 = k_B * in.T_eff / (mu_fully_ionized * m_p);
-    const double H = std::sqrt(cs2) / in.omega_z;
-    const double z0 = 4.0 * H;   // seed only: 4 scale heights enclose ~99.97% of a Gaussian column
+    const double H   = std::sqrt(cs2) / in.omega_z;
+    const double z0  = 4.0 * H;                                   // ~99.97% of a Gaussian column
     const double rho_mid = in.rho_mid_guess;
-    const double Sigma0 = std::sqrt(2.0 * std::numbers::pi) * rho_mid * H;
-    U.assign(4*N + 2, 0.0);
+    const double Sigma0  = std::sqrt(2.0 * std::numbers::pi) * rho_mid * H;
+    std::vector<double> U(4*N + 2, 0.0);
     for (int i = 0; i < N; ++i) {
-        const double q  = (double)i / (N - 1);          // 0 midplane → 1 surface
-        const double zi = z0 * q;                        // crude linear z
-        const double rho = std::max(rho_mid * std::exp(-zi*zi/(2*H*H)), 1e-20);
-        const double Ti = in.T_eff;                      // crude isothermal
+        const double q  = (double)i / (N - 1);                    // 0 midplane → 1 surface
+        const double zi = z0 * q;
+        const double rho = std::max(rho_mid * std::exp(-zi*zi/(2.0*H*H)), 1e-20);
+        const double Ti = in.T_eff;                              // isothermal seed (Newton warms the midplane)
         const double Pi = rho * cs2 + (a_rad/3.0)*Ti*Ti*Ti*Ti;
-        const double Qi = surface_flux(in.T_eff) * q;
+        const double Qi = surface_flux(in.T_eff) * q;            // 0 midplane → σT_eff^4 surface
         U[4*i+0]=Pi; U[4*i+1]=Qi; U[4*i+2]=Ti; U[4*i+3]=zi;
     }
     U[4*N]=z0; U[4*N+1]=Sigma0;
+    return U;
+}
+
+/// Dense central-difference Jacobian J[row*n + col] = ∂R_row/∂U_col.
+static void numerical_jacobian(const std::vector<double>& U, const ColumnInputs& in,
+                               const OpacityLUTs& op, std::vector<double>& J) {
+    const int n = (int)U.size();
+    J.assign((size_t)n * n, 0.0);
+    std::vector<double> Up, Um, Rp, Rm;
+    for (int j = 0; j < n; ++j) {
+        const double delta = 1e-7 * std::max(std::abs(U[j]), 1e-30);
+        Up = U; Um = U;
+        Up[j] += delta; Um[j] -= delta;
+        column_residual(Up, in, op, Rp);
+        column_residual(Um, in, op, Rm);
+        for (int row = 0; row < n; ++row)
+            J[(size_t)row * n + j] = (Rp[row] - Rm[row]) / (2.0 * delta);
+    }
+}
+
+void column_residual_test(const ColumnInputs& in, const OpacityLUTs& op,
+                          std::vector<double>& U, std::vector<double>& R) {
+    U = build_seed(in);
     column_residual(U, in, op, R);
+}
+
+void column_numerical_jacobian_test(const ColumnInputs& in, const OpacityLUTs& op,
+                                    std::vector<double>& Jdense, int& n) {
+    std::vector<double> U = build_seed(in);
+    n = (int)U.size();
+    numerical_jacobian(U, in, op, Jdense);
 }
 
 } // namespace grrt

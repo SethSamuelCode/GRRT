@@ -51,6 +51,11 @@ GRRT_EXPORT ColumnBVPSolution solve_column_bvp(const ColumnInputs& in,
 GRRT_EXPORT void column_residual_test(const ColumnInputs& in, const OpacityLUTs& op,
                                       std::vector<double>& U, std::vector<double>& R);
 
+/// Test hook: build the analytic seed and fill a DENSE (4N+2)×(4N+2) numerical
+/// (finite-difference) Jacobian of the residual, row-major in Jdense; n = 4N+2.
+GRRT_EXPORT void column_numerical_jacobian_test(const ColumnInputs& in, const OpacityLUTs& op,
+                                                std::vector<double>& Jdense, int& n);
+
 } // namespace grrt
 
 #endif
