@@ -89,6 +89,8 @@ static void test_numerical_jacobian_finite() {
 
 static void test_analytic_vs_numerical_jacobian() {
     std::printf("\n=== analytic Jacobian matches numerical (cross-check) ===\n");
+    // Same operating point as test_converges_and_conserves (known to lie in the
+    // Newton basin), so the cross-check is at a physically representative state.
     grrt::ColumnInputs in{}; in.T_eff = 5e4; in.shear = 3e3; in.omega_z = 2e3;
     in.alpha = 0.1; in.rho_mid_guess = 1e-2; in.n_nodes = 24;
     auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);

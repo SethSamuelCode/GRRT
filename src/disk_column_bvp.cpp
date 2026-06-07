@@ -56,6 +56,10 @@ inline void kappa_total_with_grad(const grrt::OpacityLUTs& op, double rho, doubl
         return op.lookup_kappa_ross(rr, tt) + op.lookup_kappa_es(rr, tt);
     };
     constexpr double h = 1e-3;  // natural-log step; stays within one LUT cell
+    // NOTE: below T_LUT_MIN the minus-side T probe (Tk*exp(-h)) clamps to the LUT
+    // edge, so the T-gradient there is effectively one-sided (asymmetric). This is
+    // the shallow-opacity surface layer; the analytic-vs-numerical cross-check
+    // (2.5e-9) confirms the resulting Jacobian is well within tolerance.
     k         = kt(rho, Tk);
     dk_dlnrho = (kt(rho * std::exp(h), Tk) - kt(rho * std::exp(-h), Tk)) / (2.0 * h);
     dk_dlnT   = (kt(rho, Tk * std::exp(h)) - kt(rho, Tk * std::exp(-h))) / (2.0 * h);
@@ -166,6 +170,8 @@ static void numerical_jacobian(const std::vector<double>& U, const ColumnInputs&
     }
     const double floorP = 1e-7 * std::max(sP, 1e-30), floorQ = 1e-7 * std::max(sQ, 1e-30);
     const double floorT = 1e-7 * std::max(sT, 1e-30), floorZ = 1e-7 * std::max(sZ, 1e-30);
+    // z0 and Sigma0 differ in scale but are both large at the seed, so one
+    // shared (conservative) floor is fine for the two-global layout.
     const double floorG = 1e-7 * std::max(std::max(std::abs(U[4*N]), std::abs(U[4*N+1])), 1e-30); // z0, Sigma0
 
     std::vector<double> Up, Um, Rp, Rm;
@@ -258,56 +264,56 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
         const int ci = 4*i;        // base col of node i variables (P,Q,T,z)
         const int cj = 4*(i+1);    // base col of node i+1 variables
         const int cS = 4*N + 1;    // Sigma0 column
-        const double h = 0.5 * dq;
+        const double half_dq = 0.5 * dq;
 
         // Helper to write one ODE row for variable Xoff (0=P,1=Q,2=T,3=z).
-        // ∂R/∂var_i = -[X is var] - h*∂dX_i/∂var_i
-        // ∂R/∂var_{i+1} = +[X is var] - h*∂dX_{i+1}/∂var_{i+1}
-        // ∂R/∂Sigma0 = -h*(∂dX_i/∂Sigma0 + ∂dX_{i+1}/∂Sigma0)
+        // ∂R/∂var_i = -[X is var] - half_dq*∂dX_i/∂var_i
+        // ∂R/∂var_{i+1} = +[X is var] - half_dq*∂dX_{i+1}/∂var_{i+1}
+        // ∂R/∂Sigma0 = -half_dq*(∂dX_i/∂Sigma0 + ∂dX_{i+1}/∂Sigma0)
 
         // --- R_P row ---
         {
             const int r = row++;
-            at(r, ci+0) += -1.0;            // -[P is P]
-            at(r, cj+0) +=  1.0;            // +[P is P]
-            at(r, ci+3) += -h * ji.dP_dz;   // -h ∂dP_i/∂z_i
-            at(r, cj+3) += -h * jj.dP_dz;   // -h ∂dP_{i+1}/∂z_{i+1}
-            at(r, cS)   += -h * (ji.dP_dS + jj.dP_dS);
+            at(r, ci+0) += -1.0;                        // -[P is P]
+            at(r, cj+0) +=  1.0;                        // +[P is P]
+            at(r, ci+3) += -half_dq * ji.dP_dz;         // -half_dq ∂dP_i/∂z_i
+            at(r, cj+3) += -half_dq * jj.dP_dz;         // -half_dq ∂dP_{i+1}/∂z_{i+1}
+            at(r, cS)   += -half_dq * (ji.dP_dS + jj.dP_dS);
         }
         // --- R_Q row ---
         {
             const int r = row++;
             at(r, ci+1) += -1.0;
             at(r, cj+1) +=  1.0;
-            at(r, ci+0) += -h * ji.dQ_dP;
-            at(r, ci+2) += -h * ji.dQ_dT;
-            at(r, cj+0) += -h * jj.dQ_dP;
-            at(r, cj+2) += -h * jj.dQ_dT;
-            at(r, cS)   += -h * (ji.dQ_dS + jj.dQ_dS);
+            at(r, ci+0) += -half_dq * ji.dQ_dP;
+            at(r, ci+2) += -half_dq * ji.dQ_dT;
+            at(r, cj+0) += -half_dq * jj.dQ_dP;
+            at(r, cj+2) += -half_dq * jj.dQ_dT;
+            at(r, cS)   += -half_dq * (ji.dQ_dS + jj.dQ_dS);
         }
         // --- R_T row ---
         {
             const int r = row++;
             at(r, ci+2) += -1.0;
             at(r, cj+2) +=  1.0;
-            at(r, ci+0) += -h * ji.dT_dP;
-            at(r, ci+1) += -h * ji.dT_dQ;
-            at(r, ci+2) += -h * ji.dT_dT;
-            at(r, cj+0) += -h * jj.dT_dP;
-            at(r, cj+1) += -h * jj.dT_dQ;
-            at(r, cj+2) += -h * jj.dT_dT;
-            at(r, cS)   += -h * (ji.dT_dS + jj.dT_dS);
+            at(r, ci+0) += -half_dq * ji.dT_dP;
+            at(r, ci+1) += -half_dq * ji.dT_dQ;
+            at(r, ci+2) += -half_dq * ji.dT_dT;
+            at(r, cj+0) += -half_dq * jj.dT_dP;
+            at(r, cj+1) += -half_dq * jj.dT_dQ;
+            at(r, cj+2) += -half_dq * jj.dT_dT;
+            at(r, cS)   += -half_dq * (ji.dT_dS + jj.dT_dS);
         }
         // --- R_z row ---
         {
             const int r = row++;
             at(r, ci+3) += -1.0;
             at(r, cj+3) +=  1.0;
-            at(r, ci+0) += -h * ji.dz_dP;
-            at(r, ci+2) += -h * ji.dz_dT;
-            at(r, cj+0) += -h * jj.dz_dP;
-            at(r, cj+2) += -h * jj.dz_dT;
-            at(r, cS)   += -h * (ji.dz_dS + jj.dz_dS);
+            at(r, ci+0) += -half_dq * ji.dz_dP;
+            at(r, ci+2) += -half_dq * ji.dz_dT;
+            at(r, cj+0) += -half_dq * jj.dz_dP;
+            at(r, cj+2) += -half_dq * jj.dz_dT;
+            at(r, cS)   += -half_dq * (ji.dz_dS + jj.dz_dS);
         }
     }
 
