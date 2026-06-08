@@ -34,7 +34,6 @@ struct ColumnBVPSolution {
     bool   converged = false;  ///< true if Newton met tol
     int    iters = 0;
     double final_residual = 0.0;
-    bool   used_fallback = false; ///< true if the analytic-profile fallback was used
 };
 
 /// EOS: density from total pressure and temperature.
@@ -48,6 +47,9 @@ GRRT_EXPORT double eos_rho(double P, double T);
 ///        wrong-sized, the solver builds its own flux-balanced analytic seed.
 ///        On a size mismatch the solution's `converged`/`iters` fields therefore
 ///        reflect the cold-start run, not a warm one.
+/// On non-convergence the returned solution has `converged=false`, all profile
+/// vectors (q,z,P,Q,T,rho) empty, and z0/Sigma0/tau_mid = 0; callers MUST check
+/// `converged` before indexing the profile.
 GRRT_EXPORT ColumnBVPSolution solve_column_bvp(const ColumnInputs& in,
                                                const OpacityLUTs& opacity,
                                                const std::vector<double>* warm_start = nullptr);

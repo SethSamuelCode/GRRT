@@ -572,16 +572,16 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
         if (maxrel < in.tol && merit < 1e-6) { s.converged = true; break; }
     }
 
-    // On non-convergence: discard the last (possibly wild) Newton iterate and fall
-    // back to the analytic gas-pressure Gaussian seed, which is always sane,
-    // monotone, and EOS-valid. This guarantees a physical (if approximate) profile
-    // is returned rather than a non-physical iterate. converged stays false.
+    // No fallback (Approach A: fail or succeed, never a fabricated profile).
+    // On non-convergence return EMPTY profile vectors; the caller MUST check
+    // `converged` before reading the solution.
     if (!s.converged) {
-        U = build_seed(in);
-        s.used_fallback = true;
+        s.q.clear(); s.z.clear(); s.P.clear(); s.Q.clear(); s.T.clear(); s.rho.clear();
+        s.z0 = 0.0; s.Sigma0 = 0.0; s.tau_mid = 0.0;
+        return s;
     }
 
-    // Unpack the (converged or fallback) state into the solution.
+    // Unpack the converged state into the solution.
     s.q.resize(N); s.z.resize(N); s.P.resize(N); s.Q.resize(N); s.T.resize(N); s.rho.resize(N);
     for (int i = 0; i < N; ++i) {
         const double Pi = U[4*i+0], Qi = U[4*i+1], Ti = U[4*i+2], zi = U[4*i+3];
@@ -592,7 +592,6 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
     s.z0 = U[4*N];
     s.Sigma0 = U[4*N+1];
 
-    // tau_mid: trapezoidal integral of kappa_total * rho over z, midplane->surface.
     double tau = 0.0;
     for (int i = 0; i + 1 < N; ++i) {
         const double kRi = kappa_total(op, std::max(s.rho[i],   RHO_GHOST_FLOOR), s.T[i]);
