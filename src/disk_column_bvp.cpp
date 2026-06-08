@@ -20,6 +20,21 @@ double eos_rho(double P, double T) {
 namespace {
 using namespace grrt::constants;
 
+// Cancellation-free density from GAS pressure (the Newton state variable).
+// The solver carries gas pressure Pg per node (not total P), so rho = Pg mu m_p/(k_B T)
+// involves NO subtraction of near-equal large numbers — ∂rho/∂T = -rho/T is mild and
+// well-conditioned even in the radiation-dominated (β = P_gas/P_tot ≪ 1) hot inner disk.
+inline double rho_from_gas(double Pg, double T) {
+    if (Pg <= 0.0 || T <= 0.0) return 0.0;
+    return Pg * grrt::constants::mu_fully_ionized * grrt::constants::m_p
+         / (grrt::constants::k_B * T);
+}
+// Reconstruct TOTAL pressure (gas + radiation) by ADDITION wherever the physics needs it
+// (hydrostatic balance, viscous heating, surface BC). P_tot = Pg + (a_rad/3) T^4.
+inline double p_total(double Pg, double T) {
+    return Pg + (grrt::constants::a_rad / 3.0) * T * T * T * T;
+}
+
 // Numerical guards (not physics):
 constexpr double RHO_GHOST_FLOOR = 1e-30;  // g/cm^3 — guards 1/rho on transient non-physical Newton iterates (~12 dex below any real disk density)
 constexpr double T_LUT_MIN       = 3000.0; // K — opacity-LUT lower temperature edge; clamp lookups into the table
@@ -66,22 +81,25 @@ inline void kappa_total_with_grad(const grrt::OpacityLUTs& op, double rho, doubl
 }
 
 struct Deriv { double dP, dQ, dT, dz; };
-// dX/dq at a node; dz/dq = Sigma0/(2 rho).
-Deriv node_deriv(double P, double Q, double T, double z,
+// dX/dq at a node; dz/dq = Sigma0/(2 rho). First argument is GAS pressure Pg (the
+// Newton state variable); density is reconstructed cancellation-free and the total
+// pressure (needed by the hydrostatic and viscous-heating terms) by addition.
+Deriv node_deriv(double Pg, double Q, double T, double z,
                  double Sigma0, double alpha, double shear, double omega_z,
                  const grrt::OpacityLUTs& op) {
-    const double rho = std::max(grrt::eos_rho(P, T), RHO_GHOST_FLOOR);
-    const double kR  = kappa_total(op, rho, T);
+    const double rho  = std::max(rho_from_gas(Pg, T), RHO_GHOST_FLOOR);
+    const double Ptot = p_total(Pg, T);
+    const double kR   = kappa_total(op, rho, T);
     const double dz_dq = Sigma0 / (2.0 * rho);
     Deriv d;
     // Each dX/dq = (dX/dz) * dz/dq, with dz/dq = Sigma0/(2 rho):
-    //   dP/dz = -rho Omega_z^2 z            vertical hydrostatic (gravity uses Omega_z)
-    //   dQ/dz = alpha * shear * P           Shakura-Sunyaev viscous heating (shear = exact Kerr |r dΩ/dr|)
+    //   d(P_tot)/dz = -rho Omega_z^2 z      vertical hydrostatic (TOTAL pressure gradient; gravity uses Omega_z)
+    //   dQ/dz = alpha * shear * P_tot       Shakura-Sunyaev viscous heating (TOTAL pressure; shear = exact Kerr |r dΩ/dr|)
     //   dT/dz = -3 kR rho Q /(16 sigma T^3) grey Rosseland radiative diffusion (16 = 4ac/sigma)
     //   dz/dq = Sigma0/(2 rho)              column-mass coordinate (2 = both disc faces)
     d.dz = dz_dq;
-    d.dP = (-rho * omega_z * omega_z * z) * dz_dq;
-    d.dQ = ( alpha * shear * P) * dz_dq;     // viscous heating: q+ = alpha P |r dΩ/dr|
+    d.dP = (-rho * omega_z * omega_z * z) * dz_dq;   // rhs of d(P_tot)/dz (UNCHANGED form)
+    d.dQ = ( alpha * shear * Ptot) * dz_dq;          // viscous heating: q+ = alpha P_tot |r dΩ/dr|
     d.dT = (-3.0 * kR * rho * Q / (16.0 * sigma_SB * T * T * T)) * dz_dq;
     return d;
 }
@@ -95,7 +113,7 @@ static void column_residual(const std::vector<double>& U, const ColumnInputs& in
     const int N = in.n_nodes;
     const double z0 = U[4*N], Sigma0 = U[4*N+1];
     const double dq = 1.0 / (N - 1);
-    auto P = [&](int i){ return U[4*i+0]; };
+    auto P = [&](int i){ return U[4*i+0]; };   // GAS pressure Pg (the state variable)
     auto Q = [&](int i){ return U[4*i+1]; };
     auto T = [&](int i){ return U[4*i+2]; };
     auto z = [&](int i){ return U[4*i+3]; };
@@ -105,20 +123,23 @@ static void column_residual(const std::vector<double>& U, const ColumnInputs& in
     for (int i = 0; i < N - 1; ++i) {
         Deriv di = node_deriv(P(i),   Q(i),   T(i),   z(i),   Sigma0, in.alpha, in.shear, in.omega_z, op);
         Deriv dj = node_deriv(P(i+1), Q(i+1), T(i+1), z(i+1), Sigma0, in.alpha, in.shear, in.omega_z, op);
-        R[row++] = P(i+1) - P(i) - 0.5*dq*(di.dP + dj.dP);
+        // hydrostatic: d(P_tot)/dz = -rho Omega_z^2 z ; LHS is the TOTAL-pressure
+        // difference (reconstructed by addition), not the stored gas pressure.
+        R[row++] = (p_total(P(i+1),T(i+1)) - p_total(P(i),T(i))) - 0.5*dq*(di.dP + dj.dP);
         R[row++] = Q(i+1) - Q(i) - 0.5*dq*(di.dQ + dj.dQ);
         R[row++] = T(i+1) - T(i) - 0.5*dq*(di.dT + dj.dT);
         R[row++] = z(i+1) - z(i) - 0.5*dq*(di.dz + dj.dz);
     }
     const double Q_surf  = surface_flux(in.T_eff);
-    const double rho_srf = std::max(eos_rho(P(N-1), T(N-1)), RHO_GHOST_FLOOR);
+    const double rho_srf = std::max(rho_from_gas(P(N-1), T(N-1)), RHO_GHOST_FLOOR);
     const double kR_srf  = kappa_total(op, rho_srf, T(N-1));
     R[row++] = Q(0);                                                   // midplane Q=0
     R[row++] = z(0);                                                   // midplane z=0
     R[row++] = Q(N-1) - Q_surf;                                        // surface Q
     R[row++] = T(N-1) - in.T_eff;                                      // surface T
     R[row++] = z(N-1) - z0;                                            // surface z=z0
-    R[row++] = P(N-1) - (2.0/3.0)*in.omega_z*in.omega_z*z0/kR_srf;     // surface pressure
+    // surface pressure: photosphere tau=2/3 on TOTAL pressure (reconstructed).
+    R[row++] = p_total(P(N-1),T(N-1)) - (2.0/3.0)*in.omega_z*in.omega_z*z0/kR_srf;
     assert(row == 4*N + 2);
 }
 
@@ -148,9 +169,10 @@ static std::vector<double> build_seed(const ColumnInputs& in) {
         // guards 1/rho on transient Newton iterates.
         const double rho = std::max(rho_mid * std::exp(-zi*zi/(2.0*H*H)), 1e-20);
         const double Ti = in.T_eff;                              // isothermal seed (Newton warms the midplane)
-        const double Pi = rho * cs2_gas + (a_rad/3.0)*Ti*Ti*Ti*Ti;  // P_gas(local rho) + P_rad; cs2_gas not double-counted
+        // GAS pressure goes in the slot (no radiation term — that is reconstructed by p_total).
+        const double Pg_i = std::max(rho * cs2_gas, 1e-20);
         const double Qi = surface_flux(in.T_eff) * q;            // 0 midplane → σT_eff^4 surface
-        U[4*i+0]=Pi; U[4*i+1]=Qi; U[4*i+2]=Ti; U[4*i+3]=zi;
+        U[4*i+0]=Pg_i; U[4*i+1]=Qi; U[4*i+2]=Ti; U[4*i+3]=zi;
     }
     U[4*N]=z0; U[4*N+1]=Sigma0;
     return U;
@@ -221,18 +243,23 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
     // Per-node partials of each dX/dq w.r.t. that node's (P,Q,T) and the global Sigma0.
     // Layout matches the variable offsets: P=0, Q=1, T=2, z=3.
     struct NodeJac {
-        // ∂(dP,dQ,dT,dz)/dq w.r.t. [P,Q,T,z] of this node, plus w.r.t. Sigma0.
+        // ∂(dP,dQ,dT,dz)/dq w.r.t. [Pg,Q,T,z] of this node, plus w.r.t. Sigma0.
+        // Slot 0 (denoted *_dP) is now the GAS-pressure partial.
         double dP_dP, dP_dz, dP_dS;                 // dP/dq partials (rho cancels)
-        double dQ_dP, dQ_dT, dQ_dS;                 // dQ/dq partials
+        double dQ_dP, dQ_dT, dQ_dS;                 // dQ/dq partials (P_tot reconstructed)
         double dT_dP, dT_dQ, dT_dT, dT_dS;          // dT/dq partials
         double dz_dP, dz_dT, dz_dS;                 // dz/dq partials
     };
     auto node_jac = [&](int i) -> NodeJac {
-        const double P = U[4*i+0], Q = U[4*i+1], T = U[4*i+2], z = U[4*i+3];
-        const double rho = std::max(eos_rho(P, T), RHO_GHOST_FLOOR);
-        // EOS derivatives: rho = (P - aT^4/3) mu m_p/(k_B T)
-        const double drho_dP = mu_fully_ionized * m_p / (k_B * T);
-        const double drho_dT = -mu_fully_ionized * m_p * (P + a_rad * T*T*T*T) / (k_B * T * T);
+        const double Pg = U[4*i+0], Q = U[4*i+1], T = U[4*i+2], z = U[4*i+3];
+        const double rho  = std::max(rho_from_gas(Pg, T), RHO_GHOST_FLOOR);
+        const double Ptot = p_total(Pg, T);
+        // Cancellation-free EOS derivatives: rho = Pg mu m_p/(k_B T)
+        //   ∂rho/∂Pg = mu m_p/(k_B T) = rho/Pg ;  ∂rho/∂T = -rho/T   (no P_rad term).
+        const double drho_dP = mu_fully_ionized * m_p / (k_B * T);   // ∂rho/∂Pg
+        const double drho_dT = -rho / T;                             // ∂rho/∂T
+        // ∂P_tot/∂Pg = 1 ; ∂P_tot/∂T = (4 a_rad/3) T^3.
+        const double dPtot_dT = (4.0 * a_rad / 3.0) * T*T*T;
         // Total opacity + log gradients, then convert to linear partials.
         double kappa, dk_dlnrho, dk_dlnT;
         kappa_total_with_grad(op, rho, T, kappa, dk_dlnrho, dk_dlnT);
@@ -244,11 +271,14 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
         J.dP_dP = 0.0;
         J.dP_dz = -oz2 * Sigma0 / 2.0;
         J.dP_dS = -oz2 * z / 2.0;
-        // dQ/dq = as * P * Sigma0/(2 rho)
-        J.dQ_dP = as * Sigma0 / (2.0 * rho) * (1.0 - (P / rho) * drho_dP);
-        J.dQ_dT = as * P * Sigma0 / 2.0 * (-1.0 / (rho*rho)) * drho_dT;
-        J.dQ_dS = as * P / (2.0 * rho);
-        // dT/dq = -3 kappa Q Sigma0 / (32 sigma T^3)
+        // dQ/dq = as * P_tot * Sigma0/(2 rho).  ∂[P_tot/rho]/∂Pg and ∂[P_tot/rho]/∂T via
+        // the quotient rule with ∂P_tot/∂Pg=1, ∂P_tot/∂T=dPtot_dT, ∂rho/∂Pg, ∂rho/∂T:
+        //   ∂[P_tot/rho]/∂Pg = (1/rho)(1 - P_tot/rho * drho_dP)
+        //   ∂[P_tot/rho]/∂T  = (1/rho)(dPtot_dT - P_tot/rho * drho_dT)
+        J.dQ_dP = as * Sigma0 / 2.0 * (1.0 / rho) * (1.0 - (Ptot / rho) * drho_dP);
+        J.dQ_dT = as * Sigma0 / 2.0 * (1.0 / rho) * (dPtot_dT - (Ptot / rho) * drho_dT);
+        J.dQ_dS = as * Ptot / (2.0 * rho);
+        // dT/dq = -3 kappa Q Sigma0 / (32 sigma T^3)   (rho cancels; kappa(rho,T))
         const double T3 = T*T*T;
         J.dT_dQ = -3.0 * kappa * Sigma0 / (32.0 * sigma_SB * T3);
         J.dT_dS = -3.0 * kappa * Q / (32.0 * sigma_SB * T3);
@@ -277,11 +307,16 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
         // ∂R/∂var_{i+1} = +[X is var] - half_dq*∂dX_{i+1}/∂var_{i+1}
         // ∂R/∂Sigma0 = -half_dq*(∂dX_i/∂Sigma0 + ∂dX_{i+1}/∂Sigma0)
 
-        // --- R_P row ---
+        // --- R_P row ---  LHS = p_total(i+1) - p_total(i); ∂p_total/∂Pg=1, ∂p_total/∂T=(4a/3)T^3.
         {
             const int r = row++;
-            at(r, ci+0) += -1.0;                        // -[P is P]
-            at(r, cj+0) +=  1.0;                        // +[P is P]
+            const double Ti = U[ci+2], Tj = U[cj+2];
+            const double dPtot_dTi = (4.0 * a_rad / 3.0) * Ti*Ti*Ti;
+            const double dPtot_dTj = (4.0 * a_rad / 3.0) * Tj*Tj*Tj;
+            at(r, ci+0) += -1.0;                        // -∂p_total(i)/∂Pg_i
+            at(r, cj+0) +=  1.0;                        // +∂p_total(i+1)/∂Pg_{i+1}
+            at(r, ci+2) += -dPtot_dTi;                  // -∂p_total(i)/∂T_i
+            at(r, cj+2) +=  dPtot_dTj;                  // +∂p_total(i+1)/∂T_{i+1}
             at(r, ci+3) += -half_dq * ji.dP_dz;         // -half_dq ∂dP_i/∂z_i
             at(r, cj+3) += -half_dq * jj.dP_dz;         // -half_dq ∂dP_{i+1}/∂z_{i+1}
             at(r, cS)   += -half_dq * (ji.dP_dS + jj.dP_dS);
@@ -325,11 +360,12 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
 
     // --- Boundary-condition rows ---
     const int cz0 = 4*N;       // z0 column
-    // Surface-node opacity (for the photosphere pressure BC).
+    // Surface-node opacity (for the photosphere pressure BC). P_s is GAS pressure.
     const double P_s = U[4*(N-1)+0], T_s = U[4*(N-1)+2];
-    const double rho_s = std::max(eos_rho(P_s, T_s), RHO_GHOST_FLOOR);
-    const double drho_s_dP = mu_fully_ionized * m_p / (k_B * T_s);
-    const double drho_s_dT = -mu_fully_ionized * m_p * (P_s + a_rad * T_s*T_s*T_s*T_s) / (k_B * T_s * T_s);
+    const double rho_s = std::max(rho_from_gas(P_s, T_s), RHO_GHOST_FLOOR);
+    const double drho_s_dP = mu_fully_ionized * m_p / (k_B * T_s);   // ∂rho/∂Pg
+    const double drho_s_dT = -rho_s / T_s;                           // ∂rho/∂T (cancellation-free)
+    const double dPtot_s_dT = (4.0 * a_rad / 3.0) * T_s*T_s*T_s;     // ∂P_tot/∂T at surface
     double kappa_s, dk_s_dlnrho, dk_s_dlnT;
     kappa_total_with_grad(op, rho_s, T_s, kappa_s, dk_s_dlnrho, dk_s_dlnT);
     const double dks_dP = (dk_s_dlnrho / rho_s) * drho_s_dP;
@@ -345,15 +381,15 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
     at(row++, 4*(N-1) + 2) = 1.0;
     // R = z(N-1) - z0:    ∂/∂z(N-1) = 1, ∂/∂z0 = -1
     { const int r = row++; at(r, 4*(N-1) + 3) = 1.0; at(r, cz0) = -1.0; }
-    // R = P(N-1) - (2/3) oz2 z0 / kappa_s:
-    //   ∂/∂P(N-1) = 1 + (2/3) oz2 z0 / kappa^2 * dkappa/dP
-    //   ∂/∂T(N-1) =     (2/3) oz2 z0 / kappa^2 * dkappa/dT
-    //   ∂/∂z0     = -(2/3) oz2 / kappa
+    // R = p_total(N-1) - (2/3) oz2 z0 / kappa_s:   (LHS is TOTAL pressure)
+    //   ∂/∂Pg(N-1) = 1            + (2/3) oz2 z0 / kappa^2 * dkappa/dPg
+    //   ∂/∂T(N-1)  = (4a/3)T^3    + (2/3) oz2 z0 / kappa^2 * dkappa/dT
+    //   ∂/∂z0      = -(2/3) oz2 / kappa
     {
         const int r = row++;
         const double f = (2.0/3.0) * oz2 * z0 / (kappa_s * kappa_s);
-        at(r, 4*(N-1) + 0) = 1.0 + f * dks_dP;
-        at(r, 4*(N-1) + 2) =       f * dks_dT;
+        at(r, 4*(N-1) + 0) = 1.0       + f * dks_dP;
+        at(r, 4*(N-1) + 2) = dPtot_s_dT + f * dks_dT;
         at(r, cz0)         = -(2.0/3.0) * oz2 / kappa_s;
     }
     assert(row == n);
@@ -493,9 +529,9 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
             // Density scales linearly with the column, so P_gas and Sigma do too.
             for (int i = 0; i < N; ++i) {
                 const double T_i = U[4*i+2];
-                const double rho_old = std::max(eos_rho(U[4*i+0], T_i), 0.0);
+                const double rho_old = std::max(rho_from_gas(U[4*i+0], T_i), 0.0);
                 const double rho_new = rho_old * scale;
-                U[4*i+0] = rho_new * cs2_gas_r + (a_rad/3.0)*T_i*T_i*T_i*T_i;  // refresh P (gas + rad)
+                U[4*i+0] = rho_new * cs2_gas_r;                // refresh GAS pressure Pg = rho cs2_gas
             }
             U[4*N+1] *= scale;                                          // Sigma0
         }
@@ -539,8 +575,8 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
             for (int i = 0; i < n; ++i) Utry[i] += lambda * dU[i];
             bool physical = true;
             for (int i = 0; i < N && physical; ++i) {
-                const double Pi = Utry[4*i+0], Ti = Utry[4*i+2];
-                if (Ti <= 0.0 || eos_rho(Pi, Ti) <= 0.0) physical = false;
+                const double Pgi = Utry[4*i+0], Ti = Utry[4*i+2];
+                if (Ti <= 0.0 || rho_from_gas(Pgi, Ti) <= 0.0) physical = false;
             }
             if (physical) {
                 column_residual(Utry, in, op, Rtry);
@@ -567,8 +603,8 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
         // The merit<1e-6 guard prevents a tiny improving line-search step (small
         // |lambda*dU|) from being mistaken for convergence while the residual is
         // still large. Both must hold: relative step small AND residual small.
-        // 1e-6 floor: the scaled residual cannot reliably reach much lower with a
-        // finite-difference numerical Jacobian (Jacobian truncation ~1e-7 step).
+        // 1e-6 floor: a practical residual floor for the analytic-Jacobian Newton
+        // solve below the scaled-residual noise from the bilinear opacity-LUT slopes.
         if (maxrel < in.tol && merit < 1e-6) { s.converged = true; break; }
     }
 
@@ -576,18 +612,20 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
     // On non-convergence return EMPTY profile vectors; the caller MUST check
     // `converged` before reading the solution.
     if (!s.converged) {
-        s.q.clear(); s.z.clear(); s.P.clear(); s.Q.clear(); s.T.clear(); s.rho.clear();
+        s.q.clear(); s.z.clear(); s.P.clear(); s.P_gas.clear(); s.Q.clear(); s.T.clear(); s.rho.clear();
         s.z0 = 0.0; s.Sigma0 = 0.0; s.tau_mid = 0.0;
         return s;
     }
 
-    // Unpack the converged state into the solution.
-    s.q.resize(N); s.z.resize(N); s.P.resize(N); s.Q.resize(N); s.T.resize(N); s.rho.resize(N);
+    // Unpack the converged state into the solution. Slot 0 holds GAS pressure;
+    // P is reported as TOTAL (reconstructed by addition) and P_gas as the raw state.
+    s.q.resize(N); s.z.resize(N); s.P.resize(N); s.P_gas.resize(N); s.Q.resize(N); s.T.resize(N); s.rho.resize(N);
     for (int i = 0; i < N; ++i) {
-        const double Pi = U[4*i+0], Qi = U[4*i+1], Ti = U[4*i+2], zi = U[4*i+3];
+        const double Pgi = U[4*i+0], Qi = U[4*i+1], Ti = U[4*i+2], zi = U[4*i+3];
         s.q[i] = (double)i / (N - 1);
-        s.P[i] = Pi; s.Q[i] = Qi; s.T[i] = Ti; s.z[i] = zi;
-        s.rho[i] = std::max(eos_rho(Pi, Ti), 0.0);
+        s.P_gas[i] = Pgi;
+        s.P[i] = p_total(Pgi, Ti); s.Q[i] = Qi; s.T[i] = Ti; s.z[i] = zi;
+        s.rho[i] = std::max(rho_from_gas(Pgi, Ti), 0.0);
     }
     s.z0 = U[4*N];
     s.Sigma0 = U[4*N+1];

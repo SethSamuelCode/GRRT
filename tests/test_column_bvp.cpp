@@ -122,6 +122,31 @@ static void test_analytic_vs_numerical_jacobian() {
     if (max_rel > 1e-3) { std::printf("  FAIL: analytic Jacobian disagrees with numerical\n"); failures++; }
 }
 
+static void test_analytic_vs_numerical_jacobian_hot() {
+    std::printf("\n=== analytic Jacobian matches numerical at a HOT (rad-pressure) point ===\n");
+    // Radiation-pressure-dominated operating point (beta = P_gas/P_tot << 1), the
+    // regime that ill-conditioned TOTAL-pressure state used to corrupt. With gas
+    // pressure as the state variable the cancellation is gone, so this cross-check
+    // is now reliable.
+    grrt::ColumnInputs in{}; in.T_eff = 6e6; in.shear = 5800.0; in.omega_z = 3000.0;
+    in.alpha = 0.1; in.rho_mid_guess = 1e-6; in.n_nodes = 24;
+    auto lut = grrt::build_opacity_luts(1e-16, 1e6, 3000.0, 1e8);
+    std::vector<double> Ja, Jn; int n = 0;
+    grrt::column_jacobians_test(in, lut, Ja, Jn, n);
+    std::vector<double> rowmax((size_t)n, 0.0);
+    for (int r = 0; r < n; ++r) for (int c = 0; c < n; ++c)
+        rowmax[r] = std::max(rowmax[r], std::abs(Jn[(size_t)r*n+c]));
+    double max_rel = 0.0; int bad_row=-1, bad_col=-1;
+    for (int r = 0; r < n; ++r) for (int c = 0; c < n; ++c) {
+        const double a = Ja[(size_t)r*n+c], num = Jn[(size_t)r*n+c];
+        const double scale = std::max(std::abs(num), 1e-6 * rowmax[r]);
+        const double rel = std::abs(a - num) / scale;
+        if (rel > max_rel && std::abs(a - num) > 1e-6 * rowmax[r]) { max_rel = rel; bad_row=r; bad_col=c; }
+    }
+    std::printf("  max relative mismatch = %.3e (worst at row %d col %d)\n", max_rel, bad_row, bad_col);
+    if (max_rel > 1e-3) { std::printf("  FAIL: analytic Jacobian disagrees with numerical (hot)\n"); failures++; }
+}
+
 static void test_converges_and_conserves() {
     std::printf("\n=== Newton converges; optically-thick self-heating + energy conservation ===\n");
     using namespace grrt::constants;
@@ -245,6 +270,28 @@ static void test_thickness_increases_with_teff() {
     else { std::printf("  PASS: hotter column thicker (z0 %.3e > %.3e)\n", sh.z0, sc.z0); }
 }
 
+static void test_hot_inner_disk_columns_converge() {
+    std::printf("\n=== hot inner-disk columns converge (regime the real disk derives) ===\n");
+    // Representative of a T_peak=1e7, 10 Msun, a=0.998 disk's inner columns:
+    // omega_z ~ 3000/s, shear ~ 5800/s near the peak-flux radius (~2 r_g).
+    // These T_eff values are what the disk DERIVES (not the easy gas-dominated
+    // values the other tests pick). EXPECTED TO FAIL until the rad-pressure-regime
+    // convergence barrier is fixed; do NOT relax the gate to make it pass.
+    auto lut = grrt::build_opacity_luts(1e-16, 1e6, 3000.0, 1e8);
+    const double Teffs[] = {1e6, 3e6, 6e6, 1e7};
+    int ok = 0;
+    for (double Te : Teffs) {
+        grrt::ColumnInputs in{}; in.T_eff = Te; in.shear = 5800.0; in.omega_z = 3000.0;
+        in.alpha = 0.1; in.rho_mid_guess = 1e-6; in.n_nodes = 200; in.max_iters = 120; in.tol = 1e-8;
+        auto s = grrt::solve_column_bvp(in, lut);
+        std::printf("  T_eff=%.0e converged=%d iters=%d resid=%.2e z0=%.3e\n",
+                    Te, s.converged, s.iters, s.final_residual, s.z0);
+        if (s.converged) ok++;
+    }
+    std::printf("  hot columns converged %d/4\n", ok);
+    if (ok < 4) { std::printf("  FAIL: not all hot inner-disk columns converge (solver rad-pressure barrier)\n"); failures++; }
+}
+
 static void test_warm_start_converges_fast() {
     std::printf("\n=== warm start from a converged neighbour converges fast ===\n");
     auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
@@ -257,7 +304,7 @@ static void test_warm_start_converges_fast() {
     const int N = a.n_nodes;
     std::vector<double> warm((size_t)4*N + 2, 0.0);
     for (int i = 0; i < N; ++i) {
-        warm[4*i+0]=sa.P[i]; warm[4*i+1]=sa.Q[i]; warm[4*i+2]=sa.T[i]; warm[4*i+3]=sa.z[i];
+        warm[4*i+0]=sa.P_gas[i]; warm[4*i+1]=sa.Q[i]; warm[4*i+2]=sa.T[i]; warm[4*i+3]=sa.z[i];
     }
     warm[4*N]=sa.z0; warm[4*N+1]=sa.Sigma0;
 
@@ -285,10 +332,12 @@ int main() {
     test_residual_count_finite();
     test_numerical_jacobian_finite();
     test_analytic_vs_numerical_jacobian();
+    test_analytic_vs_numerical_jacobian_hot();
     test_converges_and_conserves();
     test_physics_invariants();
     test_convergence_sweep();
     test_thickness_increases_with_teff();
+    test_hot_inner_disk_columns_converge();
     test_warm_start_converges_fast();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;

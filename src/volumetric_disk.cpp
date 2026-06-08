@@ -38,6 +38,23 @@ static double smoothstep(double edge0, double edge1, double x) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+// Fixed BVP vertical resolution. All columns share this N so a converged
+// neighbour's state vector (length 4N+2) is a valid warm start for the next
+// column (numerical continuation). Richardson auto-N is deferred (refinement 1).
+static constexpr int kColumnNodes = 200;
+
+// Pack a converged column solution into a Newton state vector U (length 4N+2)
+// suitable as a warm start for solve_column_bvp.
+static std::vector<double> pack_column_U(const ColumnBVPSolution& s) {
+    const int N = (int)s.z.size();
+    std::vector<double> U((size_t)4*N + 2, 0.0);
+    // Slot 0 is the GAS-pressure Newton state variable (cancellation-free); pack
+    // P_gas, NOT the reconstructed total P, so the warm start has no round-trip loss.
+    for (int i = 0; i < N; ++i) { U[4*i+0]=s.P_gas[i]; U[4*i+1]=s.Q[i]; U[4*i+2]=s.T[i]; U[4*i+3]=s.z[i]; }
+    U[4*N]=s.z0; U[4*N+1]=s.Sigma0;
+    return U;
+}
+
 // ============================================================================
 // Constructor
 // ============================================================================
@@ -157,16 +174,13 @@ VolumetricDisk::VolumetricDisk(double mass, double spin, double r_outer,
     compute_plunging_region_decay();
     apply_outer_radial_taper();
 
-    std::printf("[VolumetricDisk] Refining LUT sizing (n_r=%d, n_z=%d initial)...\n",
-                n_r_, n_z_);
-
-    auto [final_n_r, final_n_z] = nested_refine();
-    n_r_ = final_n_r;
-    n_z_ = final_n_z;
-
-    std::printf("[VolumetricDisk] Refinement done: n_r=%d, n_z=%d\n", n_r_, n_z_);
-
-    // Final vertical-profile build at the converged (n_r_, n_z_)
+    // Fixed LUT resolution (Approach A retires Richardson refinement — the BVP
+    // solves on a proper q-grid and does not alias like the old solve_column).
+    n_z_ = kColumnNodes;
+    z_max_lut_.assign(n_r_, 0.0);
+    rho_profile_lut_.assign((size_t)n_r_ * n_z_, 0.0);
+    T_profile_lut_.assign((size_t)n_r_ * n_z_, 0.0);
+    std::printf("[VolumetricDisk] Solving column BVPs (n_r=%d, n_z=%d)...\n", n_r_, n_z_);
     compute_vertical_profiles();
 
     std::printf("[VolumetricDisk] Normalizing density...\n");
@@ -950,36 +964,173 @@ VolumetricDisk::ColumnSolution VolumetricDisk::solve_column(
 }
 
 // ============================================================================
+// make_column_inputs() / store_column()
+// ============================================================================
+
+ColumnInputs VolumetricDisk::make_column_inputs(int ri, double r) const {
+    using namespace constants;
+    ColumnInputs in{};
+    in.T_eff = T_eff_lut_[ri];
+    const double oz_geom = std::sqrt(std::max(omega_z_sq(r), 0.0));   // 1/M
+    in.omega_z = oz_geom * c_cgs / r_g_;                              // 1/s
+    const double sqM = std::sqrt(mass_);
+    const double denom = r * std::sqrt(r) + spin_ * sqM;
+    const double dOmega_dr = -1.5 * sqM * std::sqrt(r) / (denom * denom);
+    const double shear_geom = std::abs(r * dOmega_dr);               // 1/M
+    in.shear = shear_geom * c_cgs / r_g_;                            // 1/s
+    in.alpha = (params_.alpha > 0.0) ? params_.alpha : 0.1;
+    in.rho_mid_guess = (rho_mid_est_ > 0.0) ? rho_mid_est_ : 1e-8;
+    in.n_nodes = kColumnNodes;
+    in.max_iters = 80;
+    in.tol = 1e-8;
+    return in;
+}
+
+ColumnBVPSolution VolumetricDisk::bootstrap_column(const ColumnInputs& target) const {
+    // Known-good easy column (cold-converges; see test-column-bvp). We continue in
+    // (T_eff, omega_z, shear, rho_mid_guess) from this to the target. Intermediate
+    // states need not be physical — only the endpoint (t=1) is the real column.
+    auto lerp_log = [](double a, double b, double f) {
+        return std::exp((1.0 - f) * std::log(a) + f * std::log(b));
+    };
+    const double T0 = 5e4, oz0 = 2e3, sh0 = 3e3, rho0 = 1e-2;
+    auto inputs_at = [&](double t) {
+        ColumnInputs in = target;   // copies n_nodes/alpha/max_iters/tol
+        in.T_eff        = lerp_log(T0,   target.T_eff,        t);
+        in.omega_z      = lerp_log(oz0,  target.omega_z,      t);
+        in.shear        = lerp_log(sh0,  target.shear,        t);
+        in.rho_mid_guess= lerp_log(rho0, target.rho_mid_guess,t);
+        return in;
+    };
+
+    // t=0: cold-solve the easy anchor.
+    ColumnBVPSolution cur = solve_column_bvp(inputs_at(0.0), opacity_luts_, nullptr);
+    if (!cur.converged) return cur;   // easy anchor failed (should not happen)
+
+    // Adaptive continuation t: 0 -> 1. Grow the step on success, halve on failure.
+    double t = 0.0, dt = 0.1;
+    int guard = 0;
+    while (t < 1.0 && guard++ < 2000) {
+        const double t_try = std::min(1.0, t + dt);
+        std::vector<double> warm = pack_column_U(cur);
+        ColumnBVPSolution s = solve_column_bvp(inputs_at(t_try), opacity_luts_, &warm);
+        if (s.converged) {
+            cur = s; t = t_try;
+            if (dt < 0.2) dt *= 1.5;
+        } else {
+            dt *= 0.5;
+            if (dt < 1e-4) return s;   // stalled -> non-converged failure (no fabrication)
+        }
+    }
+    return cur;   // converged target at t=1
+}
+
+void VolumetricDisk::store_column(int ri, const ColumnBVPSolution& sol, bool store_log) {
+    const double z0_geom = sol.z0 / r_g_;
+    z_max_lut_[ri] = z0_geom;
+    const double rho_mid = sol.rho.front();
+    rho_mid_lut_[ri] = rho_mid;
+    const int N = (int)sol.z.size();
+    for (int zi = 0; zi < n_z_; ++zi) {
+        const double frac = (n_z_ > 1) ? (double)zi / (n_z_ - 1) : 0.0;
+        const double z_cm = frac * sol.z0;
+        int lo = 0;
+        while (lo + 1 < N && sol.z[lo + 1] < z_cm) ++lo;
+        const int hi = std::min(lo + 1, N - 1);
+        const double span = sol.z[hi] - sol.z[lo];
+        const double t = (span > 0.0) ? (z_cm - sol.z[lo]) / span : 0.0;
+        const double rlo = std::max(sol.rho[lo], 1e-300);
+        const double rhi = std::max(sol.rho[hi], 1e-300);
+        const double rho_z = std::exp((1.0 - t) * std::log(rlo) + t * std::log(rhi));
+        const double rho_norm = std::max(rho_z / rho_mid, 1e-300);
+        rho_profile_lut_[ri * n_z_ + zi] = store_log ? std::log(rho_norm) : rho_norm;
+        T_profile_lut_[ri * n_z_ + zi] = (1.0 - t) * sol.T[lo] + t * sol.T[hi];
+    }
+}
+
+// ============================================================================
 // compute_vertical_profiles()
 // ============================================================================
 
 void VolumetricDisk::compute_vertical_profiles() {
-    z_max_lut_.resize(n_r_);
-    rho_profile_lut_.resize(n_r_ * n_z_, 0.0);
-    T_profile_lut_.resize(n_r_ * n_z_, 0.0);
+    z_max_lut_.assign(n_r_, 0.0);
+    rho_profile_lut_.assign(n_r_ * n_z_, 0.0);
+    T_profile_lut_.assign(n_r_ * n_z_, 0.0);
 
-    for (int ri = 0; ri < n_r_; ++ri) {
-        const double r = r_min_ + (r_outer_ - r_min_) * ri / (n_r_ - 1);
-        ColumnSolution col = solve_column(r, H_lut_[ri], T_eff_lut_[ri],
-                                           rho_mid_lut_[ri], n_z_);
+    auto r_at = [&](int i){ return r_min_ + (r_outer_ - r_min_) * i / (n_r_ - 1); };
 
-        // Convergence warning (spec requirement): fire if the final
-        // iteration-to-iteration relative density delta did not drop below threshold.
-        if (col.max_delta >= 0.001) {
-            std::fprintf(stderr,
-                "[VolumetricDisk] WARNING: vertical profile did not converge at r_idx=%d (max delta=%.2e)\n",
-                ri, col.max_delta);
+    int isco_idx = -1, peak_idx = -1;
+    double peak_T = 0.0;
+    for (int i = 0; i < n_r_; ++i) {
+        const double r = r_at(i);
+        if (r >= r_isco_ && T_eff_lut_[i] > 0.0) {
+            if (isco_idx < 0) isco_idx = i;
+            if (T_eff_lut_[i] > peak_T) { peak_T = T_eff_lut_[i]; peak_idx = i; }
         }
+    }
+    if (peak_idx < 0) {
+        std::fprintf(stderr, "[VolumetricDisk] WARNING: no orbiting columns with T_eff>0\n");
+        return;
+    }
 
-        z_max_lut_[ri] = col.z_max;
-        for (int zi = 0; zi < n_z_; ++zi) {
-            rho_profile_lut_[ri * n_z_ + zi] = col.rho_z[zi];
-            T_profile_lut_[ri * n_z_ + zi]   = col.T_z[zi];
+    std::vector<std::vector<double>> Uconv(n_r_);
+    auto solve_bin = [&](int ri, const std::vector<double>* warm) {
+        ColumnInputs in = make_column_inputs(ri, r_at(ri));
+        // (*warm)[0] is GAS pressure now; density is cancellation-free rho = Pg mu m_p/(k_B T).
+        if (warm) {
+            const double rho_warm = (*warm)[0] * grrt::constants::mu_fully_ionized * grrt::constants::m_p
+                                  / (grrt::constants::k_B * (*warm)[2]);
+            in.rho_mid_guess = std::max(rho_warm, in.rho_mid_guess);
+        }
+        return solve_column_bvp(in, opacity_luts_, warm);
+    };
+
+    int converged_count = 0, failed_count = 0;
+
+    {
+        ColumnInputs in_peak = make_column_inputs(peak_idx, r_at(peak_idx));
+        ColumnBVPSolution s = bootstrap_column(in_peak);
+        if (!s.converged) {
+            std::fprintf(stderr, "[VolumetricDisk] WARNING: homotopy bootstrap of peak-flux column ri=%d failed\n", peak_idx);
+            failed_count++;
+        } else {
+            store_column(peak_idx, s, /*store_log=*/false);
+            Uconv[peak_idx] = pack_column_U(s);
+            converged_count++;
+        }
+    }
+    for (int ri = peak_idx + 1; ri < n_r_; ++ri) {
+        const std::vector<double>* warm = Uconv[ri-1].empty() ? nullptr : &Uconv[ri-1];
+        auto s = solve_bin(ri, warm);
+        if (s.converged) { store_column(ri, s, false); Uconv[ri] = pack_column_U(s); converged_count++; }
+        else failed_count++;
+    }
+    for (int ri = peak_idx - 1; ri >= isco_idx; --ri) {
+        const std::vector<double>* warm = Uconv[ri+1].empty() ? nullptr : &Uconv[ri+1];
+        auto s = solve_bin(ri, warm);
+        if (s.converged) { store_column(ri, s, false); Uconv[ri] = pack_column_U(s); converged_count++; }
+        else failed_count++;
+    }
+
+    if (isco_idx > 0 && !Uconv[isco_idx].empty()) {
+        const double z_max_isco = z_max_lut_[isco_idx];
+        const double H_isco = H_lut_[isco_idx];
+        const double rho_mid_isco = rho_mid_lut_[isco_idx];
+        for (int ri = 0; ri < isco_idx; ++ri) {
+            const double r = r_at(ri);
+            const double Hr = H_lut_[ri];
+            z_max_lut_[ri] = (H_isco > 0.0) ? z_max_isco * (Hr / H_isco) : z_max_isco;
+            rho_mid_lut_[ri] = rho_mid_isco * taper(r);
+            for (int zi = 0; zi < n_z_; ++zi) {
+                rho_profile_lut_[ri * n_z_ + zi] = rho_profile_lut_[isco_idx * n_z_ + zi];
+                T_profile_lut_[ri * n_z_ + zi]   = T_profile_lut_[isco_idx * n_z_ + zi];
+            }
         }
     }
 
-    std::printf("[VolumetricDisk] Vertical profiles computed via solve_column "
-                "(n_r=%d, n_z=%d)\n", n_r_, n_z_);
+    std::printf("[VolumetricDisk] Vertical profiles via column BVP "
+                "(n_r=%d, n_z=%d, peak ri=%d, isco ri=%d, converged=%d failed=%d)\n",
+                n_r_, n_z_, peak_idx, isco_idx, converged_count, failed_count);
 }
 
 // ============================================================================

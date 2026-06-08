@@ -24,7 +24,8 @@ struct ColumnInputs {
 struct ColumnBVPSolution {
     std::vector<double> q;     ///< grid coordinate [0,1]
     std::vector<double> z;     ///< height [cm]
-    std::vector<double> P;     ///< pressure [erg/cm^3]
+    std::vector<double> P;     ///< TOTAL pressure (gas + radiation) [erg/cm^3]
+    std::vector<double> P_gas; ///< GAS pressure [erg/cm^3] — the cancellation-free Newton state variable; pack THIS (not P) for warm starts
     std::vector<double> Q;     ///< vertical flux [erg/cm^2/s]
     std::vector<double> T;     ///< temperature [K]
     std::vector<double> rho;   ///< density [g/cm^3]

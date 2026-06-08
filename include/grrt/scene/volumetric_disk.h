@@ -3,6 +3,7 @@
 
 #include "grrt/color/opacity.h"
 #include "grrt/math/noise.h"
+#include "grrt/scene/disk_column_bvp.h"
 #include "grrt_export.h"
 #include <utility>
 #include <vector>
@@ -244,6 +245,24 @@ private:
     /// resolution. Iteratively extends z_max until rho(z_max) < CONV_FLOOR or hits cap.
     ColumnSolution solve_column(double r, double H, double T_eff,
                                  double rho_mid_proportional, int n_z) const;
+
+    /// Build the CGS BVP inputs for radial bin ri (radius r) from the radial LUTs.
+    /// Converts geometric Omega_z and the exact Kerr shear |r dOmega/dr| to 1/s via
+    /// r_g_, and seeds rho_mid_guess from rho_mid_est_ (overridden by the warm march).
+    ColumnInputs make_column_inputs(int ri, double r) const;
+
+    /// Converge one column by parameter-space homotopy from a known-good easy
+    /// column to `target`'s inputs (numerical continuation, adaptive step). Used
+    /// to bootstrap the march's anchor for hot disks where no column cold-starts.
+    /// Returns the converged target solution, or a non-converged solution if the
+    /// continuation stalls (caller treats that as failure — no fabricated profile).
+    ColumnBVPSolution bootstrap_column(const ColumnInputs& target) const;
+
+    /// Resample a converged column (q-grid, CGS) onto the uniform-z LUT for bin ri:
+    /// z_max_lut_[ri] = z0/r_g_ (geometric); rho_mid_lut_[ri] = rho.front() (absolute cgs);
+    /// rho_profile_lut_[ri,.] = normalized rho/rho_mid (log if store_log else linear);
+    /// T_profile_lut_[ri,.] = T(z) linear.
+    void store_column(int ri, const ColumnBVPSolution& sol, bool store_log);
 
     /// Compare two ColumnSolutions (lo=coarse, hi=fine) using an optical-depth-weighted
     /// max-envelope metric. Returns a scalar error estimate for Richardson refinement.

@@ -821,6 +821,40 @@ void test_accretion_rate() {
     }
 }
 
+void test_bvp_profile_not_collapsed() {
+    std::printf("\n=== BVP vertical profile is resolved (not collapsed to 1-2 bins) ===\n");
+    const auto& disk = shared_disk_no_noise();
+    const double r = 8.0;
+    const double zm = disk.z_max_at(r);
+    if (!(zm > 0.0)) { std::printf("  FAIL: z_max <= 0\n"); failures++; return; }
+    const double rho_mid = disk.density_cgs(r, 0.0, 0.0);
+    const double rho_half = disk.density_cgs(r, 0.5 * zm, 0.0);
+    std::printf("  rho_mid=%.3e rho(0.5 z_max)=%.3e ratio=%.3e\n",
+                rho_mid, rho_half, rho_half / std::max(rho_mid, 1e-300));
+    if (!(rho_half / std::max(rho_mid, 1e-300) > 1e-3)) {
+        std::printf("  FAIL: density collapses before half z_max (the original bug)\n"); failures++;
+    } else { std::printf("  PASS\n"); }
+}
+
+void test_bvp_radial_smoothness() {
+    std::printf("\n=== rho_mid(r), z_max(r) smooth across radius (no holes) ===\n");
+    const auto& disk = shared_disk_no_noise();
+    int jumps = 0;
+    double rho_prev = disk.density_cgs(disk.r_isco() + 0.1, 0.0, 0.0);
+    for (int i = 1; i < 100; ++i) {
+        const double r = disk.r_isco() + 0.1 + (20.0 - disk.r_isco()) * i / 100.0;
+        const double rho = disk.density_cgs(r, 0.0, 0.0);
+        if (rho_prev > 0.0 && rho > 0.0) {
+            const double jump = std::abs(std::log(rho) - std::log(rho_prev));
+            if (jump > 1.0) { jumps++; }
+        }
+        rho_prev = rho;
+    }
+    std::printf("  adjacent-sample e-fold jumps: %d\n", jumps);
+    if (jumps > 2) { std::printf("  FAIL: rho_mid(r) not smooth (holes)\n"); failures++; }
+    else { std::printf("  PASS\n"); }
+}
+
 int main() {
     test_construction();
     test_noise_correlation_length();
@@ -838,6 +872,8 @@ int main() {
     test_h_continuous_across_isco();
     test_sigma_s_phys_in_range();
     test_density_strictly_positive_inside_volume();
+    test_bvp_profile_not_collapsed();
+    test_bvp_radial_smoothness();
     test_density_lognormal_mean();
     test_inside_volume_tight_margin();
     test_validate_luts_clean_construction();

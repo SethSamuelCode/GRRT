@@ -43,5 +43,10 @@ A living list of refinements we consciously deferred while building the first-pr
 **Now:** suspended (CUDA is behind). The CPU path is the deliverable.
 **Refinement:** carry the log-density LUT encoding + absolute `ρ_mid` into `cuda/cuda_vol_host_data.cpp` and the device interpolation; optionally GPU-parallelize the per-column BVP construction (embarrassingly parallel, plain-struct/no-virtual solver is already CUDA-shaped). Restores the `CUDA == CPU` invariant. (Spec §11/§16.)
 
+### 9. Super-Eddington thick disk / radiation funnel (future model)
+**Now:** the structure solver targets thin → near-Eddington disks (`f_Edd ≲ 1` accurate; graceful to ~1–2 via the slim-disk subsystem). Genuinely super-Eddington accretion (`f_Edd ≫ 1` — real and observed: ULX pulsars at 100–1000×, tidal disruption events, super-Eddington quasars) is **out of scope** of the slim disk.
+**Refinement:** a separate **super-Eddington thick-disk / radiation-funnel model** ("Polish doughnut" — Abramowicz, Jaroszyński & Sikora 1978): a geometrically thick (`H/r ~ 1`), radiation-pressure-supported torus with a polar funnel, radiation-driven winds, and (for the most accurate version) radiation-MHD structure. The grey-diffusion approximation breaks down (`τ_eff < 1`) in the inner funnel, so this needs a different radiative-transport treatment. Enables rendering ULXs / TDEs / super-Eddington quasars. (Distinct from, and larger than, the slim-disk subsystem.)
+**Why deferred:** the slim disk covers the `f_Edd ≈ 0.9` workhorse case and the whole sub-to-near-Eddington range (it reduces exactly to the thin disk at low `Ṁ`); the super-Eddington funnel is a distinct, larger, more uncertain subsystem (winds + thick geometry + non-grey transport).
+
 ---
 *Source context: built during the Approach-A redesign (spec `2026-06-01-disk-first-principles-vertical-structure-design.md`, plans `2026-06-01-disk-first-principles-foundation.md` and `2026-06-04-disk-column-bvp-solver.md`). Verified formulas: `references/disk-physics-formulas.md`.*

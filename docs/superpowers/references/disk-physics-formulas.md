@@ -181,6 +181,22 @@ surface   z=z₀:  Q = σ_SB T_eff⁴                    all flux escaped
 
 **Credits.** This formulation follows the standard disc vertical-structure treatment of **Hubeny 1990** (ApJ 351, 632) and is verified against the open-source code of **Tavleev, Lipunova & Malanchev 2023**, "Analysis of accretion disc structure and stability using open code for vertical structure," MNRAS (DOI [10.1093/mnras/stad1881](https://doi.org/10.1093/mnras/stad1881), arXiv [2303.02184](https://arxiv.org/abs/2303.02184)). GRRT's solver uses Newton relaxation rather than their shooting/optimization, and grids in column-mass fraction, but the equations and boundary conditions are theirs.
 
+## 21. Numerical formulation: gas-pressure state variable (radiation-pressure conditioning)
+The §20 BVP is **physically** in total pressure `P` (hydrostatic §7 and viscous heating §8 both use total `P` — the standard α-model). But the **Newton solver must carry GAS pressure `P_gas` as the per-node state variable**, not total `P`. Reason: density from total pressure,
+```
+ρ = (P − a T⁴/3) · μ m_p/(k_B T)
+```
+subtracts two near-equal large numbers in the radiation-pressure-dominated regime (`P ≈ P_rad`, β ≡ P_gas/P → 0), so `ρ` becomes hypersensitive to `T` (`∂ρ/∂T` grows ∝ 1/β) and Newton's temperature rows cannot be satisfied — the solver stalls (ill-conditioning, not just precision loss). Carry `P_gas` instead:
+```
+ρ        = P_gas · μ m_p/(k_B T)        (no subtraction; ∂ρ/∂T = −ρ/T, well-conditioned)
+P_total  = P_gas + (1/3) a T⁴           (reconstructed by ADDITION wherever the physics needs total P:
+                                         the hydrostatic LHS, viscous heating, the surface-pressure BC)
+```
+The physics is identical — only the state representation changes. State vector: `[P_gas, Q, T, z]×N + [z₀, Σ₀]`.
+*Externally verified: Tavleev/Lipunova/Malanchev 2023 (§20 credit) relate `ρ` to **gas** pressure (`ρ = μ P_gas/ℜT`) and track `P_rad = aT⁴/3` separately — never recovering `P_gas` by subtraction. Code: `rho_from_gas`, `p_total` in `disk_column_bvp.cpp`; analytic-vs-numerical Jacobian cross-check is exact (0.0) at both gas- and radiation-dominated operating points.*
+
+**Known limit — radiation-pressure fold (β ≲ 2.5e-3).** The conditioning fix converges down to β ≈ 2.5e-3 (`T_eff ≈ 5.6e6 K` for the canonical inner disk). Below that, the **standard α(total-P) thin-disk vertical structure folds** — a genuine solution-branch turning point at the photosphere (the *hydrostatic/thickness* rows fail, not the temperature rows). This is the radiation-pressure-dominated α-disk limit the Tavleev code avoids entirely (*"when `P_rad ≳ P_gas` the solution becomes problematic; our code does not calculate such discs"*) — a **physical** limit of the `α·P_total` prescription (Lightman & Eardley 1974 thermal-viscous instability), not a numerical one. The standard remedy is the **β-prescription** (viscous stress ∝ `P_gas` instead of total `P`), which removes the fold at the cost of changing the heating law in the inner disk. *[STATUS 2026-06-08: decision pending — the canonical hot disk (`T_peak=1e7`) sits below the fold; see the BVP-wiring plan.]*
+
 ---
 
 ## Error-trap checklist (read before editing any formula)
@@ -191,3 +207,4 @@ surface   z=z₀:  Q = σ_SB T_eff⁴                    all flux escaped
 5. **Optical depth needs CGS lengths** (`× r_g`), never geometric `dz`.
 6. **Photosphere `τ = 2/3`**, not `1`.
 7. **The vertical-structure BVP needs THREE surface BCs** (§20) — `Q`, `T`, *and* the surface pressure `P=(2/3)ω²z₀/κ`. Omitting the surface-pressure condition leaves the free parameters (`z₀`, `Σ₀`) unpinned and the solver under-determined.
+8. **The Newton solver carries GAS pressure `P_gas`, not total `P`** (§21). Recover total `P = P_gas + aT⁴/3` by *addition*; recovering `P_gas = P − P_rad` from a stored total is catastrophic cancellation in the radiation-dominated regime and stalls the solver. Physics still uses total `P` (hydrostatic, viscous heating, surface BC).
