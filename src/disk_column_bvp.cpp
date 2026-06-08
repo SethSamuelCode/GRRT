@@ -122,16 +122,22 @@ static void column_residual(const std::vector<double>& U, const ColumnInputs& in
     assert(row == 4*N + 2);
 }
 
-/// Build a gas-pressure Gaussian column seed state (length 4N+2).
+/// Build a radiation-aware Gaussian column seed state (length 4N+2).
 /// Isothermal (T = T_eff), linear z grid up to 4H, Gaussian rho.
+/// H uses the TOTAL (gas + radiation) sound speed so the seed width is correct
+/// in the radiation-dominated (hot) regime; Newton converges from a seed that
+/// matches the true column width rather than one that is far too thin.
 /// Used by both column_residual_test and the numerical Jacobian hook.
 static std::vector<double> build_seed(const ColumnInputs& in) {
     using namespace constants;
     const int N = in.n_nodes;
-    const double cs2 = k_B * in.T_eff / (mu_fully_ionized * m_p);
-    const double H   = std::sqrt(cs2) / in.omega_z;
-    const double z0  = 4.0 * H;                                   // ~99.97% of a Gaussian column
+    const double cs2_gas = k_B * in.T_eff / (mu_fully_ionized * m_p);  // gas-only sound speed^2
     const double rho_mid = in.rho_mid_guess;
+    const double P_rad   = (a_rad / 3.0) * in.T_eff * in.T_eff * in.T_eff * in.T_eff;
+    // Total sound speed^2: (P_gas_mid + P_rad) / rho_mid = cs2_gas + P_rad/rho_mid
+    const double cs2_total = cs2_gas + P_rad / rho_mid;
+    const double H   = std::sqrt(cs2_total) / in.omega_z;
+    const double z0  = 4.0 * H;                                   // ~99.97% of a Gaussian column
     const double Sigma0  = std::sqrt(2.0 * std::numbers::pi) * rho_mid * H;
     std::vector<double> U(4*N + 2, 0.0);
     for (int i = 0; i < N; ++i) {
@@ -142,7 +148,7 @@ static std::vector<double> build_seed(const ColumnInputs& in) {
         // guards 1/rho on transient Newton iterates.
         const double rho = std::max(rho_mid * std::exp(-zi*zi/(2.0*H*H)), 1e-20);
         const double Ti = in.T_eff;                              // isothermal seed (Newton warms the midplane)
-        const double Pi = rho * cs2 + (a_rad/3.0)*Ti*Ti*Ti*Ti;
+        const double Pi = rho * cs2_gas + (a_rad/3.0)*Ti*Ti*Ti*Ti;  // P_gas(local rho) + P_rad; cs2_gas not double-counted
         const double Qi = surface_flux(in.T_eff) * q;            // 0 midplane → σT_eff^4 surface
         U[4*i+0]=Pi; U[4*i+1]=Qi; U[4*i+2]=Ti; U[4*i+3]=zi;
     }
@@ -454,13 +460,21 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
     // balanced) column, from which the relaxation converges quadratically.
     {
         using namespace constants;
-        const double cs2 = k_B * in.T_eff / (mu_fully_ionized * m_p);
-        const double H   = std::sqrt(cs2) / in.omega_z;
-        // Heating per face for the current (Gaussian, P≈rho cs2) seed:
-        //   ∫0^∞ alpha*shear*rho_mid*cs2*exp(-z^2/2H^2) dz = alpha*shear*P_mid*H*sqrt(pi/2)
+        // Mirror the radiation-aware H from build_seed (cs2_gas + P_rad/rho_mid)
+        // so scale cancels the H factor in Sigma0 and the seed lands on the correct
+        // flux-balanced density regardless of how much radiation contributes to H.
+        const double cs2_gas_r = k_B * in.T_eff / (mu_fully_ionized * m_p);
         const double rho_mid_seed = in.rho_mid_guess;
-        const double P_mid_seed   = rho_mid_seed * cs2;
-        const double heat_seed    = in.alpha * in.shear * P_mid_seed * H * std::sqrt(std::numbers::pi / 2.0);
+        const double P_rad_seed   = (a_rad / 3.0) * in.T_eff * in.T_eff * in.T_eff * in.T_eff;
+        const double H_r = std::sqrt(cs2_gas_r + P_rad_seed / rho_mid_seed) / in.omega_z;
+        // Heating per face for the current seed (Gaussian rho, P_gas ≈ rho cs2_gas):
+        //   ∫0^∞ alpha*shear*rho_mid*cs2_gas*exp(-z^2/2H_r^2) dz
+        //   = alpha * shear * P_gas_mid * H_r * sqrt(pi/2)
+        // Using H_r here (not the old gas-only H) keeps scale consistent with the
+        // radiation-aware Sigma0 in U, so the final Sigma0 = 2*flux/(alpha*shear*cs2_gas)
+        // matches the gas-dominated limit identically.
+        const double P_gas_mid_seed = rho_mid_seed * cs2_gas_r;
+        const double heat_seed    = in.alpha * in.shear * P_gas_mid_seed * H_r * std::sqrt(std::numbers::pi / 2.0);
         const double flux_target  = surface_flux(in.T_eff);
         // scale can be large if shear/alpha are near-zero (heat_seed -> 0); the
         // caller is expected to supply physically reasonable (nonzero) inputs.
@@ -470,7 +484,7 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
             const double T_i = U[4*i+2];
             const double rho_old = std::max(eos_rho(U[4*i+0], T_i), 0.0);
             const double rho_new = rho_old * scale;
-            U[4*i+0] = rho_new * cs2 + (a_rad/3.0)*T_i*T_i*T_i*T_i;  // refresh P (gas + rad)
+            U[4*i+0] = rho_new * cs2_gas_r + (a_rad/3.0)*T_i*T_i*T_i*T_i;  // refresh P (gas + rad)
         }
         U[4*N+1] *= scale;                                          // Sigma0
     }
@@ -546,7 +560,16 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
         if (maxrel < in.tol && merit < 1e-6) { s.converged = true; break; }
     }
 
-    // Unpack the (converged or best) state into the solution.
+    // On non-convergence: discard the last (possibly wild) Newton iterate and fall
+    // back to the analytic gas-pressure Gaussian seed, which is always sane,
+    // monotone, and EOS-valid. This guarantees a physical (if approximate) profile
+    // is returned rather than a non-physical iterate. converged stays false.
+    if (!s.converged) {
+        U = build_seed(in);
+        s.used_fallback = true;
+    }
+
+    // Unpack the (converged or fallback) state into the solution.
     s.q.resize(N); s.z.resize(N); s.P.resize(N); s.Q.resize(N); s.T.resize(N); s.rho.resize(N);
     for (int i = 0; i < N; ++i) {
         const double Pi = U[4*i+0], Qi = U[4*i+1], Ti = U[4*i+2], zi = U[4*i+3];

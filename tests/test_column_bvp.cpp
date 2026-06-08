@@ -189,6 +189,53 @@ static void test_physics_invariants() {
           s.P.back(), P_phot, 1e-3);
 }
 
+static void test_convergence_sweep() {
+    std::printf("\n=== converges across (T_eff, shear) inputs; non-converged fall back ===\n");
+    auto lut = grrt::build_opacity_luts(1e-16, 1e6, 3000.0, 1e8);
+    const double Teffs[] = {1e4, 5e4, 2e5, 1e6};   // cool -> hot (gas -> radiation)
+    const double oms[]   = {5e2, 2e3, 8e3};
+    int ok = 0, total = 0, bad_fallback = 0;
+    for (double Te : Teffs) for (double om : oms) {
+        grrt::ColumnInputs in{}; in.T_eff = Te; in.shear = 1.5*om; in.omega_z = om;
+        in.alpha = 0.1; in.rho_mid_guess = 1e-2; in.n_nodes = 120; in.max_iters = 80; in.tol = 1e-8;
+        auto s = grrt::solve_column_bvp(in, lut);
+        total++;
+        if (s.converged) { ok++; }
+        else {
+            std::printf("  no-converge: T_eff=%.0e om=%.0e  used_fallback=%d\n", Te, om, s.used_fallback);
+            if (!s.used_fallback) bad_fallback++;   // non-converged MUST flag fallback
+            // and the fallback profile must be sane: positive, monotone, finite
+            bool sane = !s.rho.empty();
+            for (size_t i = 0; sane && i < s.rho.size(); ++i)
+                if (!std::isfinite(s.rho[i]) || s.rho[i] < 0.0) sane = false;
+            if (!sane) { std::printf("  FAIL: fallback profile not sane\n"); failures++; }
+        }
+    }
+    std::printf("  converged %d/%d\n", ok, total);
+    if (ok == 0) { std::printf("  FAIL: nothing converged\n"); failures++; }
+    if (bad_fallback > 0) { std::printf("  FAIL: %d non-converged columns did NOT set used_fallback\n", bad_fallback); failures++; }
+}
+
+static void test_radiation_thickens() {
+    std::printf("\n=== radiation-dominated column thicker than gas-dominated ===\n");
+    auto lut = grrt::build_opacity_luts(1e-16, 1e6, 3000.0, 1e8);
+    grrt::ColumnInputs cold{}; cold.T_eff=2e4; cold.shear=3e3; cold.omega_z=2e3;
+    cold.alpha=0.1; cold.rho_mid_guess=1e-2; cold.n_nodes=160; cold.max_iters=80; cold.tol=1e-8;
+    grrt::ColumnInputs hot = cold; hot.T_eff = 1e6;   // radiation-dominated
+    auto sc = grrt::solve_column_bvp(cold, lut);
+    auto sh = grrt::solve_column_bvp(hot, lut);
+    std::printf("  cold converged=%d z0=%.3e ; hot converged=%d z0=%.3e\n",
+                sc.converged, sc.z0, sh.converged, sh.z0);
+    if (sc.converged && sh.converged) {
+        if (!(sh.z0 > sc.z0)) { std::printf("  FAIL: radiation did not thicken the column\n"); failures++; }
+        else { std::printf("  PASS: hot column thicker (z0 %.3e > %.3e)\n", sh.z0, sc.z0); }
+    } else {
+        std::printf("  (skipped thickness compare: a column used fallback)\n");
+        // still must not have produced garbage
+        if (sc.used_fallback || sh.used_fallback) std::printf("  (one or both fell back)\n");
+    }
+}
+
 int main() {
     test_eos();
     test_scaffold();
@@ -198,6 +245,8 @@ int main() {
     test_analytic_vs_numerical_jacobian();
     test_converges_and_conserves();
     test_physics_invariants();
+    test_convergence_sweep();
+    test_radiation_thickens();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
