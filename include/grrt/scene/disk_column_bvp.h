@@ -43,8 +43,14 @@ struct ColumnBVPSolution {
 GRRT_EXPORT double eos_rho(double P, double T);
 
 /// Solve the grey vertical-structure BVP for one column (Newton relaxation).
+/// @param warm_start optional initial state U (length 4·n_nodes+2) from a
+///        converged neighbouring column (numerical continuation). When null or
+///        wrong-sized, the solver builds its own flux-balanced analytic seed.
+///        On a size mismatch the solution's `converged`/`iters` fields therefore
+///        reflect the cold-start run, not a warm one.
 GRRT_EXPORT ColumnBVPSolution solve_column_bvp(const ColumnInputs& in,
-                                               const OpacityLUTs& opacity);
+                                               const OpacityLUTs& opacity,
+                                               const std::vector<double>* warm_start = nullptr);
 
 /// Test hook: build a crude EOS-valid state and evaluate the BVP residual on it.
 /// Fills U (length 4N+2) and R (length 4N+2). For unit tests only.

@@ -437,56 +437,68 @@ static double scaled_residual_norm(const std::vector<double>& U,
     return std::sqrt(sum / (double)R.size());
 }
 
-ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op) {
+ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op,
+                                   const std::vector<double>* warm_start) {
     const int N = in.n_nodes;
     const int n = 4*N + 2;
     ColumnBVPSolution s;
 
-    std::vector<double> U = build_seed(in);
+    std::vector<double> U;
     std::vector<double> R, J, Jcopy, rhs, Utry, Rtry;
 
-    // Flux-balance seed rescale.
-    //
-    // T_eff is a fixed surface boundary condition, so in steady state the
-    // height-integrated viscous heating must equal the radiated surface flux:
-    //   ∫ alpha*shear*P dz  ≈  sigma_SB T_eff^4   (per face).
-    // The user-supplied rho_mid_guess is only a rough density estimate and can be
-    // many orders of magnitude away from the value that satisfies this balance
-    // (e.g. for the cool gas-limit it overshoots by ~1e5). Starting Newton from a
-    // grossly over-dense column drives the solver toward a runaway-hot state and
-    // stalls the line search. We therefore rescale the Gaussian seed's density by
-    // the single factor that makes the analytic heating integral match the surface
-    // flux. This lands the seed within the Newton basin of the true (heating-
-    // balanced) column, from which the relaxation converges quadratically.
-    {
-        using namespace constants;
-        // Mirror the radiation-aware H from build_seed (cs2_gas + P_rad/rho_mid)
-        // so scale cancels the H factor in Sigma0 and the seed lands on the correct
-        // flux-balanced density regardless of how much radiation contributes to H.
-        const double cs2_gas_r = k_B * in.T_eff / (mu_fully_ionized * m_p);
-        const double rho_mid_seed = in.rho_mid_guess;
-        const double P_rad_seed   = (a_rad / 3.0) * in.T_eff * in.T_eff * in.T_eff * in.T_eff;
-        const double H_r = std::sqrt(cs2_gas_r + P_rad_seed / rho_mid_seed) / in.omega_z;
-        // Heating per face for the current seed (Gaussian rho, P_gas ≈ rho cs2_gas):
-        //   ∫0^∞ alpha*shear*rho_mid*cs2_gas*exp(-z^2/2H_r^2) dz
-        //   = alpha * shear * P_gas_mid * H_r * sqrt(pi/2)
-        // Using H_r here (not the old gas-only H) keeps scale consistent with the
-        // radiation-aware Sigma0 in U, so the final Sigma0 = 2*flux/(alpha*shear*cs2_gas)
-        // matches the gas-dominated limit identically.
-        const double P_gas_mid_seed = rho_mid_seed * cs2_gas_r;
-        const double heat_seed    = in.alpha * in.shear * P_gas_mid_seed * H_r * std::sqrt(std::numbers::pi / 2.0);
-        const double flux_target  = surface_flux(in.T_eff);
-        // scale can be large if shear/alpha are near-zero (heat_seed -> 0); the
-        // caller is expected to supply physically reasonable (nonzero) inputs.
-        double scale = (heat_seed > 0.0) ? flux_target / heat_seed : 1.0;
-        // Density scales linearly with the column, so P_gas and Sigma do too.
-        for (int i = 0; i < N; ++i) {
-            const double T_i = U[4*i+2];
-            const double rho_old = std::max(eos_rho(U[4*i+0], T_i), 0.0);
-            const double rho_new = rho_old * scale;
-            U[4*i+0] = rho_new * cs2_gas_r + (a_rad/3.0)*T_i*T_i*T_i*T_i;  // refresh P (gas + rad)
+    // A non-null warm_start of the wrong size is a caller bug (mismatched n_nodes):
+    // catch it in debug, but fall back to a cold start in release rather than
+    // corrupt state by consuming a misaligned vector.
+    assert(warm_start == nullptr || (int)warm_start->size() == n);
+    if (warm_start && (int)warm_start->size() == n) {
+        // Numerical continuation: start Newton from the converged neighbour.
+        // It is already flux-balanced, so skip the analytic seed + rescale.
+        U = *warm_start;
+    } else {
+        U = build_seed(in);
+        // Flux-balance seed rescale (cold start only).
+        //
+        // T_eff is a fixed surface boundary condition, so in steady state the
+        // height-integrated viscous heating must equal the radiated surface flux:
+        //   ∫ alpha*shear*P dz  ≈  sigma_SB T_eff^4   (per face).
+        // The user-supplied rho_mid_guess is only a rough density estimate and can be
+        // many orders of magnitude away from the value that satisfies this balance
+        // (e.g. for the cool gas-limit it overshoots by ~1e5). Starting Newton from a
+        // grossly over-dense column drives the solver toward a runaway-hot state and
+        // stalls the line search. We therefore rescale the Gaussian seed's density by
+        // the single factor that makes the analytic heating integral match the surface
+        // flux. This lands the seed within the Newton basin of the true (heating-
+        // balanced) column, from which the relaxation converges quadratically.
+        {
+            using namespace constants;
+            // Mirror the radiation-aware H from build_seed (cs2_gas + P_rad/rho_mid)
+            // so scale cancels the H factor in Sigma0 and the seed lands on the correct
+            // flux-balanced density regardless of how much radiation contributes to H.
+            const double cs2_gas_r = k_B * in.T_eff / (mu_fully_ionized * m_p);
+            const double rho_mid_seed = in.rho_mid_guess;
+            const double P_rad_seed   = (a_rad / 3.0) * in.T_eff * in.T_eff * in.T_eff * in.T_eff;
+            const double H_r = std::sqrt(cs2_gas_r + P_rad_seed / rho_mid_seed) / in.omega_z;
+            // Heating per face for the current seed (Gaussian rho, P_gas ≈ rho cs2_gas):
+            //   ∫0^∞ alpha*shear*rho_mid*cs2_gas*exp(-z^2/2H_r^2) dz
+            //   = alpha * shear * P_gas_mid * H_r * sqrt(pi/2)
+            // Using H_r here (not the old gas-only H) keeps scale consistent with the
+            // radiation-aware Sigma0 in U, so the final Sigma0 = 2*flux/(alpha*shear*cs2_gas)
+            // matches the gas-dominated limit identically.
+            const double P_gas_mid_seed = rho_mid_seed * cs2_gas_r;
+            const double heat_seed    = in.alpha * in.shear * P_gas_mid_seed * H_r * std::sqrt(std::numbers::pi / 2.0);
+            const double flux_target  = surface_flux(in.T_eff);
+            // scale can be large if shear/alpha are near-zero (heat_seed -> 0); the
+            // caller is expected to supply physically reasonable (nonzero) inputs.
+            double scale = (heat_seed > 0.0) ? flux_target / heat_seed : 1.0;
+            // Density scales linearly with the column, so P_gas and Sigma do too.
+            for (int i = 0; i < N; ++i) {
+                const double T_i = U[4*i+2];
+                const double rho_old = std::max(eos_rho(U[4*i+0], T_i), 0.0);
+                const double rho_new = rho_old * scale;
+                U[4*i+0] = rho_new * cs2_gas_r + (a_rad/3.0)*T_i*T_i*T_i*T_i;  // refresh P (gas + rad)
+            }
+            U[4*N+1] *= scale;                                          // Sigma0
         }
-        U[4*N+1] *= scale;                                          // Sigma0
     }
 
     column_residual(U, in, op, R);

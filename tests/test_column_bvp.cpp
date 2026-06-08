@@ -236,6 +236,39 @@ static void test_radiation_thickens() {
     }
 }
 
+static void test_warm_start_converges_fast() {
+    std::printf("\n=== warm start from a converged neighbour converges fast ===\n");
+    auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
+    grrt::ColumnInputs a{}; a.T_eff = 5e4; a.shear = 3e3; a.omega_z = 2e3;
+    a.alpha = 0.1; a.rho_mid_guess = 1e-2; a.n_nodes = 120; a.max_iters = 80; a.tol = 1e-8;
+    auto sa = grrt::solve_column_bvp(a, lut);            // cold solve of the "neighbour"
+    if (!sa.converged) { std::printf("  FAIL: neighbour did not converge\n"); failures++; return; }
+
+    // Pack neighbour's converged state into a length-(4N+2) warm vector.
+    const int N = a.n_nodes;
+    std::vector<double> warm((size_t)4*N + 2, 0.0);
+    for (int i = 0; i < N; ++i) {
+        warm[4*i+0]=sa.P[i]; warm[4*i+1]=sa.Q[i]; warm[4*i+2]=sa.T[i]; warm[4*i+3]=sa.z[i];
+    }
+    warm[4*N]=sa.z0; warm[4*N+1]=sa.Sigma0;
+
+    // A nearby column (slightly hotter). Cold vs warm iteration counts.
+    grrt::ColumnInputs b = a; b.T_eff = 5.2e4;
+    auto cold = grrt::solve_column_bvp(b, lut);                 // no warm start
+    auto warmed = grrt::solve_column_bvp(b, lut, &warm);        // warm start
+    std::printf("  cold: conv=%d iters=%d ; warm: conv=%d iters=%d ; z0 cold=%.3e warm=%.3e\n",
+                cold.converged, cold.iters, warmed.converged, warmed.iters, cold.z0, warmed.z0);
+    if (!warmed.converged) { std::printf("  FAIL: warm start did not converge\n"); failures++; return; }
+    // Newton iteration counts here are deterministic (no randomness), so the
+    // cold-vs-warm gap is stable run to run. Strict < guards against a regression
+    // where cold-start gets as good as warm; the absolute cap asserts the warm
+    // start actually lands near the solution (a 4% T_eff perturbation converges fast).
+    if (!(warmed.iters < cold.iters)) { std::printf("  FAIL: warm start not faster\n"); failures++; }
+    if (!(warmed.iters <= 8)) { std::printf("  FAIL: warm start not near solution (iters=%d > 8)\n", warmed.iters); failures++; }
+    // Both converged to tol=1e-8, so their half-thicknesses should match to ~1e-4 relative.
+    if (cold.converged) check("warm z0 == cold z0", warmed.z0, cold.z0, 1e-4);
+}
+
 int main() {
     test_eos();
     test_scaffold();
@@ -247,6 +280,7 @@ int main() {
     test_physics_invariants();
     test_convergence_sweep();
     test_radiation_thickens();
+    test_warm_start_converges_fast();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
