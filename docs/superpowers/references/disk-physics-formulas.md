@@ -195,7 +195,33 @@ P_total  = P_gas + (1/3) a T⁴           (reconstructed by ADDITION wherever th
 The physics is identical — only the state representation changes. State vector: `[P_gas, Q, T, z]×N + [z₀, Σ₀]`.
 *Externally verified: Tavleev/Lipunova/Malanchev 2023 (§20 credit) relate `ρ` to **gas** pressure (`ρ = μ P_gas/ℜT`) and track `P_rad = aT⁴/3` separately — never recovering `P_gas` by subtraction. Code: `rho_from_gas`, `p_total` in `disk_column_bvp.cpp`; analytic-vs-numerical Jacobian cross-check is exact (0.0) at both gas- and radiation-dominated operating points.*
 
-**Known limit — radiation-pressure fold (β ≲ 2.5e-3).** The conditioning fix converges down to β ≈ 2.5e-3 (`T_eff ≈ 5.6e6 K` for the canonical inner disk). Below that, the **standard α(total-P) thin-disk vertical structure folds** — a genuine solution-branch turning point at the photosphere (the *hydrostatic/thickness* rows fail, not the temperature rows). This is the radiation-pressure-dominated α-disk limit the Tavleev code avoids entirely (*"when `P_rad ≳ P_gas` the solution becomes problematic; our code does not calculate such discs"*) — a **physical** limit of the `α·P_total` prescription (Lightman & Eardley 1974 thermal-viscous instability), not a numerical one. The standard remedy is the **β-prescription** (viscous stress ∝ `P_gas` instead of total `P`), which removes the fold at the cost of changing the heating law in the inner disk. *[STATUS 2026-06-08: decision pending — the canonical hot disk (`T_peak=1e7`) sits below the fold; see the BVP-wiring plan.]*
+**Known limit — radiation-pressure fold (β ≲ 2.5e-3).** The conditioning fix converges down to β ≈ 2.5e-3 (`T_eff ≈ 5.6e6 K` for the canonical inner disk). Below that, the **standard α(total-P) thin-disk vertical structure folds** — a genuine solution-branch turning point at the photosphere (the *hydrostatic/thickness* rows fail, not the temperature rows). This is the radiation-pressure-dominated α-disk limit the Tavleev code avoids entirely (*"when `P_rad ≳ P_gas` the solution becomes problematic; our code does not calculate such discs"*) — a **physical** limit of the `α·P_total` prescription (Lightman & Eardley 1974 thermal-viscous instability), not a numerical one. The standard remedy is the **β-prescription** (viscous stress ∝ `P_gas`), but for near-Eddington rendering the physically correct resolution is the **slim disk** (radial advection) — §22. *[STATUS 2026-06-08: chosen path = full transonic slim disk; the canonical hot disk sits below the fold and is rendered via the slim-disk subsystem.]*
+
+## 22. Relativistic slim-disk equations (verified)
+**Externally verified** against Sądowski 2009 (ApJS 183 171, [arXiv:0906.0355]), Sądowski et al. 2011 (A&A 527 A17, [arXiv:1006.4309]), Abramowicz & Fragile 2013 (Living Rev. Rel. 16 1, the clean review), Abramowicz/Czerny/Lasota/Szuszkiewicz 1988 (ApJ 332 646). **Geometric units `G=c=1`**, `M` sets the scale; equatorial plane. The slim disk adds **radial advection** to the thin disk and is solved as a **transonic** radial problem; it reduces to Novikov–Thorne as `Ṁ→0`.
+
+**Radial structure (height-integrated, Kerr) — four conservation laws:**
+```
+(1) Mass:      Ṁ = −2π Σ Δ^½ · V/√(1−V²)        ( = −2π r Σ u^r ;  V<0 = inflow )
+(2) Radial momentum (transonic):
+    (V/(1−V²)) dV/dr = 𝒜/(r³Δ) − (Ω−Ω_K⁺)(Ω−Ω_K⁻)/(1−Ω̃²R̃²) − (1/Σ) dP/dr
+(3) Angular momentum:  (Ṁ/2π)(ℓ − ℓ_in) = (A^½ Δ^½ Γ / r)·α P
+(4) Energy:    Q_vis = Q_rad + Q_adv ,   f_adv ≡ Q_adv/Q_vis ,   Q_rad = (1−f_adv)·Q_vis
+```
+`Σ`=surface density; `V`=radial velocity (corotating frame); `Δ=r²−2Mr+a²`; `𝒜=(r²+a²)²−a²Δ`, `A=r⁴+r²a²+2Mra²`; `Ω` orbital, `Ω_K±` Keplerian; `ℓ=u_φ` specific angular momentum, `ℓ_in` its inner-edge value; `Γ` Lorentz factor; `P=∫p dz` (vertically integrated — α-stress `W_rφ=αP`, **not** local `αp`); `Q_adv ∝ T dS/dr` (entropy advected by inflow).
+
+**Transonic closure (the eigenvalue).** Write `dV/dr = 𝒩/𝒟`. The **sonic point** `r_s` is where `𝒟₀ = V² − Γ̃₁ P/Σ` vanishes (Mach 1). **Regularity** requires `𝒩(r_s)=0` AND `𝒟₀(r_s)=0` simultaneously — an **eigenvalue** condition: for given `(Ṁ, α, a)`, exactly one inner specific angular momentum `ℓ_in` makes the solution pass smoothly through the sonic point. `r_s` is **found, not prescribed**, and lies **inside the ISCO** for all `Ṁ>0` (deviation grows with `Ṁ`); the thin-disk no-torque ISCO BC is dropped.
+
+**Vertical coupling (Sądowski 2011).** Per column, the existing grey BVP (§20) with `f_adv` reducing the radiated heating:
+```
+dℱ/dz = (3𝒟/2𝒞)·(αp/(1+f_adv))·(M/r³)^½          flux generation (advection-reduced)
+dp/dz = −ρ Ω_⊥² z ,   Ω_⊥² = (M/r³)(ℋ/𝒞)            vertical hydrostatic, Kerr Ω_⊥
+ℋ = 1 − 4a_* r_*^{−3/2} + 3a_*² r_*^{−2} ,  𝒞 = 1 − 3r_*^{−1} + 2a_* r_*^{−3/2} ,  𝒟 = Δ/r²
+```
+(`a_*=a/M`, `r_*=r/M`.) The radial solve sets `f_adv(r), Σ(r), T_c(r)`; each column returns pressure/density moments that feed back into the radial EOS coefficients → **self-consistent 2D iteration**.
+
+**Thin-disk limit (superset check).** `Ṁ→0` ⇒ `f_adv→0`, `dP/dr→0`, `V≪1`, `Ω→Ω_K`, sonic point→ISCO, `ℓ_in→ℓ_ISCO`, `Q_vis=Q_rad` → Novikov–Thorne (coincides to a few % at `Ṁ ≲ 0.1 Ṁ_Edd`).
+*Sources: Sądowski 2009 Eqs (1)-(9); Sądowski 2011 Eqs (10),(12),(13),(22)-(35); Abramowicz & Fragile 2013 Eqs (88)-(93); Riffert & Herold 1995 (Kerr factors). Full URLs: see the slim-disk spec.*
 
 ---
 
@@ -208,3 +234,7 @@ The physics is identical — only the state representation changes. State vector
 6. **Photosphere `τ = 2/3`**, not `1`.
 7. **The vertical-structure BVP needs THREE surface BCs** (§20) — `Q`, `T`, *and* the surface pressure `P=(2/3)ω²z₀/κ`. Omitting the surface-pressure condition leaves the free parameters (`z₀`, `Σ₀`) unpinned and the solver under-determined.
 8. **The Newton solver carries GAS pressure `P_gas`, not total `P`** (§21). Recover total `P = P_gas + aT⁴/3` by *addition*; recovering `P_gas = P − P_rad` from a stored total is catastrophic cancellation in the radiation-dominated regime and stalls the solver. Physics still uses total `P` (hydrostatic, viscous heating, surface BC).
+9. **Slim-disk α-stress is vertically INTEGRATED** `W_rφ = αP = α∫p dz`, not local `αp` (§22) — the local form drops an `H` factor in the torque.
+10. **The slim disk is a TRANSONIC eigenvalue problem** (§22): regularity at the sonic point (`𝒩=𝒟₀=0`) pins `ℓ_in`; the sonic point is *found, not prescribed*, and lies *inside* the ISCO. Do not apply the thin-disk no-torque ISCO boundary condition.
+11. **`f_adv` convention:** Sądowski 2011 uses `Q_rad/Q_vis = (1+f_adv)^{−1}` (heating divided by `1+f_adv`), NOT `(1−f_adv)` — identical only for `f_adv≪1`. Pick one and stay consistent (§22).
+12. **`Ṁ_Edd` factor differs by paper** (`16 L_Edd/c²` in Abramowicz & Fragile vs the textbook `10 L_Edd/c²` at η=0.1) — check which convention before comparing accretion rates (§4, §22).
