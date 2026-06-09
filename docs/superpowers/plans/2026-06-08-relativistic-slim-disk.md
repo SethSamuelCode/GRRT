@@ -18,6 +18,14 @@
 - **The relaxation reuses the column-BVP toolkit:** `dense_solve` (Gaussian elimination), the scaled-residual merit, the damped line search, and the homotopy-continuation idea (`bootstrap_column`). Mirror them.
 - **Workflow constraints (carry forward, non-negotiable):** NEVER run `git commit` — hand the message to the human. Subagents: **sonnet or opus only, never haiku.** Present every reviewer recommendation with a take and WAIT for the human's call before fixing.
 
+## Test-coverage requirements (spin & Eddington)
+
+**Canonical render config: `a ≈ 0.998` (near-extremal Kerr) and `f_Edd ≈ 0.9` (near-Eddington)** — this is what GRRT actually renders, so the solver and integration tests must prove it works *there*, not just on easy cases. Across the convergence (Task 5), continuation (Task 9), benchmark (Task 10), and integration (Phase 6) tasks:
+- **Spin:** include a **near-extremal `a = 0.998`** case alongside `a = 0.9` (with `a = 0` as the Schwarzschild / thin-disk anchor). Near-extremal is harder — the ISCO and sonic point sit close to the horizon and frame-dragging is strong, so the solver must be exercised there.
+- **Eddington:** cover **`f_Edd ∈ {0.9, 0.95, 1.0}`** (the render regime + the graceful upper edge), plus a low `f_Edd ≤ 0.05` case for the thin-disk reduction. At `f_Edd = 1.0` the grey-diffusion approximation may strain — emit the documented caveat rather than failing.
+
+The easy cases (`a=0`, low `f_Edd`) stay as reduction/anchor checks; the near-extremal + near-Eddington cases are the ones that prove the model works where it's used.
+
 ## File structure
 
 - `include/grrt/scene/slim_disk_radial.h` / `src/slim_disk_radial.cpp` — the standalone transonic radial solver (Phase 1).
@@ -165,7 +173,7 @@ State vector `U`: per node `(Σ_i, V_i, ℓ_i, T_{c,i})` × N, plus globals `(�
 
 Reuse the column-BVP Newton machinery: numerical (and later analytic) Jacobian, `dense_solve`, scaled-residual merit, damped line search. Unknowns include `(ℓ_in, r_s)`.
 
-- [ ] **Step 1: Failing test** — `test_converges_midmdot`: a mid-`Ṁ` case (`f_Edd≈0.3`, `a=0.9`) converges (`converged==true`, residual < tol).
+- [ ] **Step 1: Failing test** — `test_converges_midmdot`: a mid-`Ṁ` case (`f_Edd≈0.3`) converges (`converged==true`, residual < tol) at **both `a=0.9` and the near-extremal `a=0.998`** (the render spin). Harder / near-Eddington cases come via the Task-9 continuation.
 - [ ] **Step 2: Implement** the Newton loop (numerical Jacobian first, per the column-BVP build order; analytic Jacobian is a later speed task). Honest fallback on non-convergence (`converged=false`, no fabricated profile).
 - [ ] **Step 3: Run → pass. Step 4: Commit** `feat(slim-disk): Newton relaxation solve (numerical Jacobian)`.
 
@@ -187,12 +195,12 @@ Reuse the column-BVP Newton machinery: numerical (and later analytic) Jacobian, 
 
 ### Task 9: Ṁ-continuation to f_Edd = 0.9
 
-- [ ] **Step 1:** `test_mdot_continuation`: seed at `f_Edd=0.02` (thin-disk seed), then **continue up** in `Ṁ` (warm-starting each step from the last converged solution) to `f_Edd=0.9`; assert convergence at every step and at 0.9 (`converged`, `f_adv` significant, `H/r` elevated ~0.1–0.2). Mirrors `bootstrap_column`'s homotopy.
+- [ ] **Step 1:** `test_mdot_continuation`: seed at `f_Edd=0.02` (thin-disk seed), then **continue up** in `Ṁ` (warm-starting each step from the last converged solution) through **`f_Edd ∈ {0.9, 0.95, 1.0}`**; assert convergence at every step and at each target (`converged`, `f_adv` significant and growing with `f_Edd`, `H/r` elevated ~0.1–0.2 at 0.9 and higher toward 1.0). Run the continuation for **both `a=0.9` and the near-extremal `a=0.998`** (the render spin). Mirrors `bootstrap_column`'s homotopy. At `f_Edd=1.0` (the graceful edge) emit the grey-diffusion caveat if it strains, rather than failing; above 1.0 is out of scope.
 - [ ] **Step 2:** implement the continuation driver (a thin wrapper that ramps `mdot` with warm starts). **Step 3: Run → pass. Step 4: Commit** `feat(slim-disk): Mdot-continuation seeding from the thin disk`.
 
 ### Task 10: Literature benchmark
 
-- [ ] **Step 1:** `test_sadowski_benchmark`: for a published Sądowski 2011 case (e.g. `M=10 M_sun, a=0, α=0.1, Ṁ` near Eddington), assert `H/r(r)`, `f_adv(r)`, `Σ(r)` match the paper's figures within a stated tolerance (digitize 3–4 points; record the source + values in the test comment). This is the external-accuracy check.
+- [ ] **Step 1:** `test_sadowski_benchmark`: for published Sądowski 2009/2011 cases (`M=10 M_sun, α=0.1, Ṁ` near Eddington), assert `H/r(r)`, `f_adv(r)`, `Σ(r)` match the paper's figures within a stated tolerance (digitize 3–4 points; record source + values in the test comment). **Include a high-spin case (`a≈0.9` or `a≈0.998`, whichever the paper provides figures for)** in addition to `a=0`, since the render spin is near-extremal. This is the external-accuracy check.
 - [ ] **Step 2: Commit** `test(slim-disk): benchmark vs Sadowski 2011`.
 
 **Phase 1 closeout:** full `test-slim-disk-radial` green; sonic regularity + conservation + thin-disk limit + `f_Edd=0.9` continuation + literature benchmark all pass. Dispatch a code-quality review over the phase before moving on.
@@ -226,8 +234,8 @@ Reuse the column-BVP Newton machinery: numerical (and later analytic) Jacobian, 
 - **Files:** `volumetric_disk.{h,cpp}`, `geodesic_tracer.cpp`, `test_volumetric.cpp`.
 
 ### Phase 6 — integration sweep
-- **6.1** `f_Edd=0.9` construction: converged, non-collapsed, thick inner disk; `test_hot_inner_disk_columns_converge` passes at the strict gate (the success signal flips green).
-- **6.2** Edge-on render (`--observer-theta 80 --fov 30 --eddington-fraction 0.9 --samples 30`): band-free, puffed inner disk, radial-infall Doppler visible. Surface before/after to the human.
+- **6.1** Construction at the **render config (`a=0.998`, `f_Edd=0.9`)** and across **`f_Edd ∈ {0.9, 0.95, 1.0}`**: converged, non-collapsed, thick inner disk; `test_hot_inner_disk_columns_converge` passes at the strict gate (the success signal flips green). `f_Edd=1.0` may emit the grey-diffusion caveat (graceful edge).
+- **6.2** Edge-on render at the render config (`--spin 0.998 --observer-theta 80 --fov 30 --eddington-fraction 0.9 --samples 30`): band-free, puffed inner disk, radial-infall Doppler visible. Surface before/after to the human.
 - **6.3** Thin-disk regression: a low-`f_Edd` render matches the pre-slim-disk thin-disk render (superset guarantee). Construction-time check (cached). `dump-disk-lut` health.
 - **Files:** `test_volumetric.cpp`, `tools/dump_disk_lut.cpp`.
 
