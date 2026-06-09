@@ -62,6 +62,48 @@ inline double kerr_delta(double M, double a, double r) {       // Δ = r² − 2
 inline double kerr_A(double M, double a, double r) {           // A = r⁴ + r²a² + 2Mra²
     return r*r*r*r + r*r*a*a + 2.0*M*r*a*a;
 }
+
+/// Thermodynamic state returned by the one-zone vertical closure.
+/// All quantities are in CGS.
+struct OneZoneState {
+    double H     = 0.0;  ///< scale height [cm]
+    double rho_mid = 0.0;///< midplane density [g/cm^3]
+    double c_s   = 0.0;  ///< total sound speed [cm/s] (= H · Ω_⊥ by construction)
+    double p_mid = 0.0;  ///< total midplane pressure p_gas + p_rad [erg/cm^3]
+    double p_gas = 0.0;  ///< gas pressure at midplane [erg/cm^3]
+    double p_rad = 0.0;  ///< radiation pressure at midplane [erg/cm^3]
+    double P     = 0.0;  ///< vertically-integrated pressure 2·p_mid·H [erg/cm^2] (α-stress; trap #9)
+    double S     = 0.0;  ///< specific entropy (gas + radiation) [erg/(g·K)]
+    double mu    = 0.0;  ///< mean molecular weight used
+};
+
+/// One-zone height-integrated vertical closure.
+///
+/// Given the surface density Sigma [g/cm²], midplane temperature Tc [K], and
+/// radius r [M], returns the self-consistent scale height, midplane
+/// density/pressure, integrated pressure, sound speed, and specific entropy.
+///
+/// The scale height follows from hydrostatic balance H = c_s / Ω_⊥ with the
+/// TOTAL sound speed c_s² = p_mid/ρ_mid.  Substituting p_mid = p_gas + p_rad
+/// and ρ_mid = Σ/(2H) leads to the quadratic
+///   Ω_⊥² H² − b H − c_s_gas² = 0 ,  b = 2 a_rad T_c⁴ / (3 Σ)
+/// whose positive root is H = (b + sqrt(b² + 4 Ω_⊥² c_s_gas²)) / (2 Ω_⊥²).
+/// In the gas-dominated limit b→0 this reduces to H = c_s_gas / Ω_⊥.
+///
+/// A single fixed-point pass is done for μ: first solve with μ = mu_fully_ionized,
+/// then look up μ(ρ_mid, T_c) and recompute.
+///
+/// Specific entropy (per unit mass, additive constant irrelevant — only dS/dr enters Q_adv):
+///   S = (k_B / (μ m_p)) ln(T_c^{3/2} / ρ_mid) + (4 a_rad T_c³) / (3 ρ_mid)
+///
+/// @param Sigma  surface density [g/cm²]
+/// @param Tc     midplane temperature [K]
+/// @param r      radius [M]
+/// @param in     slim-disk inputs (M, a, r_g, α)
+/// @param op     opacity LUTs (for μ look-up)
+GRRT_EXPORT OneZoneState one_zone_closure(double Sigma, double Tc, double r,
+                                         const SlimDiskInputs& in, const OpacityLUTs& op);
+
 } // namespace slim_detail
 
 /// Solve the relativistic transonic slim-disk radial structure

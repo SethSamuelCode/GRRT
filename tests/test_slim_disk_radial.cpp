@@ -51,9 +51,59 @@ static void test_links_and_returns() {
     if (sol.converged) { std::printf("  FAIL: stub should not claim convergence\n"); failures++; }
 }
 
+static void test_one_zone_closure() {
+    std::printf("\n=== one-zone vertical closure ===\n");
+    using namespace grrt::constants;
+    grrt::SlimDiskInputs in{};
+    in.mass=1.0; in.spin=0.9; in.alpha=0.1; in.r_g=1.48e6;
+    auto lut = grrt::build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
+    const double r=10.0;
+    // Pick a gas-dominated point: high Sigma, moderate T_c so p_rad << p_gas.
+    const double Sigma=1e5, Tc=3e4;
+    auto s = grrt::slim_detail::one_zone_closure(Sigma, Tc, r, in, lut);
+    std::printf("  H=%.3e rho_mid=%.3e c_s=%.3e p_mid=%.3e P=%.3e S=%.3e mu=%.3f p_rad/p_gas=%.2e\n",
+                s.H, s.rho_mid, s.c_s, s.p_mid, s.P, s.S, s.mu, s.p_rad/s.p_gas);
+    // Structural identities (hold in ANY regime, by construction):
+    const double Omega_perp = std::sqrt(grrt::slim_detail::omega_perp2(1.0,0.9,r))*c_cgs/in.r_g;
+    check("H = c_s/Omega_perp",     s.H,       s.c_s/Omega_perp, 1e-9);
+    check("rho_mid = Sigma/(2H)",   s.rho_mid, Sigma/(2.0*s.H),  1e-12);
+    check("p_mid = rho_mid c_s^2",  s.p_mid,   s.rho_mid*s.c_s*s.c_s, 1e-9);
+    check("P = 2 p_mid H",          s.P,       2.0*s.p_mid*s.H,  1e-12);
+    check("p_mid = p_gas + p_rad",  s.p_mid,   s.p_gas+s.p_rad,  1e-12);
+    // Gas-dominated regime check: radiation subdominant, H ~ c_s_gas/Omega_perp.
+    if (!(s.p_rad/s.p_gas < 0.05)) { std::printf("  FAIL: chosen point not gas-dominated (raise Sigma / lower Tc)\n"); failures++; }
+    const double cs_gas = std::sqrt(k_B*Tc/(s.mu*m_p));
+    check("gas-limit H ~ c_s_gas/Omega_perp", s.H, cs_gas/Omega_perp, 0.05);  // ~5% (radiation slightly thickens)
+}
+
+static void test_one_zone_radiation_dominated() {
+    std::printf("\n=== one-zone closure: radiation-dominated (exercises the b-term) ===\n");
+    using namespace grrt::constants;
+    grrt::SlimDiskInputs in{};
+    in.mass=1.0; in.spin=0.9; in.alpha=0.1; in.r_g=1.48e6;
+    auto lut = grrt::build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
+    const double r=10.0, Sigma=1e2, Tc=1e7;   // hot + low Sigma -> radiation-dominated
+    auto s = grrt::slim_detail::one_zone_closure(Sigma, Tc, r, in, lut);
+    const double Omega_perp = std::sqrt(grrt::slim_detail::omega_perp2(1.0,0.9,r))*c_cgs/in.r_g;
+    const double cs_gas = std::sqrt(k_B*Tc/(s.mu*m_p));
+    const double H_gas_only = cs_gas/Omega_perp;
+    std::printf("  H=%.3e H_gas_only=%.3e ratio=%.2f p_rad/p_gas=%.2e\n",
+                s.H, H_gas_only, s.H/H_gas_only, s.p_rad/s.p_gas);
+    // Structural identities still hold (regime-independent):
+    check("H = c_s/Omega_perp",    s.H,     s.c_s/Omega_perp,      1e-9);
+    check("p_mid = rho_mid c_s^2", s.p_mid, s.rho_mid*s.c_s*s.c_s, 1e-9);
+    check("P = 2 p_mid H",         s.P,     2.0*s.p_mid*s.H,       1e-12);
+    // Radiation-dominated: p_rad >> p_gas, and radiation THICKENS the column.
+    if (!(s.p_rad/s.p_gas > 10.0)) { std::printf("  FAIL: not radiation-dominated (p_rad/p_gas=%.2e)\n", s.p_rad/s.p_gas); failures++; }
+    if (!(s.H > 1.5*H_gas_only))   { std::printf("  FAIL: radiation did not thicken (ratio=%.2f)\n", s.H/H_gas_only); failures++; }
+    else { std::printf("  PASS: radiation thickens (H/H_gas_only=%.2f)\n", s.H/H_gas_only); }
+}
+
 int main() {
     test_kerr_factors();
     test_links_and_returns();
+    test_one_zone_closure();
+    test_one_zone_radiation_dominated();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
