@@ -204,23 +204,23 @@ The physics is identical — only the state representation changes. State vector
 ```
 (1) Mass:      Ṁ = −2π Σ Δ^½ · V/√(1−V²)        ( = −2π r Σ u^r ;  V<0 = inflow )
 (2) Radial momentum (transonic):
-    (V/(1−V²)) dV/dr = 𝒜/(r³Δ) − (Ω−Ω_K⁺)(Ω−Ω_K⁻)/(1−Ω̃²R̃²) − (1/Σ) dP/dr
+    (V/(1−V²)) dV/dr = 𝒜/r − (1/Σ) dP/dr        ( 𝒜 = the full gravitational/centrifugal term, defined in §23 — S09 Eq 3 )
 (3) Angular momentum:  (Ṁ/2π)(ℓ − ℓ_in) = (A^½ Δ^½ Γ / r)·α P
 (4) Energy:    Q_vis = Q_rad + Q_adv ,   f_adv ≡ Q_adv/Q_rad (Sądowski; §23) ,   Q_rad = Q_vis/(1+f_adv)
 ```
-`Σ`=surface density; `V`=radial velocity (corotating frame); `Δ=r²−2Mr+a²`; `𝒜=(r²+a²)²−a²Δ`, `A=r⁴+r²a²+2Mra²`; `Ω` orbital, `Ω_K±` Keplerian; `ℓ=u_φ` specific angular momentum, `ℓ_in` its inner-edge value; `Γ` Lorentz factor; `P=∫p dz` (vertically integrated — α-stress `W_rφ=αP`, **not** local `αp`); `Q_adv ∝ T dS/dr` (entropy advected by inflow).
+`Σ`=surface density; `V`=radial velocity (corotating frame); `Δ=r²−2Mr+a²`; `A=r⁴+r²a²+2Mra²` (=`(r²+a²)²−a²Δ`, the metric function); `𝒜` (script) = the gravitational/centrifugal term (§23), **not** the metric `A` — distinct symbols; `Ω` orbital, `Ω_K±` Keplerian; `ℓ=u_φ` specific angular momentum, `ℓ_in` its inner-edge value; `Γ` Lorentz factor; `P=∫p dz` (vertically integrated — α-stress `W_rφ=αP`, **not** local `αp`); `Q_adv ∝ T dS/dr` (entropy advected by inflow).
 
 **Transonic closure (the eigenvalue).** Write `dV/dr = 𝒩/𝒟`. The **sonic point** `r_s` is where `𝒟₀ = V² − Γ̃₁ P/Σ` vanishes (Mach 1). **Regularity** requires `𝒩(r_s)=0` AND `𝒟₀(r_s)=0` simultaneously — an **eigenvalue** condition: for given `(Ṁ, α, a)`, exactly one inner specific angular momentum `ℓ_in` makes the solution pass smoothly through the sonic point. `r_s` is **found, not prescribed**, and lies **inside the ISCO** for all `Ṁ>0` (deviation grows with `Ṁ`); the thin-disk no-torque ISCO BC is dropped.
 
 **Vertical coupling (Sądowski 2011).** Per column, the existing grey BVP (§20) with `f_adv` reducing the radiated heating:
 ```
-dℱ/dz = (3𝒟/2𝒞)·(αp/(1+f_adv))·(M/r³)^½          flux generation (advection-reduced)
 dp/dz = −ρ Ω_⊥² z ,   Ω_⊥² = Ω_K²·ℋ                 vertical hydrostatic (epicyclic; = GRRT omega_z_sq)
-Ω_K = √M/(r^{3/2}+a√M) ,  ℋ = 1 − 4a_* r_*^{−3/2} + 3a_*² r_*^{−2} ,  𝒞 = 1 − 3r_*^{−1} + 2a_* r_*^{−3/2} ,  𝒟 = Δ/r²
+Ω_K = √M/(r^{3/2}+a√M) ,  ℋ = 1 − 4a_* r_*^{−3/2} + 3a_*² r_*^{−2} ,  𝒞 = 1 − 3r_*^{−1} + 2a_* r_*^{−3/2}
+heating: GRRT uses the column-BVP viscous form αP·|r dΩ/dr|/(1+f_adv) (§20), NOT S11's flux-gen — see the convention note below
 ```
 (`a_*=a/M`, `r_*=r/M`.) The radial solve sets `f_adv(r), Σ(r), T_c(r)`; each column returns pressure/density moments that feed back into the radial EOS coefficients → **self-consistent 2D iteration**.
 
-⚠ **Correction (2026-06-09):** an earlier draft wrote `Ω_⊥² = (M/r³)(ℋ/𝒞)` — **wrong**: for `a=0` it gives `Ω_K²/𝒞 ≠ Ω_K²`, violating the standard Schwarzschild result `Ω_⊥ = Ω_K` (vertical epicyclic = orbital; off by `1/𝒞 ≈ 43%` at `r=10M`). The correct vertical epicyclic is `Ω_⊥² = Ω_K²·ℋ` (Kato 1990; Okazaki-Kato-Fukue 1987), which **matches GRRT's existing `omega_z_sq`**. Always cross-check a slim-disk `Ω_⊥` against `omega_z_sq`.
+⚠ **Convention note (2026-06-09, opus-verified — a genuine convention choice, not a simple error-fix).** S11 Eq 10 *literally* writes the vertical frequency as `Ω_⊥²=(M/r³)(ℋ/𝒞)` and its metric `𝒟=1−2r_*⁻¹+2a_*²r_*⁻²` (≠ `Δ/r²`, which has `a_*²` coeff 1); S11's flux-generation Eq 13 carries matching `1/𝒞` (`3𝒟/2𝒞·(M/r³)^½`) and its Keplerian is `Ω=[M/(𝒞r³)]^½` — a **self-consistent** convention with base `M/r³` where the `1/𝒞` factors cancel internally. **GRRT instead uses the geodesic convention**: the true Kato/Okazaki-Kato-Fukue vertical epicyclic `Ω_⊥²=Ω_K²·ℋ` (gives `Ω_⊥=Ω_K` at `a=0`, matches the existing `omega_z_sq`) and the exact-Kerr-shear column-BVP heating. **Do NOT mix**: do not import S11's `1/𝒞`-bearing forms (Eq 10/13, `𝒟`) on top of GRRT's geodesic `Ω_K²ℋ`. **Phase-1 one-zone is unaffected** — η-moments are constant, so their gradients vanish and `Ω_⊥²` enters only the closure `H=c_s/Ω_⊥` where `Ω_K²ℋ` is correct. **Phase 3** (full η-moment radial coupling) must re-derive the relevant `𝒩₁` terms in GRRT's geodesic convention rather than copy S11's `(M/r³)(ℋ/𝒞)`-based forms.
 
 **Thin-disk limit (superset check).** `Ṁ→0` ⇒ `f_adv→0`, `dP/dr→0`, `V≪1`, `Ω→Ω_K`, sonic point→ISCO, `ℓ_in→ℓ_ISCO`, `Q_vis=Q_rad` → Novikov–Thorne (coincides to a few % at `Ṁ ≲ 0.1 Ṁ_Edd`).
 *Sources: Sądowski 2009 Eqs (1)-(9); Sądowski 2011 Eqs (10),(12),(13),(22)-(35); Abramowicz & Fragile 2013 Eqs (88)-(93); Riffert & Herold 1995 (Kerr factors). Full URLs: see the slim-disk spec.*
