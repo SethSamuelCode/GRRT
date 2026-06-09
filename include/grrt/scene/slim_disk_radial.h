@@ -2,6 +2,7 @@
 #define GRRT_SLIM_DISK_RADIAL_H
 #include "grrt/color/opacity.h"
 #include "grrt_export.h"
+#include <cmath>
 #include <vector>
 namespace grrt {
 
@@ -35,6 +36,33 @@ struct SlimDiskRadial {
     int    iters = 0;
     double final_residual = 0.0;
 };
+
+/// Kerr relativistic factor functions (geometric units, G=c=1; prograde, equatorial).
+/// Verified against formula reference §22. r in units of M.
+namespace slim_detail {
+inline double omega_k(double M, double a, double r) {          // prograde Kerr Keplerian Ω_K
+    return std::sqrt(M) / (r * std::sqrt(r) + a * std::sqrt(M));
+}
+inline double calC(double M, double a, double r) {             // 𝒞 = 1 − 3M/r + 2a√M/r^{3/2}
+    return 1.0 - 3.0 * M / r + 2.0 * a * std::sqrt(M) / (r * std::sqrt(r));
+}
+inline double calD(double M, double a, double r) {             // 𝒟 = 1 − 2M/r + a²/r² = Δ/r²
+    return 1.0 - 2.0 * M / r + a * a / (r * r);
+}
+inline double calH(double M, double a, double r) {             // ℋ = 1 − 4a√M/r^{3/2} + 3a²/r²
+    return 1.0 - 4.0 * a * std::sqrt(M) / (r * std::sqrt(r)) + 3.0 * a * a / (r * r);
+}
+inline double omega_perp2(double M, double a, double r) {      // vertical epicyclic Ω_⊥² = Ω_K²·ℋ  (= omega_z_sq)
+    const double ok = omega_k(M, a, r);
+    return ok * ok * calH(M, a, r);
+}
+inline double kerr_delta(double M, double a, double r) {       // Δ = r² − 2Mr + a²
+    return r * r - 2.0 * M * r + a * a;
+}
+inline double kerr_A(double M, double a, double r) {           // A = r⁴ + r²a² + 2Mra²
+    return r*r*r*r + r*r*a*a + 2.0*M*r*a*a;
+}
+} // namespace slim_detail
 
 /// Solve the relativistic transonic slim-disk radial structure
 /// (see docs/superpowers/references/disk-physics-formulas.md §22).

@@ -215,10 +215,12 @@ The physics is identical — only the state representation changes. State vector
 **Vertical coupling (Sądowski 2011).** Per column, the existing grey BVP (§20) with `f_adv` reducing the radiated heating:
 ```
 dℱ/dz = (3𝒟/2𝒞)·(αp/(1+f_adv))·(M/r³)^½          flux generation (advection-reduced)
-dp/dz = −ρ Ω_⊥² z ,   Ω_⊥² = (M/r³)(ℋ/𝒞)            vertical hydrostatic, Kerr Ω_⊥
-ℋ = 1 − 4a_* r_*^{−3/2} + 3a_*² r_*^{−2} ,  𝒞 = 1 − 3r_*^{−1} + 2a_* r_*^{−3/2} ,  𝒟 = Δ/r²
+dp/dz = −ρ Ω_⊥² z ,   Ω_⊥² = Ω_K²·ℋ                 vertical hydrostatic (epicyclic; = GRRT omega_z_sq)
+Ω_K = √M/(r^{3/2}+a√M) ,  ℋ = 1 − 4a_* r_*^{−3/2} + 3a_*² r_*^{−2} ,  𝒞 = 1 − 3r_*^{−1} + 2a_* r_*^{−3/2} ,  𝒟 = Δ/r²
 ```
 (`a_*=a/M`, `r_*=r/M`.) The radial solve sets `f_adv(r), Σ(r), T_c(r)`; each column returns pressure/density moments that feed back into the radial EOS coefficients → **self-consistent 2D iteration**.
+
+⚠ **Correction (2026-06-09):** an earlier draft wrote `Ω_⊥² = (M/r³)(ℋ/𝒞)` — **wrong**: for `a=0` it gives `Ω_K²/𝒞 ≠ Ω_K²`, violating the standard Schwarzschild result `Ω_⊥ = Ω_K` (vertical epicyclic = orbital; off by `1/𝒞 ≈ 43%` at `r=10M`). The correct vertical epicyclic is `Ω_⊥² = Ω_K²·ℋ` (Kato 1990; Okazaki-Kato-Fukue 1987), which **matches GRRT's existing `omega_z_sq`**. Always cross-check a slim-disk `Ω_⊥` against `omega_z_sq`.
 
 **Thin-disk limit (superset check).** `Ṁ→0` ⇒ `f_adv→0`, `dP/dr→0`, `V≪1`, `Ω→Ω_K`, sonic point→ISCO, `ℓ_in→ℓ_ISCO`, `Q_vis=Q_rad` → Novikov–Thorne (coincides to a few % at `Ṁ ≲ 0.1 Ṁ_Edd`).
 *Sources: Sądowski 2009 Eqs (1)-(9); Sądowski 2011 Eqs (10),(12),(13),(22)-(35); Abramowicz & Fragile 2013 Eqs (88)-(93); Riffert & Herold 1995 (Kerr factors). Full URLs: see the slim-disk spec.*
