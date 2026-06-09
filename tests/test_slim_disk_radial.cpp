@@ -99,11 +99,49 @@ static void test_one_zone_radiation_dominated() {
     else { std::printf("  PASS: radiation thickens (H/H_gas_only=%.2f)\n", s.H/H_gas_only); }
 }
 
+static void test_radial_residual_finite() {
+    std::printf("\n=== transonic radial residual: length 4N+2 and all finite ===\n");
+    grrt::SlimDiskInputs in{};
+    const int N = 64;
+    in.mass = 1.0;
+    in.spin = 0.998;            // near-extremal render spin
+    in.alpha = 0.1;
+    in.r_g = 1.48e6;            // ~10 M_sun
+    in.r_in = 1.3;             // inside the ISCO (transonic; horizon r+ ≈ 1.063)
+    in.r_out = 50.0;
+    in.n_nodes = N;
+    // Near-Eddington Mdot: Ṁ_Edd ≈ 10 L_Edd/c² ~ 1.4e18 g/s for 10 M_sun; use ~Eddington.
+    in.mdot = 1.0e18;
+
+    auto lut = grrt::build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
+
+    std::vector<double> U = grrt::build_thin_disk_seed(in, lut);
+    std::printf("  seed length: %zu (expected %d)\n", U.size(), 4 * N + 2);
+    if (U.size() != (size_t)(4 * N + 2)) { std::printf("  FAIL: seed length\n"); failures++; }
+
+    std::vector<double> R;
+    grrt::slim_radial_residual(U, in, lut, R);
+    std::printf("  R.size()=%zu (expected %d)\n", R.size(), 4 * N + 2);
+    if (R.size() != (size_t)(4 * N + 2)) { std::printf("  FAIL: R.size != 4N+2\n"); failures++; }
+
+    int nonfinite = 0;
+    for (size_t i = 0; i < R.size(); ++i) {
+        if (!std::isfinite(R[i])) {
+            if (nonfinite < 8) std::printf("  non-finite R[%zu]=%g\n", i, R[i]);
+            nonfinite++;
+        }
+    }
+    std::printf("  non-finite entries: %d\n", nonfinite);
+    if (nonfinite > 0) { std::printf("  FAIL: residual has non-finite entries\n"); failures++; }
+    else std::printf("  PASS: all %zu residual entries finite\n", R.size());
+}
+
 int main() {
     test_kerr_factors();
     test_links_and_returns();
     test_one_zone_closure();
     test_one_zone_radiation_dominated();
+    test_radial_residual_finite();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }

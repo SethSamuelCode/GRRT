@@ -104,7 +104,37 @@ struct OneZoneState {
 GRRT_EXPORT OneZoneState one_zone_closure(double Sigma, double Tc, double r,
                                          const SlimDiskInputs& in, const OpacityLUTs& op);
 
+/// Prograde Keplerian specific angular momentum ℓ_K = u_φ on a circular
+/// equatorial Kerr orbit at radius r [M] (Bardeen-Press-Teukolsky 1972).
+/// Used by the seed and the outer/regularity boundary conditions.
+GRRT_EXPORT double ell_kepler(double M, double a, double r);
+
+/// Invert the equatorial Kerr Ω↔ℓ relation: given the covariant specific
+/// angular momentum ℓ = u_φ at radius r, return the orbital angular velocity
+/// Ω = u^φ/u^t [geometric, 1/M]. A few Newton iterations seeded from Ω_K.
+/// See slim_disk_radial.cpp for the derivation; documented as a robust local solve.
+GRRT_EXPORT double omega_from_ell(double M, double a, double r, double ell);
+
 } // namespace slim_detail
+
+/// Build a crude thin-disk seed state vector U (length 4N+2) for the radial
+/// residual: power-law Σ, mass-conservation V<0, Keplerian ℓ, NT-ish T_c, plus
+/// the two globals (ℓ_in, r_s). Refined by the relaxation (Task 5). See .cpp.
+GRRT_EXPORT std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
+                                                     const OpacityLUTs& opacity);
+
+/// Evaluate the transonic radial residual R (length 4N+2) for state U.
+/// Row layout (see disk-physics-formulas.md §22/§23 and the .cpp header comment):
+///   [0 .. N-1]      mass conservation (algebraic, per node)
+///   [N .. 2N-1]     angular momentum (algebraic, per node)
+///   [2N .. 3N-2]    radial-momentum transonic ODE (trapezoidal, N-1 intervals)
+///   [3N-1 .. 4N-3]  energy Q_vis=Q_rad+Q_adv ODE (trapezoidal, N-1 intervals)
+///   [4N-2, 4N-1]    outer boundary conditions (ℓ_out=ℓ_K(r_out), T_c,out=T_eff_thin)
+///   [4N, 4N+1]      sonic-point regularity (𝒟₀(r_s)=0, 𝒩₁(r_s)=0)
+GRRT_EXPORT void slim_radial_residual(const std::vector<double>& U,
+                                      const SlimDiskInputs& in,
+                                      const OpacityLUTs& opacity,
+                                      std::vector<double>& R);
 
 /// Solve the relativistic transonic slim-disk radial structure
 /// (see docs/superpowers/references/disk-physics-formulas.md §22).
