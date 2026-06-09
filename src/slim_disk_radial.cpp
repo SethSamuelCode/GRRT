@@ -3,6 +3,8 @@
 #include <cmath>
 #include <algorithm>
 #include <numbers>
+#include <cstdlib>
+#include <cstdio>
 
 namespace grrt {
 
@@ -341,11 +343,20 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
     // Pick Σ_ref so that the mass-conservation V comes out comfortably subsonic.
     const double r_ref = r_in;
     const double Omega_ref_cgs = omega_k(in.mass, in.spin, r_ref) * c_cgs / in.r_g; // 1/s
-    const double T_ref = 1e7;                                   // K, hot inner disk guess
+    // Hot inner-disk midplane temperature guess. A Novikov-Thorne disk at mid Ṁ
+    // (~10 M_sun, f_Edd~0.3) has a midplane T ~ a few ×10⁷ K near the inner edge;
+    // a merit-landscape scan of the residual confirmed the seed basin sits near
+    // ~5×10⁷ K (the earlier 1×10⁷ guess seeded ~5 orders too cold/dense).
+    const double T_ref = 5e7;                                   // K, hot inner disk guess
     const double cs2_ref = k_B * T_ref / (mu_fully_ionized * m_p);
     const double nu_ref = in.alpha * cs2_ref / std::max(Omega_ref_cgs, 1e-30);
     double Sigma_ref = in.mdot / (3.0 * std::numbers::pi * std::max(nu_ref, 1e-30));
     if (!(Sigma_ref > 0.0) || !std::isfinite(Sigma_ref)) Sigma_ref = 1e4;
+    // The thin-disk ν estimate uses the GAS sound speed only and the Newtonian
+    // 3πν law; near the relativistic inner edge it overestimates Σ by ~1-2 dex.
+    // A merit-landscape scan of the residual places the seed basin at ~0.03×Σ_ref,
+    // so we apply that calibration factor (keeps the seed EOS-valid and in-basin).
+    Sigma_ref *= 0.03;
 
     for (int i = 0; i < N; ++i) {
         const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
@@ -611,11 +622,433 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
 }
 
 // ---------------------------------------------------------------------------
-// Radial solver stub (implemented in Task 5)
+// Newton relaxation machinery (mirrors src/disk_column_bvp.cpp)
+// ---------------------------------------------------------------------------
+namespace {
+
+/// Dense central-difference Jacobian J[row*n + col] = ∂R_row/∂U_col of the
+/// slim-disk radial residual. Mirrors disk_column_bvp::numerical_jacobian:
+/// per-variable absolute step floors keyed to each state-variable TYPE, so that
+/// state entries that are ~0 at the seed (e.g. V is small-negative; r_s, ℓ_in
+/// are O(1)) do not collapse the finite-difference step to roundoff.
+///
+/// Variable types in the 4N+2 layout: per node {Σ (off 0), V (off 1),
+/// ℓ (off 2), T_c (off 3)}; two globals {ℓ_in (4N), r_s (4N+1)}.
+/// NOTE: the r_s column may be slightly noisy when a perturbation moves the
+/// sonic-point interpolation bracket; the per-variable floor here plus the
+/// line search downstream absorb that.
+static void slim_numerical_jacobian(const std::vector<double>& U,
+                                    const SlimDiskInputs& in,
+                                    const OpacityLUTs& op, std::vector<double>& J) {
+    const int n = (int)U.size();
+    const int N = std::max(in.n_nodes, 4);
+    J.assign((size_t)n * n, 0.0);
+
+    // Per-variable-TYPE step floors: the largest |value| of that variable type
+    // across all nodes sets the scale; floor at 1e-7 of it (never below 1e-30).
+    double sSig = 0, sV = 0, sEll = 0, sT = 0;
+    for (int i = 0; i < N; ++i) {
+        sSig = std::max(sSig, std::abs(U[4*i+0])); sV   = std::max(sV,   std::abs(U[4*i+1]));
+        sEll = std::max(sEll, std::abs(U[4*i+2])); sT   = std::max(sT,   std::abs(U[4*i+3]));
+    }
+    const double floorSig = 1e-7 * std::max(sSig, 1e-30);
+    const double floorV   = 1e-7 * std::max(sV,   1e-30);
+    const double floorEll = 1e-7 * std::max(sEll, 1e-30);
+    const double floorT   = 1e-7 * std::max(sT,   1e-30);
+    const double floorLin = 1e-7 * std::max(std::abs(U[4*N+0]), 1e-30);   // ℓ_in
+    const double floorRs  = 1e-7 * std::max(std::abs(U[4*N+1]), 1e-30);   // r_s
+
+    std::vector<double> Up, Um, Rp, Rm;
+    for (int j = 0; j < n; ++j) {
+        double absfloor;
+        if (j < 4*N) {
+            switch (j & 3) { case 0: absfloor = floorSig; break; case 1: absfloor = floorV; break;
+                             case 2: absfloor = floorEll; break; default: absfloor = floorT; }
+        } else {
+            absfloor = (j == 4*N) ? floorLin : floorRs;
+        }
+        const double delta = std::max(1e-7 * std::abs(U[j]), absfloor);
+        Up = U; Um = U;
+        Up[j] += delta; Um[j] -= delta;
+        slim_radial_residual(Up, in, op, Rp);
+        slim_radial_residual(Um, in, op, Rm);
+        for (int row = 0; row < n; ++row)
+            J[(size_t)row * n + j] = (Rp[row] - Rm[row]) / (2.0 * delta);
+    }
+}
+
+/// Dense Gaussian elimination with partial pivoting (adapted from
+/// disk_column_bvp::dense_solve). Solves A x = b; A is row-major (n×n), modified
+/// in place; the solution is returned in b. Returns false if (numerically) singular.
+static bool dense_solve(std::vector<double>& A, std::vector<double>& b, int n) {
+    for (int k = 0; k < n; ++k) {
+        int piv = k; double maxv = std::abs(A[(size_t)k*n+k]);
+        for (int i = k+1; i < n; ++i) { double v = std::abs(A[(size_t)i*n+k]); if (v>maxv){maxv=v;piv=i;} }
+        if (maxv < 1e-300) return false;
+        if (piv != k) { for (int j=0;j<n;++j) std::swap(A[(size_t)k*n+j],A[(size_t)piv*n+j]); std::swap(b[k],b[piv]); }
+        const double akk = A[(size_t)k*n+k];
+        for (int i = k+1; i < n; ++i) {
+            const double f = A[(size_t)i*n+k]/akk;
+            if (f != 0.0) { for (int j=k;j<n;++j) A[(size_t)i*n+j]-=f*A[(size_t)k*n+j]; b[i]-=f*b[k]; }
+        }
+    }
+    for (int i = n-1; i >= 0; --i) { double sgi=b[i]; for (int j=i+1;j<n;++j) sgi-=A[(size_t)i*n+j]*b[j]; b[i]=sgi/A[(size_t)i*n+i]; }
+    return true;
+}
+
+/// Characteristic per-group residual scales, derived from the STATE and INPUTS
+/// (never from the residual itself), so the merit genuinely → 0 as R → 0.
+struct GroupScales { double mass, ang, rad, ene, bc_ell, bc_T, reg; };
+static GroupScales slim_group_scales(const std::vector<double>& U, const SlimDiskInputs& in) {
+    using namespace constants;
+    const int N = std::max(in.n_nodes, 4);
+    const double Mdot = std::max(std::abs(in.mdot), 1e-300);
+    // Mean |ℓ|, |T_c|, |Σ| over the nodes (typical magnitudes of the state vars).
+    double mEll = 0, mT = 0, mSig = 0;
+    for (int i = 0; i < N; ++i) {
+        mEll += std::abs(U[4*i+2]); mT += std::abs(U[4*i+3]); mSig += std::abs(U[4*i+0]);
+    }
+    mEll = std::max(mEll / N, 1e-30); mT = std::max(mT / N, 1.0); mSig = std::max(mSig / N, 1e-30);
+
+    GroupScales s{};
+    // mass [g/s]:   row = Ṁ_node - Ṁ ;  scale = Ṁ.
+    s.mass = Mdot;
+    // angmom [erg]: row LHS = (Ṁ/2π)(ℓ-ℓ_in)·r_g·c ;  scale = (Ṁ/2π)·ℓ̄·r_g·c.
+    s.ang  = (Mdot / (2.0 * std::numbers::pi)) * mEll * in.r_g * c_cgs;
+    // radmom: dlnV-difference ODE, intrinsically O(1) dimensionless.
+    s.rad  = 1.0;
+    // energy [erg/cm²/s]: scale by a characteristic Q_rad ≈ 64σT̄⁴/(3·κ̄·Σ̄).
+    // κ ~ electron-scattering 0.34 cm²/g is a safe representative; the exact value
+    // only sets the row weight, not the converged solution.
+    {
+        const double kappa_rep = 0.34;
+        s.ene = std::max(64.0 * sigma_SB * mT*mT*mT*mT / (3.0 * kappa_rep * mSig), 1e-300);
+    }
+    // outer BCs: row 4N-2 = ℓ-ℓ_K (scale ℓ̄), row 4N-1 = T_c-T_eff (scale T̄).
+    s.bc_ell = mEll;
+    s.bc_T   = mT;
+    // regularity: 𝒟₀, 𝒩₁ both dimensionless O(1).
+    s.reg = 1.0;
+    return s;
+}
+
+/// Scale-balanced merit for the slim-disk radial residual (RMS of per-row
+/// dimensionless residuals). Each of the six row GROUPS (mass, angmom, radmom,
+/// energy, outer BC, regularity) is normalized by a STATE-derived characteristic
+/// magnitude (slim_group_scales) — NOT by its own residual norm — so the merit
+/// decreases monotonically as the residual shrinks. The groups span ~1e17 (mass,
+/// g/s) to O(1) (the dimensionless transonic ODE / regularity rows); without this
+/// the line search makes no progress on the small-magnitude rows.
+/// Mirrors disk_column_bvp::scaled_residual_norm (variable-magnitude row scaling).
+static double slim_scaled_residual_norm(const std::vector<double>& U,
+                                        const std::vector<double>& R,
+                                        const SlimDiskInputs& in) {
+    const int N = std::max(in.n_nodes, 4);
+    const GroupScales s = slim_group_scales(U, in);
+
+    double sum = 0.0; int cnt = 0;
+    auto accum = [&](int begin, int end, double scale) {
+        const double sc = std::max(scale, 1e-300);
+        for (int i = begin; i < end; ++i) { double v = R[i]/sc; sum += v*v; ++cnt; }
+    };
+    accum(0,       N,     s.mass);
+    accum(N,       2*N,   s.ang);
+    accum(2*N,     3*N-1, s.rad);
+    accum(3*N-1,   4*N-2, s.ene);
+    accum(4*N-2,   4*N-1, s.bc_ell);   // ℓ(r_out)-ℓ_K
+    accum(4*N-1,   4*N,   s.bc_T);     // T_c(r_out)-T_eff
+    accum(4*N,     4*N+2, s.reg);
+    return std::sqrt(sum / (double)std::max(cnt, 1));
+}
+
+// Per-group SCALED rms magnitudes (R/scale), for the non-convergence diagnostic dump.
+struct GroupMags { double mass, ang, rad, ene, bc, reg; };
+static GroupMags slim_group_mags(const std::vector<double>& U, const std::vector<double>& R,
+                                 const SlimDiskInputs& in) {
+    const int N = std::max(in.n_nodes, 4);
+    const GroupScales s = slim_group_scales(U, in);
+    auto rms = [&](int begin, int end, double sc) {
+        double t = 0.0; int c = 0; sc = std::max(sc, 1e-300);
+        for (int i = begin; i < end; ++i) { double v = R[i]/sc; t += v*v; ++c; }
+        return c ? std::sqrt(t/c) : 0.0;
+    };
+    return { rms(0,N,s.mass), rms(N,2*N,s.ang), rms(2*N,3*N-1,s.rad),
+             rms(3*N-1,4*N-2,s.ene),
+             std::max(rms(4*N-2,4*N-1,s.bc_ell), rms(4*N-1,4*N,s.bc_T)),
+             rms(4*N,4*N+2,s.reg) };
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// Transonic radial solver (Newton relaxation)
 // ---------------------------------------------------------------------------
 SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUTs& opacity) {
-    (void)in; (void)opacity;
+    using namespace constants;
+    using namespace slim_detail;
+    const int N = std::max(in.n_nodes, 4);
+    const int n = 4*N + 2;
     SlimDiskRadial out;
-    return out;  // not yet implemented (Task 5 wires the Newton relaxation)
+
+    // 1) Thin-disk seed.
+    std::vector<double> U = build_thin_disk_seed(in, opacity);
+
+    const bool kDiag = std::getenv("SLIM_DIAG") != nullptr;
+
+    std::vector<double> R, J, Jcopy, rhs, Utry, Rtry;
+    slim_radial_residual(U, in, opacity, R);
+    double merit = slim_scaled_residual_norm(U, R, in);
+
+    if (kDiag) {
+        const GroupMags g = slim_group_mags(U, R, in);
+        std::printf("[SLIM] seed merit=%.3e  mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f ell_in=%.4f\n",
+                    merit, g.mass, g.ang, g.rad, g.ene, g.bc, g.reg, U[4*N+1], U[4*N+0]);
+    }
+
+    // Rebuild the log radial grid (same as the residual/seed) for unpacking.
+    const double lr0 = std::log(in.r_in), lr1 = std::log(in.r_out);
+    std::vector<double> rgrid(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        rgrid[i] = std::exp(lr0 + (lr1 - lr0) * t);
+    }
+
+    // Practical scaled-merit floor: below this the residual is at the noise level
+    // of the FD-gradient (dlnP/dlnΣ) coupling and the bilinear opacity-LUT slopes.
+    constexpr double kMeritFloor = 1e-6;
+    // Step cap on the strictly-positive variables (Σ off 0, T_c off 3) so a single
+    // Newton step cannot drive them negative (the closure / EOS need Σ,T_c>0).
+    constexpr double kStepCap = 0.5;
+    // Levenberg-Marquardt damping (adapted each iteration; see the solve below).
+    double lm_mu = 1e-3;
+
+    for (int it = 0; it < in.max_iters; ++it) {
+        // 2a) Numerical Jacobian and Newton step  J dU = -R.
+        slim_numerical_jacobian(U, in, opacity, J);
+        if (kDiag && it == 0) {
+            // Column 2-norms for the two globals + min/max nonzero column norm,
+            // to spot a near-null direction (e.g. an insensitive r_s column).
+            auto colnorm = [&](int c){ double s=0; for(int r=0;r<n;++r){double v=J[(size_t)r*n+c]; s+=v*v;} return std::sqrt(s); };
+            double mn = 1e300, mx = 0; int mn_col = -1;
+            for (int c = 0; c < n; ++c) { double cn = colnorm(c); if (cn > mx) mx = cn; if (cn > 0 && cn < mn) { mn = cn; mn_col = c; } }
+            std::printf("[SLIM] J: col(ell_in)=%.3e col(r_s)=%.3e  min-nonzero-colnorm=%.3e@col%d max-colnorm=%.3e ratio=%.3e\n",
+                        colnorm(4*N), colnorm(4*N+1), mn, mn_col, mx, mn/std::max(mx,1e-300));
+        }
+        // 2a') Row + column scaling (non-dimensionalize the Newton system).
+        //
+        // The raw Jacobian columns span ~33 orders of magnitude (e.g. the ℓ_in
+        // column ~1e34 in the Mdot·r_g·c-weighted angular-momentum rows vs the r_s
+        // column ~1e2) because the state variables (Σ~1e6, V~1e-5, ℓ~1, T_c~1e6,
+        // r_s~1) and the residual rows (mass ~1e17 down to dimensionless O(1)) have
+        // wildly mismatched scales. Gaussian elimination on a 1e33-conditioned
+        // matrix yields a garbage Newton step (the small-norm directions acquire
+        // enormous components). We solve the EQUIVALENT well-scaled system
+        //   (Dr · J · Dc)·y = -(Dr · R),  dU = Dc·y
+        // with Dc = diag(per-variable magnitude) and Dr = diag(1/per-group scale).
+        // This is an exact reformulation (no physics change) that simply makes the
+        // linear solve numerically well-posed.  The column BVP avoids this because
+        // its four state variables are comparable in magnitude.
+        std::vector<double> cs(n), rs_inv(n);
+        {
+            // Column scales: characteristic magnitude of each state variable.
+            double mSig=0, mV=0, mEll=0, mT=0;
+            for (int i = 0; i < N; ++i) {
+                mSig=std::max(mSig,std::abs(U[4*i+0])); mV =std::max(mV ,std::abs(U[4*i+1]));
+                mEll=std::max(mEll,std::abs(U[4*i+2])); mT =std::max(mT ,std::abs(U[4*i+3]));
+            }
+            mSig=std::max(mSig,1e-30); mV=std::max(mV,1e-30); mEll=std::max(mEll,1e-30); mT=std::max(mT,1.0);
+            for (int i = 0; i < N; ++i) { cs[4*i+0]=mSig; cs[4*i+1]=mV; cs[4*i+2]=mEll; cs[4*i+3]=mT; }
+            cs[4*N+0]=std::max(std::abs(U[4*N+0]),1e-30);   // ℓ_in
+            cs[4*N+1]=std::max(std::abs(U[4*N+1]),1e-30);   // r_s
+            // Row scales: per-group characteristic residual magnitude (reciprocal).
+            const GroupScales gs = slim_group_scales(U, in);
+            auto setrows = [&](int b,int e,double sc){ sc=std::max(sc,1e-300); for(int r=b;r<e;++r) rs_inv[r]=1.0/sc; };
+            setrows(0,N,gs.mass); setrows(N,2*N,gs.ang); setrows(2*N,3*N-1,gs.rad);
+            setrows(3*N-1,4*N-2,gs.ene); setrows(4*N-2,4*N-1,gs.bc_ell);
+            setrows(4*N-1,4*N,gs.bc_T); setrows(4*N,4*N+2,gs.reg);
+        }
+        // Scaled Jacobian Js = Dr·J·Dc and scaled residual Rs = Dr·R.
+        std::vector<double> Js((size_t)n*n, 0.0), Rs(n, 0.0);
+        for (int r = 0; r < n; ++r) {
+            Rs[r] = R[r] * rs_inv[r];
+            for (int c = 0; c < n; ++c)
+                Js[(size_t)r*n+c] = J[(size_t)r*n+c] * rs_inv[r] * cs[c];
+        }
+
+        // Levenberg-Marquardt on the scaled normal equations:
+        //   (Js^T Js + μ·diag(Js^T Js)) y = -Js^T Rs.
+        // Pure Newton (μ→0) gives a garbage step here because the mass-conservation
+        // rows (mdot = -2πΣVΓΔ^½·r_g·c) make the (Σ,V) block near rank-deficient —
+        // a whole direction (scale Σ up, V down at fixed mdot) is nearly null, so
+        // the unregularized solve produces ~1e9 fractional steps that the trust
+        // region throttles to ~1e-11 (no progress). LM damping rotates the step
+        // toward scaled gradient descent in that subspace while staying Newton-like
+        // elsewhere; μ is adapted (decrease on success, increase on stall) so the
+        // method recovers quadratic convergence near the solution. Standard,
+        // physics-neutral regularization of an ill-posed linear solve.
+        std::vector<double> JtJ((size_t)n*n, 0.0), Jtr(n, 0.0);
+        for (int i = 0; i < n; ++i) {
+            for (int k = 0; k < n; ++k) {
+                const double jik = Js[(size_t)k*n+i];   // Js[k][i]
+                if (jik == 0.0) continue;
+                Jtr[i] += jik * Rs[k];
+                for (int j = 0; j < n; ++j) JtJ[(size_t)i*n+j] += jik * Js[(size_t)k*n+j];
+            }
+        }
+        std::vector<double> Adamp((size_t)n*n), bdamp(n);
+        bool solved = false;
+        for (int tries = 0; tries < 12 && !solved; ++tries) {
+            Adamp = JtJ;
+            for (int i = 0; i < n; ++i)
+                Adamp[(size_t)i*n+i] += lm_mu * std::max(JtJ[(size_t)i*n+i], 1e-300);
+            for (int i = 0; i < n; ++i) bdamp[i] = -Jtr[i];
+            if (dense_solve(Adamp, bdamp, n)) { solved = true; break; }
+            lm_mu *= 10.0;                       // singular even damped -> stiffen
+        }
+        if (!solved) {
+            if (kDiag) std::printf("[SLIM] it=%d SINGULAR (LM) -> bail\n", it);
+            break;
+        }
+        // Unscale: dU = Dc·y.
+        rhs.assign(n, 0.0);
+        for (int c = 0; c < n; ++c) rhs[c] = bdamp[c] * cs[c];
+        const std::vector<double>& dU = rhs;
+
+        // 2b) Trust-region cap: limit the fractional step on the positive vars
+        //     (Σ, T_c) so they stay positive and we don't overshoot the closure
+        //     nonlinearity in one shot; the line search runs from the capped step.
+        double lambda = 1.0;
+        for (int i = 0; i < N; ++i) {
+            for (int c : {0, 3}) {                          // Σ (off 0), T_c (off 3)
+                const double u = U[4*i+c], d = dU[4*i+c];
+                if (u != 0.0 && d != 0.0) {
+                    const double frac = std::abs(d / u);
+                    if (frac * lambda > kStepCap) lambda = kStepCap / frac;
+                }
+            }
+        }
+
+        // 2c) Damped line search on the SCALED merit. Reject any iterate that is
+        //     non-physical (Σ<=0, T_c<=0, or |V|>=1) before evaluating the residual.
+        bool accepted = false;
+        double merit_try = merit;
+        for (int ls = 0; ls < 40; ++ls) {
+            Utry.assign(U.begin(), U.end());
+            for (int i = 0; i < n; ++i) Utry[i] += lambda * dU[i];
+            bool physical = true;
+            for (int i = 0; i < N && physical; ++i) {
+                const double Sig = Utry[4*i+0], Vv = Utry[4*i+1], Tc = Utry[4*i+3];
+                if (Sig <= 0.0 || Tc <= 0.0 || std::abs(Vv) >= 1.0) physical = false;
+            }
+            // r_s must stay on the grid for the regularity interpolation to be sane.
+            if (physical) {
+                const double rs = Utry[4*N+1];
+                if (!(rs > rgrid.front() && rs < rgrid.back())) physical = false;
+            }
+            if (physical) {
+                slim_radial_residual(Utry, in, opacity, Rtry);
+                merit_try = slim_scaled_residual_norm(Utry, Rtry, in);
+                if (kDiag && it == 0)
+                    std::printf("[SLIM]   ls=%d lambda=%.3e merit_try=%.4e (merit=%.4e)\n",
+                                ls, lambda, merit_try, merit);
+                if (merit_try < merit) { accepted = true; break; }
+            }
+            lambda *= 0.5;
+        }
+        if (!accepted) {
+            // LM hallmark: a stalled step means μ is too small (step too Newton-like
+            // into the near-null direction). Stiffen μ and re-try this iteration
+            // (toward gradient descent) rather than giving up — up to a μ ceiling.
+            if (lm_mu < 1e12) {
+                lm_mu *= 10.0;
+                if (kDiag && it == 0) std::printf("[SLIM]   STALL -> raise lm_mu=%.1e, retry\n", lm_mu);
+                --it;                            // re-do this iteration with stiffer μ
+                continue;
+            }
+            if (kDiag) {
+                const GroupMags g = slim_group_mags(U, R, in);
+                std::printf("[SLIM] it=%d LINE-SEARCH STALL merit=%.3e (lm_mu maxed)  "
+                            "mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f ell_in=%.4f\n",
+                            it, merit, g.mass, g.ang, g.rad, g.ene, g.bc, g.reg, U[4*N+1], U[4*N+0]);
+            }
+            break;                              // stuck -> bail (non-converged)
+        }
+        // Accepted: relax μ toward Newton for faster (quadratic) local convergence.
+        lm_mu = std::max(lm_mu * 0.3, 1e-12);
+
+        // 2d) Convergence on the (capped) relative step size.
+        double maxrel = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const double rel = std::abs(lambda * dU[i]) / std::max(std::abs(U[i]), 1e-300);
+            maxrel = std::max(maxrel, rel);
+        }
+
+        U.swap(Utry);
+        R.swap(Rtry);
+        merit = merit_try;
+        out.iters = it + 1;
+        out.final_residual = merit;
+
+        if (kDiag) {
+            const GroupMags g = slim_group_mags(U, R, in);
+            std::printf("[SLIM] it=%d lambda=%.2e mu=%.1e merit=%.3e maxrel=%.2e  "
+                        "mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f ell_in=%.4f\n",
+                        it, lambda, lm_mu, merit, maxrel, g.mass, g.ang, g.rad, g.ene, g.bc, g.reg,
+                        U[4*N+1], U[4*N+0]);
+        }
+
+        // Both must hold: relative step small AND scaled residual below the floor.
+        if (maxrel < in.tol && merit < kMeritFloor) { out.converged = true; break; }
+    }
+
+    // Honest fallback: never fabricate a profile.
+    if (!out.converged) {
+        out.r.clear(); out.Sigma.clear(); out.V.clear(); out.Omega.clear();
+        out.Tc.clear(); out.H.clear(); out.f_adv.clear();
+        out.ell_in = 0.0; out.r_sonic = 0.0;
+        return out;
+    }
+
+    // 3) Unpack the converged state.
+    out.r.resize(N); out.Sigma.resize(N); out.V.resize(N); out.Omega.resize(N);
+    out.Tc.resize(N); out.H.resize(N); out.f_adv.resize(N);
+    const double ell_in = U[4*N+0];
+    const double Mdot   = in.mdot;
+    auto dln = [&](double f_lo, double f_hi, double r_lo, double r_hi) {
+        return (std::log(std::max(f_hi, 1e-300)) - std::log(std::max(f_lo, 1e-300)))
+             / (std::log(r_hi) - std::log(r_lo));
+    };
+    for (int i = 0; i < N; ++i) {
+        const double r   = rgrid[i];
+        const double Sig = U[4*i+0], V = U[4*i+1], ell = U[4*i+2], Tc = U[4*i+3];
+        const OneZoneState oz = one_zone_closure(std::max(Sig, kSigmaFloor),
+                                                 std::max(Tc, kTFloor), r, in, opacity);
+        out.r[i]     = r;
+        out.Sigma[i] = Sig;
+        out.V[i]     = V;
+        // Ω from ℓ (geometric 1/M) → 1/s via c/r_g.
+        out.Omega[i] = omega_from_ell(in.mass, in.spin, r, ell) * (c_cgs / in.r_g);
+        out.Tc[i]    = Tc;
+        out.H[i]     = oz.H;
+        // f_adv = Q_adv / Q_rad per node (advected fraction). FD gradients of
+        // lnP, lnΣ on the log grid (one-sided at the ends).
+        const int j = (i + 1 < N) ? i + 1 : i - 1;
+        const OneZoneState ozj = one_zone_closure(std::max(U[4*j+0], kSigmaFloor),
+                                                  std::max(U[4*j+3], kTFloor), rgrid[j], in, opacity);
+        const double dlnP = dln(oz.P, ozj.P, r, rgrid[j]);
+        const double dlnS = dln(Sig,  U[4*j+0], r, rgrid[j]);
+        const double r_cm = r * in.r_g;
+        const double Qadv = -(Mdot / (2.0 * std::numbers::pi * r_cm * r_cm))
+                          * (oz.P / std::max(Sig, kSigmaFloor))
+                          * ((kGamma1 - 1.0) * dlnP - kGamma1 * dlnS);    // [erg/cm²/s]
+        const double rho_mid = oz.rho_mid;
+        const double kR = opacity.lookup_kappa_ross(rho_mid, Tc) + opacity.lookup_kappa_es(rho_mid, Tc);
+        const double Qrad = 64.0 * sigma_SB * Tc*Tc*Tc*Tc
+                          / (3.0 * std::max(kR, 1e-300) * std::max(Sig, kSigmaFloor));  // [erg/cm²/s]
+        out.f_adv[i] = Qadv / std::max(std::abs(Qrad), 1e-300);
+    }
+    out.ell_in  = ell_in;
+    out.r_sonic = U[4*N+1];
+    return out;
 }
 } // namespace grrt

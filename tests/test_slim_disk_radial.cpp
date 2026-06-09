@@ -2,6 +2,7 @@
 #include "grrt/color/opacity.h"
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 
 int failures = 0;
 static void check(const char* name, double got, double expected, double rel_tol) {
@@ -44,11 +45,19 @@ static void test_links_and_returns() {
     grrt::SlimDiskInputs in{};
     in.mass = 1.0; in.spin = 0.9; in.mdot = 1e17; in.alpha = 0.1;
     in.r_g = 1.48e6; in.r_in = 1.5; in.r_out = 50.0; in.n_nodes = 64;
-    auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
+    auto lut = grrt::build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
     auto sol = grrt::solve_slim_disk_radial(in, lut);
-    std::printf("  converged=%d (stub returns false; later tasks implement)\n", sol.converged);
-    // Scaffold-level contract: the call links, returns, and the stub is honestly non-converged.
-    if (sol.converged) { std::printf("  FAIL: stub should not claim convergence\n"); failures++; }
+    std::printf("  converged=%d iters=%d final_residual=%.3e\n",
+                sol.converged, sol.iters, sol.final_residual);
+    // Contract: the call links, returns, and honours the no-fabrication invariant —
+    // a converged result must carry a full profile; a non-converged one must be empty.
+    if (sol.converged) {
+        if (sol.r.size() != (size_t)in.n_nodes) {
+            std::printf("  FAIL: converged but profile not unpacked\n"); failures++;
+        }
+    } else {
+        if (!sol.r.empty()) { std::printf("  FAIL: non-converged but profile non-empty\n"); failures++; }
+    }
 }
 
 static void test_one_zone_closure() {
@@ -136,12 +145,90 @@ static void test_radial_residual_finite() {
     else std::printf("  PASS: all %zu residual entries finite\n", R.size());
 }
 
+// Prograde Kerr ISCO (Bardeen, Press & Teukolsky 1972), M=1.
+static double isco_prograde(double a) {
+    const double Z1 = 1.0 + std::cbrt(1.0 - a*a) * (std::cbrt(1.0 + a) + std::cbrt(1.0 - a));
+    const double Z2 = std::sqrt(3.0*a*a + Z1*Z1);
+    return 3.0 + Z2 - std::sqrt((3.0 - Z1) * (3.0 + Z1 + 2.0*Z2));
+}
+// Kerr outer horizon r+ = M + sqrt(M^2 - a^2), M=1.
+static double horizon_plus(double a) { return 1.0 + std::sqrt(std::max(1.0 - a*a, 0.0)); }
+
+// Mid-Ṁ transonic relaxation at a given spin: solve, assert convergence + sanity.
+static void solve_one_spin(double a) {
+    std::printf("\n--- a=%.3f ---\n", a);
+    grrt::SlimDiskInputs in{};
+    in.mass = 1.0;
+    in.spin = a;
+    in.alpha = 0.1;
+    in.r_g = 1.48e6;                 // ~10 M_sun
+    // r_in just OUTSIDE the prograde photon orbit r_ph (the inner limit of circular
+    // timelike orbits — inside it ℓ_K diverges).  r_ph = 2M[1+cos((2/3)arccos(-a))];
+    // a=0.9 -> 1.558, a=0.998 -> 1.074. The transonic flow's sonic point still sits
+    // between r_in and the ISCO. (horizon r+ for a=0.998 ~1.063, a=0.9 ~1.436.)
+    const double r_ph = 2.0 * (1.0 + std::cos((2.0/3.0) * std::acos(-a)));
+    in.r_in = r_ph + 0.02;
+    in.r_out = 50.0;
+    in.n_nodes = 150;
+    in.max_iters = 100;
+    in.tol = 1e-6;
+    // Mid Ṁ: f_Edd ≈ 0.3.  L_Edd ≈ 1.26e39 erg/s for 10 M_sun; with η≈0.1,
+    // Ṁ_Edd = L_Edd/(η c²) ≈ 1.4e18 g/s, so 0.3 Ṁ_Edd ≈ 4e17 g/s.
+    in.mdot = 4.0e17;
+
+    auto lut = grrt::build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
+    auto s = grrt::solve_slim_disk_radial(in, lut);
+
+    const double r_isco = isco_prograde(a);
+    std::printf("  horizon=%.4f r_in=%.4f r_isco=%.4f | converged=%d iters=%d final_residual=%.3e r_sonic=%.4f\n",
+                horizon_plus(a), in.r_in, r_isco, s.converged, s.iters, s.final_residual, s.r_sonic);
+
+    if (!s.converged) {
+        std::printf("  FAIL: a=%.3f did not converge\n", a);
+        failures++;
+        return;
+    }
+    if (!(s.final_residual < in.tol)) {
+        std::printf("  FAIL: final_residual %.3e !< tol %.3e\n", s.final_residual, in.tol);
+        failures++;
+    }
+    // Sanity: V<0 (inflow) everywhere, Σ>0, sonic point inside the ISCO.
+    bool all_inflow = true, all_pos = true;
+    double f_adv_lo = 1e300, f_adv_hi = -1e300;
+    for (size_t i = 0; i < s.r.size(); ++i) {
+        if (!(s.V[i] < 0.0)) all_inflow = false;
+        if (!(s.Sigma[i] > 0.0)) all_pos = false;
+        f_adv_lo = std::min(f_adv_lo, s.f_adv[i]);
+        f_adv_hi = std::max(f_adv_hi, s.f_adv[i]);
+    }
+    std::printf("  V<0 everywhere=%d  Sigma>0 everywhere=%d  f_adv in [%.3e, %.3e]\n",
+                all_inflow, all_pos, f_adv_lo, f_adv_hi);
+    if (!all_inflow) { std::printf("  FAIL: V not <0 everywhere\n"); failures++; }
+    if (!all_pos)    { std::printf("  FAIL: Sigma not >0 everywhere\n"); failures++; }
+    if (!(s.r_sonic < r_isco)) {
+        std::printf("  FAIL: r_sonic %.4f not inside ISCO %.4f\n", s.r_sonic, r_isco);
+        failures++;
+    }
+    // Mid-Ṁ: advection is present but sub-dominant -> small-but-positive f_adv.
+    if (!(f_adv_hi > 0.0)) {
+        std::printf("  FAIL: f_adv never positive (expected small-but-positive at mid Ṁ)\n");
+        failures++;
+    }
+}
+
+static void test_converges_midmdot() {
+    std::printf("\n=== transonic relaxation converges at mid-Ṁ (a=0.9 and a=0.998) ===\n");
+    solve_one_spin(0.9);
+    solve_one_spin(0.998);
+}
+
 int main() {
     test_kerr_factors();
     test_links_and_returns();
     test_one_zone_closure();
     test_one_zone_radiation_dominated();
     test_radial_residual_finite();
+    test_converges_midmdot();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
