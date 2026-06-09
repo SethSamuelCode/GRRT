@@ -206,7 +206,7 @@ The physics is identical — only the state representation changes. State vector
 (2) Radial momentum (transonic):
     (V/(1−V²)) dV/dr = 𝒜/(r³Δ) − (Ω−Ω_K⁺)(Ω−Ω_K⁻)/(1−Ω̃²R̃²) − (1/Σ) dP/dr
 (3) Angular momentum:  (Ṁ/2π)(ℓ − ℓ_in) = (A^½ Δ^½ Γ / r)·α P
-(4) Energy:    Q_vis = Q_rad + Q_adv ,   f_adv ≡ Q_adv/Q_vis ,   Q_rad = (1−f_adv)·Q_vis
+(4) Energy:    Q_vis = Q_rad + Q_adv ,   f_adv ≡ Q_adv/Q_rad (Sądowski; §23) ,   Q_rad = Q_vis/(1+f_adv)
 ```
 `Σ`=surface density; `V`=radial velocity (corotating frame); `Δ=r²−2Mr+a²`; `𝒜=(r²+a²)²−a²Δ`, `A=r⁴+r²a²+2Mra²`; `Ω` orbital, `Ω_K±` Keplerian; `ℓ=u_φ` specific angular momentum, `ℓ_in` its inner-edge value; `Γ` Lorentz factor; `P=∫p dz` (vertically integrated — α-stress `W_rφ=αP`, **not** local `αp`); `Q_adv ∝ T dS/dr` (entropy advected by inflow).
 
@@ -225,6 +225,40 @@ dp/dz = −ρ Ω_⊥² z ,   Ω_⊥² = Ω_K²·ℋ                 vertical hyd
 **Thin-disk limit (superset check).** `Ṁ→0` ⇒ `f_adv→0`, `dP/dr→0`, `V≪1`, `Ω→Ω_K`, sonic point→ISCO, `ℓ_in→ℓ_ISCO`, `Q_vis=Q_rad` → Novikov–Thorne (coincides to a few % at `Ṁ ≲ 0.1 Ṁ_Edd`).
 *Sources: Sądowski 2009 Eqs (1)-(9); Sądowski 2011 Eqs (10),(12),(13),(22)-(35); Abramowicz & Fragile 2013 Eqs (88)-(93); Riffert & Herold 1995 (Kerr factors). Full URLs: see the slim-disk spec.*
 
+## 23. Slim-disk residual terms (one-zone, verified)
+The expanded, error-prone terms the Phase-1 transonic radial residual needs (§22 has the compact laws; these are the explicit one-zone forms). **Verified** against Sądowski 2009 (S09, [arXiv:0906.0355]) Eqs 1-10, Sądowski 2011 (S11, [arXiv:1006.4309]) Eqs 13,23,24,29,32-34, Abramowicz & Fragile 2013 §6, Bardeen-Press-Teukolsky 1972. Geometric units.
+
+**Transonic `dV/dr = 𝒩/𝒟` (one-zone, S11 Eqs 32-33):**
+```
+𝒟₀ = V² − Γ̃₁·(P/Σ)                  denominator; = 0 at the sonic point (Mach 1: V²=c_s², c_s²≡Γ̃₁ P/Σ)
+𝒩₁ = 𝒜 + (2πr²/(Ṁ η₃))·Q_adv
+       + (P/Σ)·[ r(r−M)/Δ · Γ̃₁ + dln η₃/dln r ]
+       + Ω_⊥²·(η₄/η₃)·dln η₄/dln r
+dln V/dln r = (𝒩₁/𝒟₀)·(1−V²)
+```
+`Γ̃₁ = 1 + 1/η₃` (effective adiabatic index; one-zone `η₃→Γ₁−1` ⇒ `Γ̃₁→Γ₁`). `𝒜` = the gravitational/centrifugal term (S09 Eq 3: the `(Ω−Ω_K⁺)(Ω−Ω_K⁻)/(1−Ω̃²R̃²)` combo, `Ω̃=Ω−ω`, `ω=2Mar/A`, `R̃=A/(r²Δ^½)`). `η₃,η₄` = vertical weight functions (one-zone constants).
+
+**Sonic-point regularity (S09 Eq 10; S11 Eq 34):** at `r_s`, BOTH `𝒟₀(r_s)=0` AND `𝒩₁(r_s)=0`. Eigenvalue closed = `ℓ_in`; `r_s` is *found* (not prescribed) and lies **inside the ISCO** at high `Ṁ`. At `r_s`: `|V|=c_s`.
+
+**Viscous heating (S11 Eqs 13/23):** `Q_vis = −(Ṁ/2π)·(ℓ−ℓ_in)·(dΩ/dr)·(A^½ Δ^½ Γ / r³)`. `Γ=1/√(1−V²)` (Lorentz factor). Both faces. `Q_vis>0`.
+
+**One-zone radiative cooling (S11 [arXiv:1108.0396] Eq 3.19; both faces):**
+```
+Q_rad = 64·σ·T_c⁴ / (3·κ_R·Σ)        κ_R = Rosseland mean (es + Kramers), Σ = FULL surface density, τ = κ_R Σ/2
+```
+⚠ One face = `32σT_c⁴/(3κ_R Σ)`. **NEVER `8σT_c⁴/(κΣ)`** (wrong factor). The `f_F≈0.94` vertical-structure correction is a Phase-3 refinement.
+
+**Advective cooling (S11 Eq 29, one-zone):**
+```
+Q_adv = −(Ṁ/2πr²)·(P/Σ)·[ (Γ₁−1)·dln P/dln r − Γ₁·dln Σ/dln r ]     ( ≡ (Ṁ/2πr²)·T·dS/dr )
+```
+A *cooling* term (carries heat inward). `Q_vis = Q_rad + Q_adv`.
+
+**`f_adv` convention (LOCKED — Sądowski, trap #11):** `f_adv ≡ Q_adv/Q_rad`; radiated fraction `= 1/(1+f_adv)`; `Q_rad = Q_vis/(1+f_adv)`; `f_adv=0` ⇒ Novikov-Thorne. (NOT Narayan-Yi `Q_adv/Q_vis`.)
+
+**Sign trap:** mass conservation `Ṁ=−2πΣΔ^½V/√(1−V²)` with `Ṁ>0` FORCES `V<0` for inflow — keep `V<0 = inflow`. **Outer BC:** `Ω(r_out)=Ω_K⁺`, `ℓ(r_out)=ℓ_K` (Bardeen-Press-Teukolsky 1972 Keplerian values).
+*Sources: S09 Eqs 1-10; S11 Eqs 13,23,24,29,32-34; AF13 §6; BPT72.*
+
 ---
 
 ## Error-trap checklist (read before editing any formula)
@@ -238,5 +272,5 @@ dp/dz = −ρ Ω_⊥² z ,   Ω_⊥² = Ω_K²·ℋ                 vertical hyd
 8. **The Newton solver carries GAS pressure `P_gas`, not total `P`** (§21). Recover total `P = P_gas + aT⁴/3` by *addition*; recovering `P_gas = P − P_rad` from a stored total is catastrophic cancellation in the radiation-dominated regime and stalls the solver. Physics still uses total `P` (hydrostatic, viscous heating, surface BC).
 9. **Slim-disk α-stress is vertically INTEGRATED** `W_rφ = αP = α∫p dz`, not local `αp` (§22) — the local form drops an `H` factor in the torque.
 10. **The slim disk is a TRANSONIC eigenvalue problem** (§22): regularity at the sonic point (`𝒩=𝒟₀=0`) pins `ℓ_in`; the sonic point is *found, not prescribed*, and lies *inside* the ISCO. Do not apply the thin-disk no-torque ISCO boundary condition.
-11. **`f_adv` convention:** Sądowski 2011 uses `Q_rad/Q_vis = (1+f_adv)^{−1}` (heating divided by `1+f_adv`), NOT `(1−f_adv)` — identical only for `f_adv≪1`. Pick one and stay consistent (§22).
+11. **`f_adv` convention — LOCKED to Sądowski (§23):** `f_adv ≡ Q_adv/Q_rad`, radiated fraction `= 1/(1+f_adv)`, `Q_rad = Q_vis/(1+f_adv)`. This is **NOT** the Narayan-Yi `f_adv=Q_adv/Q_vis` (which gives `Q_rad=(1−f_adv)Q_vis`) — they differ except for `f_adv≪1`, related by `f_NY=f_S/(1+f_S)`. The vertical-coupling `αp/(1+f_adv)` and the §22/§23 energy law both use the Sądowski form. Stay consistent.
 12. **`Ṁ_Edd` factor differs by paper** (`16 L_Edd/c²` in Abramowicz & Fragile vs the textbook `10 L_Edd/c²` at η=0.1) — check which convention before comparing accretion rates (§4, §22).
