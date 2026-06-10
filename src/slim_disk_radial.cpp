@@ -5,6 +5,7 @@
 #include <numbers>
 #include <cstdlib>
 #include <cstdio>
+#include <chrono>
 
 namespace grrt {
 
@@ -233,6 +234,57 @@ constexpr double kGtilde1 = 1.0 + 1.0 / kEta3;  // = Γ̃₁ = 5/3
 constexpr double kSigmaFloor = 1e-30;
 constexpr double kTFloor     = 1.0;
 constexpr double kVCap       = 0.999999;        // keep |V|<1 (timelike)
+
+// ---------------------------------------------------------------------------
+// RUNAWAY SAFETY BUDGET (hard ceiling — never a fabricated profile).
+// ---------------------------------------------------------------------------
+// A prior full-resolution spin-walk run hung for ~11 h (dense FD Jacobian ×
+// ~800 inner iters × bracket × spin-ladder × Ṁ-ladder).  This budget guarantees
+// that can never recur: the whole solve aborts with the HONEST fallback
+// (SlimDiskRadial{}, converged=false) — NEVER a fabricated profile — the moment
+// EITHER a cumulative inner-Newton-iteration cap OR a wall-clock cap is exceeded.
+//
+// The budget is a single file-scope object owned by solve_slim_disk_radial for
+// the duration of one solve (construction-time solves are single-threaded, so a
+// file-scope pointer is safe).  relax_structure() — the only place inner Newton
+// iterations are spent — increments the counter and trips the budget; the
+// outer bracket, the spin ladder, and the Ṁ ladder all check tripped() and
+// short-circuit to the honest fallback.  Defaults are generous-but-finite:
+// enough for a legitimate full solve, far below any runaway.
+struct SolveBudget {
+    // Default cumulative inner-iteration cap across the WHOLE solve (sum over all
+    // relax_structure Newton iterations, over every bracket sample, spin rung and
+    // Ṁ rung).  A full legitimate solve is ~800 iters × O(tens) of bracket samples
+    // × O(spin rungs) × O(Ṁ rungs); 200k leaves generous headroom yet aborts a
+    // runaway long before it can hang for hours.
+    static constexpr long long kDefaultInnerIterCap = 200000;
+    // Default wall-clock cap.  Generous (a legitimate reduced-N solve is seconds to
+    // a few minutes); 15 min is well below the prior 11-h hang.
+    static constexpr double     kDefaultWallSeconds = 15.0 * 60.0;
+
+    long long inner_iters = 0;
+    long long inner_iter_cap = kDefaultInnerIterCap;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    double wall_cap_s = kDefaultWallSeconds;
+    bool tripped = false;
+    const char* what = nullptr;   // names what was exceeded (for the stderr message)
+
+    double elapsed_s() const {
+        return std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - start).count();
+    }
+    // Returns true (and latches tripped/what) if either cap is exceeded.
+    bool check() {
+        if (tripped) return true;
+        if (inner_iters >= inner_iter_cap) { tripped = true; what = "cumulative inner iters"; }
+        else if (elapsed_s() >= wall_cap_s) { tripped = true; what = "wall-clock"; }
+        return tripped;
+    }
+};
+
+// File-scope budget pointer for the IN-PROGRESS solve (set by solve_slim_disk_radial).
+// nullptr when no solve is active; relax_structure tolerates that (no-op budget).
+SolveBudget* g_budget = nullptr;
 
 struct NodeMech {
     double Delta, sqrtDelta, A, sqrtA;
@@ -1362,6 +1414,20 @@ static bool relax_structure(const SlimDiskInputs& in, const OpacityLUTs& opacity
     auto merit_to_F = [cnt_active](double m) { return 0.5 * cnt_active * m * m; };
 
     for (int it = 0; it < in.max_iters; ++it) {
+        // SAFETY BUDGET: this is the one place inner Newton iterations are spent.
+        // Count it, then bail honestly (return non-converged) if the cumulative
+        // inner-iter or wall-clock cap is hit — the bracket/spin/Ṁ ladders see the
+        // tripped budget and short-circuit to the honest empty fallback up top.
+        if (g_budget) {
+            ++g_budget->inner_iters;
+            if (g_budget->check()) {
+                if (kDiag)
+                    std::printf("[INNER] it=%d BUDGET EXCEEDED (%s) -> abort relaxation\n",
+                                it, g_budget->what ? g_budget->what : "?");
+                break;
+            }
+        }
+
         // 2a) Numerical Jacobian (full n×n) — we gather the ACTIVE submatrix below.
         slim_numerical_jacobian(U, in, opacity, J);
 
@@ -1704,6 +1770,9 @@ static bool solve_outer_bracket(const SlimDiskInputs& in, const OpacityLUTs& opa
     auto eval_g = [&](double ell_in, std::vector<double>& Uwork, double& g) -> bool {
         Uwork = Ubase;
         const bool ok = relax_structure(in, opacity, ell_in, Uwork);
+        // Budget tripped inside relax_structure: report this sample as non-converged
+        // (g=NaN) so the bracket stops trying and the caller hits budget_fallback.
+        if (g_budget && g_budget->tripped) { g = std::nan(""); return false; }
         if (!ok) { g = std::nan(""); return false; }
         std::vector<double> Rfull;
         slim_radial_residual(Uwork, in, opacity, Rfull);
@@ -1843,6 +1912,148 @@ static bool solve_outer_bracket(const SlimDiskInputs& in, const OpacityLUTs& opa
     if (kDiag) std::printf("[OUTER] bisection did not reach g-tol in %d steps -> fallback\n", nbis);
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// Single-(a, Ṁ) solve: outer ℓ_in bracket (wrapping the inner relaxation) for
+// ONE fixed spin/Ṁ corner, with an intermediate physical-validity gate.
+// ---------------------------------------------------------------------------
+// Factored out so BOTH continuation walks (spin-walk Phase B and the existing
+// Ṁ-continuation) drive each rung through the identical bracket+gate logic. U is
+// in-out (warm-started by the caller). `require_N1` selects whether the validity
+// gate also demands the 𝒩₁(r_s)≈0 sonic-regularity check: the outer bracket drives
+// 𝒩₁→0 as the eigenvalue, so the FINAL target uses require_N1=true; the intermediate
+// continuation rungs use require_N1=false (𝒩₁ at the bracket's g-tol is sufficient to
+// keep the warm start in-basin, and forcing it here would reject otherwise-valid rungs
+// whose 𝒩₁ sits just above the validity band on the coarser intermediate grids).
+// Returns true iff the bracket closed AND the validity gate passes.
+static bool solve_single_am(const SlimDiskInputs& in, const OpacityLUTs& opacity,
+                            std::vector<double>& U, bool require_N1) {
+    if (!solve_outer_bracket(in, opacity, U)) return false;
+    const ValidityResult v = slim_validity_gate(in, opacity, U, require_N1);
+    return v.all(require_N1);
+}
+
+// ---------------------------------------------------------------------------
+// Warm-start re-projection across spins (Phase B crux).
+// ---------------------------------------------------------------------------
+// Given a CONVERGED state U_old solved at spin a_old on grid [r_s_old, r_out],
+// produce a warm U_new on the NEW spin a_new's grid [r_s_new, r_out].  The two
+// grids differ because the ISCO/sonic point marches inward with spin, so the inner
+// structure shifts; a small spin step moves it only slightly and the re-projected
+// warm start stays in the inner relaxation's basin.
+//
+// Construction (no fabricated profile — a fresh thin-disk seed at a_new provides the
+// physically-consistent inner structure + sonic node, and the converged old solution
+// is interpolated in where the two grids overlap):
+//   • BASE = build_thin_disk_seed(in_new, op): the crude-but-physically-consistent
+//     thin-disk profile on the a_new grid [r_s_new, r_out].  It already carries the
+//     correct r_s_new = 0.98·ISCO(a_new), the node-0 Mach-1 sonic override, the §23-
+//     consistent energy/angular-momentum-balanced inner annulus, and its own de-glitch.
+//     This gives a VALID inner structure (sonic node + the newly-exposed annulus) at
+//     the new spin — the part the converged old solution can't supply.
+//   • WARM OVERLAY: for every a_new-grid node with r_i ≥ r_s_old (the radii both grids
+//     share), OVERWRITE Σ,ℓ,T_c by LOG-INTERPOLATING the CONVERGED old solution onto
+//     r_i (linear in ln r), then re-derive V from mass conservation at a_new (so V is
+//     consistent with the new √Δ).  The bulk of the disk thus starts from the converged
+//     previous-spin profile — the whole point of the warm start — while the few inner
+//     nodes with r_i < r_s_old keep the fresh thin-disk seed (which built them
+//     consistently with the sonic transition).  The node-0 sonic node always keeps the
+//     fresh seed's Mach-1 override.
+//   • ℓ_in carried from U_old, nudged toward ℓ_K(isco(a_new)) (a warm eigenvalue; the
+//     outer bracket refines it).
+//   • deglitch_sigma_outliers on the overlaid U_new before returning.
+static std::vector<double> warm_reproject_spin(const std::vector<double>& U_old,
+                                               const SlimDiskInputs& in_old,
+                                               const SlimDiskInputs& in_new,
+                                               const OpacityLUTs& op) {
+    using namespace constants;
+    using namespace slim_detail;
+    (void)in_old;   // grids are reconstructed from U_old + in_new (same N, r_out)
+    const int N = std::max(in_new.n_nodes, 4);
+
+    // Old grid radii (from the converged r_s_old = U_old[4N+1]).
+    const double r_s_old = U_old[4*N+1];
+    const double r_out   = in_new.r_out;   // r_out is spin-independent (same outer edge)
+    const double lro0 = std::log(r_s_old), lro1 = std::log(r_out);
+    std::vector<double> r_old(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        r_old[i] = std::exp(lro0 + (lro1 - lro0) * t);
+    }
+
+    // BASE: a fresh thin-disk seed on the a_new grid [r_s_new, r_out]. This supplies a
+    // physically-consistent inner structure + Mach-1 sonic node + newly-exposed-annulus
+    // values that the converged old solution (which lived on the OLD, more-outward grid)
+    // cannot provide. We then overlay the converged old solution where the grids overlap.
+    std::vector<double> U = build_thin_disk_seed(in_new, op);
+
+    // The fresh seed fixes the new grid: r_s_new = U[4N+1], log-spaced to r_out.
+    const double r_s_new = U[4*N+1];
+    const double r_isco_new = isco_prograde(in_new.mass, in_new.spin);
+    const double lrn0 = std::log(r_s_new), lrn1 = std::log(r_out);
+
+    // Log-interpolate a per-node field f(ln r) from the converged old solution at
+    // offset `off`. Linear in ln r over the old log grid; clamps to the old endpoints
+    // outside [r_old[0], r_old[N-1]].
+    auto interp_old = [&](int off, double r) -> double {
+        const double lr = std::log(r);
+        if (lr <= std::log(r_old[0]))   return U_old[4*0+off];
+        if (lr >= std::log(r_old[N-1])) return U_old[4*(N-1)+off];
+        int lo = 0, hi = N - 1;
+        while (hi - lo > 1) { int mid = (lo + hi) / 2; if (std::log(r_old[mid]) <= lr) lo = mid; else hi = mid; }
+        const double x0 = std::log(r_old[lo]), x1 = std::log(r_old[hi]);
+        const double w = (x1 > x0) ? (lr - x0) / (x1 - x0) : 0.0;
+        const double f0 = U_old[4*lo+off], f1 = U_old[4*hi+off];
+        // Σ and T_c are positive and span decades → interpolate in log; ℓ (off 2) is
+        // O(1) → interpolate linearly. V is re-derived from mass conservation.
+        if (off == 0 || off == 3) {
+            const double lf0 = std::log(std::max(f0, (off == 0) ? kSigmaFloor : kTFloor));
+            const double lf1 = std::log(std::max(f1, (off == 0) ? kSigmaFloor : kTFloor));
+            return std::exp(lf0 + (lf1 - lf0) * w);
+        }
+        return f0 + (f1 - f0) * w;
+    };
+    // V from exact mass conservation at the NEW spin: Ṁ = -2πΣΔ^½(V/√(1-V²))r_g c.
+    auto Vfrom = [&](double r, double Sig) -> double {
+        const double sqrtD = std::sqrt(std::max(kerr_delta(in_new.mass, in_new.spin, r), 0.0));
+        const double dn = 2.0 * std::numbers::pi * Sig * sqrtD * in_new.r_g * c_cgs;
+        double V = -1e-6;
+        if (dn > 0.0) { const double X = -in_new.mdot / dn; V = X / std::sqrt(1.0 + X * X); }
+        if (!(V < 0.0)) V = -1e-6;
+        return std::clamp(V, -kVCap, -1e-12);
+    };
+
+    // WARM OVERLAY: overwrite every new-grid node at r_i ≥ r_s_old with the converged
+    // old solution (interpolated), re-deriving V. Skip node 0 (the sonic node — keep the
+    // fresh seed's Mach-1 override) and skip the newly-exposed inner annulus r_i < r_s_old
+    // (keep the fresh seed there). The outer node N-1 is the pinned BC node and also gets
+    // overlaid (its radius is shared by both grids — r_out is spin-independent).
+    for (int i = 1; i < N; ++i) {
+        const double t = double(i) / double(N - 1);
+        const double r = std::exp(lrn0 + (lrn1 - lrn0) * t);
+        if (r < r_s_old) continue;                 // newly-exposed annulus: keep fresh seed
+        const double Sig = std::max(interp_old(0, r), kSigmaFloor);
+        const double Tc  = std::max(interp_old(3, r), kTFloor);
+        const double ell = interp_old(2, r);
+        U[4*i+0] = Sig;
+        U[4*i+1] = Vfrom(r, Sig);
+        U[4*i+2] = ell;
+        U[4*i+3] = Tc;
+    }
+
+    // Globals: ℓ_in carried over, nudged halfway toward ℓ_K(isco(a_new)) (warm
+    // eigenvalue; the outer bracket refines it). r_s = the fresh-seed sonic anchor.
+    const double ell_in_old  = U_old[4*N+0];
+    const double ell_in_isco = ell_kepler(in_new.mass, in_new.spin, r_isco_new);
+    U[4*N+0] = 0.5 * (ell_in_old + ell_in_isco);
+    U[4*N+1] = r_s_new;
+
+    // De-glitch the overlaid profile before it is handed to the relaxation.
+    deglitch_sigma_outliers(in_new, U);
+    U[4*N+0] = 0.5 * (ell_in_old + ell_in_isco);   // deglitch preserves globals, but be explicit
+    return U;
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -1857,6 +2068,32 @@ static bool solve_outer_bracket(const SlimDiskInputs& in, const OpacityLUTs& opa
 SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUTs& opacity) {
     using namespace constants;
     const bool kDiag = std::getenv("SLIM_DIAG") != nullptr;
+
+    // -----------------------------------------------------------------------
+    // Install the runaway safety budget for THIS solve (RAII-cleared on every
+    // return path, including the honest fallbacks below).  Caps come from
+    // SlimDiskInputs if the caller set them, else the generous SolveBudget
+    // defaults.  budget_tripped() below converts a trip into the honest empty
+    // fallback with a clear stderr message naming what was exceeded.
+    SolveBudget budget;
+    if (in.budget_inner_iter_cap > 0) budget.inner_iter_cap = in.budget_inner_iter_cap;
+    if (in.budget_wall_seconds   > 0) budget.wall_cap_s     = in.budget_wall_seconds;
+    struct BudgetGuard { ~BudgetGuard() { g_budget = nullptr; } } budget_guard;
+    g_budget = &budget;
+    if (kDiag)
+        std::printf("[SLIM] safety budget: inner_iter_cap=%lld wall_cap=%.0fs\n",
+                    budget.inner_iter_cap, budget.wall_cap_s);
+    // Local helper: on a trip, emit the stderr message and return the honest empty
+    // profile.  Caller pattern: `if (budget.check()) return budget_fallback();`
+    auto budget_fallback = [&]() -> SlimDiskRadial {
+        std::fprintf(stderr,
+                     "[SLIM] BUDGET EXCEEDED (%s) -> honest fallback "
+                     "(inner_iters=%lld/%lld, wall=%.1fs/%.0fs)\n",
+                     budget.what ? budget.what : "?",
+                     budget.inner_iters, budget.inner_iter_cap,
+                     budget.elapsed_s(), budget.wall_cap_s);
+        return SlimDiskRadial{};
+    };
 
     // Eddington accretion rate (textbook η=0.1 convention, trap #12):
     //   L_Edd = 4πG M m_p c / σ_T   (≡ 4πGM c / κ_es with κ_es = σ_T/m_p),
@@ -1883,9 +2120,137 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
     std::vector<double> U;          // warm state, carried across rungs
     bool have_warm = false;
 
+    // -----------------------------------------------------------------------
+    // Phase B — SPIN HOMOTOPY CONTINUATION (the high-spin enabler).
+    // -----------------------------------------------------------------------
+    // The crude thin-disk seed is OUT OF BASIN at high spin: the ISCO/sonic point
+    // marches inward (a=0→r_isco=6; a=0.998→r_isco≈1.24), shifting the whole inner
+    // structure, so the inner relaxation cannot relax from build_thin_disk_seed and
+    // stalls (seed/basin failure, not the FD floor).  Cure it by walking spin up
+    // from the PROVEN-CONVERGENT a=0 anchor in small increments, warm-starting each
+    // spin's solve (re-projected onto its grid) from the previous converged solution.
+    // Each small step the solution barely moves, so the warm start stays in basin.
+    // Run the whole walk at Ṁ_lo (the easy thin rung); the EXISTING Ṁ-continuation
+    // below then climbs Ṁ at the target spin from the spin-walked warm start.
+    //
+    // CONTINUATION PARAMETERS (not physics — homotopy schedule / safeguards):
+    //   • kSpinThresh: below this |a| the crude seed is already in basin, so skip the
+    //     walk and use the direct Ṁ-continuation (preserves the proven a=0 path).
+    //   • the spin ladder: a base schedule DENSER near extremal (where the ISCO moves
+    //     fastest); adaptive step-HALVING on a failed rung, with an underflow FLOOR
+    //     below which we stop and fall back honestly.
+    constexpr double kSpinThresh = 0.05;   // below this, the crude seed is in-basin
+
+    // Internal continuation iteration budget.  The inner Newton uses a CENTRAL-
+    // DIFFERENCE Jacobian, which only reaches the FD-noise merit floor (~7.6e-6;
+    // accepted at kMeritFloor=1e-3) after MANY iterations — the floor was MEASURED at
+    // the a=0 corner at ~800 iters (see kMeritFloor's derivation comment).  The
+    // public-facing in.max_iters (the tests pass 100) is far too small for ANY rung —
+    // even the easy a=0 anchor — to relax to that floor, so every continuation rung
+    // would stall above the validity band and the walk would fall back.  Construction
+    // time is uncapped (spec §7: robustness over speed), so the internal continuation
+    // solves use a generous budget.  This is a SOLVER-EFFORT knob ONLY: it changes
+    // neither the residual physics, the merit floor, nor the validity gate — it just
+    // lets the FD Newton run to the precision it can deliver.
+    constexpr int kContinuationMaxIters = 800;
+    if (in.spin > kSpinThresh) {
+        // Base spin ladder up to in.spin: denser toward extremal. Built as fractions
+        // so it adapts to whatever in.spin the caller requested; any rung at or above
+        // in.spin is clamped to in.spin and terminates the ladder.
+        const double base_ladder[] = {0.0, 0.2, 0.4, 0.6, 0.75, 0.85, 0.90, 0.95, 0.98};
+        std::vector<double> spin_ladder;
+        for (double a : base_ladder) {
+            if (a >= in.spin) break;
+            spin_ladder.push_back(a);
+        }
+        spin_ladder.push_back(in.spin);   // always finish exactly at the target spin
+
+        // Step-halving floor: the smallest spin increment we will attempt before
+        // declaring the walk stuck (honest fallback). 1e-3 in a_* is far finer than
+        // any rung the base ladder uses; reaching it means the basin shrank below
+        // what re-projection can bridge — a genuine failure, not a schedule miss.
+        constexpr double kSpinStepFloor = 1e-3;
+
+        // 1) Anchor: solve (a=0, Ṁ_lo) — the proven-convergent corner.
+        SlimDiskInputs in_anchor = in;
+        in_anchor.spin = 0.0;
+        in_anchor.mdot = Mdot_lo;
+        in_anchor.max_iters = std::max(in.max_iters, kContinuationMaxIters);
+        if (kDiag)
+            std::printf("[SPINWALK] anchor: solve (a=0, Mdot_lo=%.3e)\n", Mdot_lo);
+        std::vector<double> U_anchor = build_thin_disk_seed(in_anchor, opacity);
+        if (!solve_single_am(in_anchor, opacity, U_anchor, /*require_N1=*/false)) {
+            if (budget.check()) return budget_fallback();   // anchor failed because budget tripped
+            if (kDiag) std::printf("[SPINWALK] anchor (a=0) FAILED -> honest fallback\n");
+            return SlimDiskRadial{};
+        }
+        if (budget.check()) return budget_fallback();
+
+        // Carry the converged state + the spin it was solved at across rungs.
+        std::vector<double> U_prev = U_anchor;
+        SlimDiskInputs in_prev = in_anchor;   // holds a_prev for re-projection
+        bool walk_ok = true;
+
+        for (size_t s = 1; s < spin_ladder.size() && walk_ok; ++s) {
+            double a_target = spin_ladder[s];
+            const double a_from = in_prev.spin;
+            bool rung_done = false;
+            double step = a_target - a_from;   // shrunk on retry
+
+            while (!rung_done) {
+                if (budget.check()) return budget_fallback();   // budget cap hit mid-walk
+                const double a_k = a_from + step;
+                SlimDiskInputs in_k = in;
+                in_k.spin = a_k;
+                in_k.mdot = Mdot_lo;
+                in_k.max_iters = std::max(in.max_iters, kContinuationMaxIters);
+                if (kDiag)
+                    std::printf("[SPINWALK] === spin rung: a %.4f -> %.4f (step=%.4f) @ Mdot_lo ===\n",
+                                a_from, a_k, step);
+                // Warm-start by re-projecting the previous converged solution onto a_k's grid.
+                std::vector<double> U_k = warm_reproject_spin(U_prev, in_prev, in_k, opacity);
+                if (solve_single_am(in_k, opacity, U_k, /*require_N1=*/false)) {
+                    U_prev = U_k;
+                    in_prev = in_k;
+                    rung_done = true;
+                    if (kDiag)
+                        std::printf("[SPINWALK] spin a=%.4f CONVERGED @ Mdot_lo (r_sonic=%.4f, ell_in=%.5f)\n",
+                                    a_k, U_k[4*(std::max(in.n_nodes,4))+1], U_k[4*(std::max(in.n_nodes,4))+0]);
+                } else {
+                    if (budget.check()) return budget_fallback();   // failed because budget tripped
+                    // Failed: HALVE the spin step and retry from a_from.
+                    step *= 0.5;
+                    if (kDiag)
+                        std::printf("[SPINWALK] spin a=%.4f FAILED -> halve step to %.4f\n", a_k, step);
+                    if (step < kSpinStepFloor) {
+                        if (kDiag)
+                            std::printf("[SPINWALK] spin step underflow (<%.1e) at a_from=%.4f -> honest fallback\n",
+                                        kSpinStepFloor, a_from);
+                        walk_ok = false;
+                    }
+                }
+            }
+        }
+
+        if (!walk_ok) return SlimDiskRadial{};   // honest fallback (walk broke)
+
+        // The walk ended at (in.spin, Mdot_lo). Hand its converged state to the
+        // Ṁ-continuation below as the warm start for its FIRST rung (which is also
+        // Mdot_lo), so no rung is re-solved from a cold seed.
+        U = U_prev;
+        have_warm = true;
+        if (kDiag)
+            std::printf("[SPINWALK] reached target spin a=%.4f @ Mdot_lo -> hand off to Mdot ladder\n",
+                        in.spin);
+    }
+
     for (size_t k = 0; k < rungs.size(); ++k) {
+        if (budget.check()) return budget_fallback();   // budget cap hit between Ṁ rungs
         SlimDiskInputs in_rung = in;
         in_rung.mdot = rungs[k];
+        // Same generous internal budget as the spin walk: the FD Newton needs many
+        // iterations to relax to its floor at every Ṁ rung (see kContinuationMaxIters).
+        in_rung.max_iters = std::max(in.max_iters, kContinuationMaxIters);
         if (kDiag)
             std::printf("[SLIM] === Mdot rung %zu/%zu: Mdot=%.3e (Mdot_Edd=%.3e, f_Edd=%.3f) ===\n",
                         k + 1, rungs.size(), rungs[k], Mdot_Edd, rungs[k] / Mdot_Edd);
@@ -1894,6 +2259,7 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
 
         const bool ok = solve_outer_bracket(in_rung, opacity, U);
         if (!ok) {
+            if (budget.check()) return budget_fallback();   // bracket failed because budget tripped
             if (kDiag)
                 std::printf("[SLIM] rung %zu (Mdot=%.3e) bracket FAILED -> honest fallback\n",
                             k + 1, rungs[k]);

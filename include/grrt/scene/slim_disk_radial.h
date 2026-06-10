@@ -19,6 +19,17 @@ struct SlimDiskInputs {
     int    n_nodes = 400;
     int    max_iters = 100;
     double tol = 1e-8;
+
+    /// Runaway safety budget (hard ceiling on the WHOLE solve — never a fabricated
+    /// profile; on exceed the solver returns SlimDiskRadial{} with converged=false).
+    /// A prior full-resolution run hung ~11 h; these caps guarantee that can't recur.
+    ///   • budget_inner_iter_cap: cumulative inner-Newton-iteration cap summed across
+    ///     every bracket sample, spin rung and Ṁ rung.  <=0 uses the solver default
+    ///     (~200000), generous for a full solve yet far below a runaway.
+    ///   • budget_wall_seconds: wall-clock cap (steady_clock).  <=0 uses the default
+    ///     (~900 s = 15 min).
+    long long budget_inner_iter_cap = 0;   ///< <=0 -> solver default (~200000)
+    double    budget_wall_seconds   = 0.0; ///< <=0 -> solver default (~900 s)
 };
 
 /// Converged transonic radial structure. Index 0 = inner edge, back = outer.

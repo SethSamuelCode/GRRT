@@ -175,6 +175,16 @@ target_link_libraries(test-slim-disk-radial PRIVATE grrt)
 add_executable(slim-diag-probe tools/slim_diag_probe.cpp)
 target_include_directories(slim-diag-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# TEMPORARY full-target probe (a=0.998, f_Edd≈0.9). Links grrt. Safe to delete
+# along with tools/slim_full_target_probe.cpp.
+add_executable(slim-full-target-probe tools/slim_full_target_probe.cpp)
+target_link_libraries(slim-full-target-probe PRIVATE grrt)
+
+# TEMPORARY safety-budget smoke check. Safe to delete along with
+# tools/slim_budget_smoke.cpp.
+add_executable(slim-budget-smoke tools/slim_budget_smoke.cpp)
+target_link_libraries(slim-budget-smoke PRIVATE grrt)
+
 # Diagnostic tool: dump the volumetric-disk LUTs to CSV (banding investigation).
 add_executable(dump-disk-lut tools/dump_disk_lut.cpp)
 target_link_libraries(dump-disk-lut PRIVATE grrt)
