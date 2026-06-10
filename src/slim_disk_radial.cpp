@@ -777,26 +777,31 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
     //   row 4N-2:  ℓ(r_out) − ℓ_K(r_out)  (pins the outer angular-momentum BC to
     //              Keplerian; §23 outer BC: ℓ(r_out)=ℓ_K, since the disk is thin/cold
     //              at the outer edge and sub-sonic).
-    //   row 4N-1:  T_c(N-1) − T_eff_thin(r_out)  (pins the energy ODE outer IC to
-    //              the Novikov-Thorne effective temperature at the outer edge).
+    //   row 4N-1:  LOCAL ENERGY BALANCE at the outer node:
+    //                Q_vis(r_out) − Q_rad(r_out) − Q_adv(r_out) = 0
+    //              i.e. the SAME §23 G-balance the interior energy ODE enforces,
+    //              evaluated AT the boundary (FD toward the inward neighbour N-2).
+    //              This determines the outer-node T_c CONSISTENTLY with the interior
+    //              §23 energy physics, and — being the identical residual form as the
+    //              bulk energy rows — the Newton drives it to the floor (a separate
+    //              T_c-pinning row anchored to an externally-solved value is an
+    //              implicit/moving target that stalls the Newton ~3 decades above floor).
     // (V_out and Σ_out are determined by the algebraic mass & angular-momentum rows;
     //  ℓ_out and T_c,out are the two ODE outer ICs.  Together these yield a
     //  well-posed square system.)
+    //
+    // WHY NOT T_eff (the previous BC): T_eff=(F_NT/σ)^{1/4} is a SURFACE temperature.
+    // At the outer edge τ(r_out)≫1, so the consistent midplane T_c is ~τ^{1/4}× hotter.
+    // Pinning T_c(r_out)=T_eff anchored the energy ODE to a value inconsistent with its
+    // own interior §23 balance (the grey-atmosphere (3/4)T_eff⁴(τ+2/3) relation differs
+    // from the §23 Q_rad=64σT⁴/(3κΣ) form by a fixed factor — that mismatch is exactly
+    // what we remove). The local §23 G-balance at the node makes the outer T_c
+    // interior-consistent by construction, using the SAME Q_vis/Q_rad/Q_adv as the bulk.
     // -----------------------------------------------------------------------
     const int last = N - 1;
     R[4 * N - 2] = e[last].ell - ell_kepler(in.mass, in.spin, in.r_out);
-    // T_eff_thin(r_out): rough Novikov-Thorne flux F=(3GMṀ/8πr³)(1-√(r_in/r)),
-    // T_eff=(F/σ)^{1/4}.  Use CGS G,M and r in cm.
-    {
-        const double M_cgs = in.mass * in.r_g * c_cgs * c_cgs / G_cgs;  // M in g (from r_g=GM/c²)
-        const double r_cm = in.r_out * in.r_g;
-        // Zero-torque radius is the ISCO (NT), NOT in.r_in (which is now only a guard).
-        const double r_isco = isco_prograde(in.mass, in.spin);
-        const double F = (3.0 * G_cgs * M_cgs * Mdot / (8.0 * std::numbers::pi * r_cm * r_cm * r_cm))
-                       * (1.0 - std::sqrt(r_isco / in.r_out));
-        const double T_eff = std::pow(std::max(F, 0.0) / sigma_SB, 0.25);
-        R[4 * N - 1] = e[last].Tc - std::max(T_eff, kTFloor);
-    }
+    // §23-consistent outer T_c: local energy balance G(last; N-2)=Q_vis−Q_rad−Q_adv=0.
+    R[4 * N - 1] = Gbalance(last, last - 1);
 
     // -----------------------------------------------------------------------
     // Group 6: sonic-point regularity AT node 0 (= r_s, the free inner node).
@@ -971,7 +976,7 @@ static double slim_scaled_residual_norm(const std::vector<double>& U,
     accum(2*N,     3*N-1, s.rad);
     accum(3*N-1,   4*N-2, s.ene);
     accum(4*N-2,   4*N-1, s.bc_ell);   // ℓ(r_out)-ℓ_K
-    accum(4*N-1,   4*N,   s.bc_T);     // T_c(r_out)-T_eff
+    accum(4*N-1,   4*N,   s.ene);      // outer energy balance Q_vis-Q_rad-Q_adv=0
     accum(4*N,     4*N+1, s.reg_D0);   // 𝒟₀(r_s)=0
     accum(4*N+1,   4*N+2, s.reg_N1);   // 𝒩₁(r_s)=0
     return std::sqrt(sum / (double)std::max(cnt, 1));
@@ -999,7 +1004,7 @@ static double slim_scaled_residual_norm_active(const std::vector<double>& U,
     accum(2*N,     3*N-1, s.rad);
     accum(3*N-1,   4*N-2, s.ene);
     accum(4*N-2,   4*N-1, s.bc_ell);   // ℓ(r_out)-ℓ_K
-    accum(4*N-1,   4*N,   s.bc_T);     // T_c(r_out)-T_eff
+    accum(4*N-1,   4*N,   s.ene);      // outer energy balance Q_vis-Q_rad-Q_adv=0
     accum(4*N,     4*N+1, s.reg_D0);   // 𝒟₀(r_s)=0  (the only inner regularity row)
     // NOTE: row 4N+1 (𝒩₁) deliberately omitted — it is the OUTER bracket residual.
     return std::sqrt(sum / (double)std::max(cnt, 1));
@@ -1018,7 +1023,7 @@ static GroupMags slim_group_mags(const std::vector<double>& U, const std::vector
     };
     return { rms(0,N,s.mass), rms(N,2*N,s.ang), rms(2*N,3*N-1,s.rad),
              rms(3*N-1,4*N-2,s.ene),
-             std::max(rms(4*N-2,4*N-1,s.bc_ell), rms(4*N-1,4*N,s.bc_T)),
+             std::max(rms(4*N-2,4*N-1,s.bc_ell), rms(4*N-1,4*N,s.ene)),
              std::max(rms(4*N,4*N+1,s.reg_D0), rms(4*N+1,4*N+2,s.reg_N1)) };
 }
 
@@ -1043,6 +1048,97 @@ static GroupMags slim_group_mags(const std::vector<double>& U, const std::vector
 //
 // Returns true iff the reduced merit < floor AND the max relative step < tol.
 namespace {
+
+// ---------------------------------------------------------------------------
+// Interior Σ-outlier de-glitch (SOURCE fix for the V-collapse Σ-runaway).
+// ---------------------------------------------------------------------------
+// ROOT CAUSE (confirmed by tools/slim_diag_probe.cpp task C): at the stall a
+// handful of interior nodes slide onto the DISCONNECTED high-Σ / low-V branch of
+// the mass-conservation hyperbola Σ·(V/√(1-V²))·Δ^½ = const. The pair
+//   (V≈-4e-5, Σ≈1e3)   and   (V≈-3e-10, Σ≈2e8)
+// both conserve mass EXACTLY (the flux invariant is identical to ~0.1%), so the
+// Newton step is free to collapse V→0 (hence Σ→∞ by mass conservation). Once Σ
+// blows up the cooling law Q_rad=64σT_c⁴/(3κ_RΣ) is throttled to ~0, the node
+// decouples thermally (no T_c balances energy: Q_rad<Q_vis ∀T_c) and parks there,
+// flooring the energy group at ~9%. The huge dlnΣ across the resulting cliff
+// (probe shows ±850) feeds the Q_adv stencil and keeps the neighbours pinned.
+//
+// FIX: the physical disk lives on the WARM (gas-pressure-supported) branch where
+// Σ varies SMOOTHLY in r. A node whose Σ is >kOutlierFac× outside the band of its
+// two neighbours is, by construction, on the wrong branch (a smooth profile cannot
+// jump 5 decades between adjacent log-grid nodes). Project it back: log-interpolate
+// Σ and T_c from the neighbours (the smooth branch) and RE-DERIVE V from mass
+// conservation Ṁ=-2πΣΔ^½(V/√(1-V²))r_g c. This is the SAME proven repair the seed
+// builder applies (build_thin_disk_seed ~lines 519-531); here it runs DURING the
+// solve (the cliff re-forms in relaxation where the seed-only repair can't reach).
+// No magic profile — only neighbour interpolation + the exact mass law. The Newton
+// then refines the repaired node on the warm branch.
+//
+// Returns the number of nodes repaired this pass (0 ⇒ clean).
+static int deglitch_sigma_outliers(const SlimDiskInputs& in, std::vector<double>& U) {
+    using namespace constants;
+    using namespace slim_detail;
+    const int N = std::max(in.n_nodes, 4);
+    // Outlier factor: a node whose Σ is more than this × off the LOCAL SMOOTH TREND
+    // (the median of a ±kHalf window) is on the disconnected high-Σ / low-V branch.
+    // A window median (not the two immediate neighbours) is essential: the runaway
+    // can form as a CONNECTED PAIR (probe: nodes 147-148 both blow up together near
+    // the outer BC), which a 3-point neighbour test misses because each spiked node
+    // sits "between" a normal node and its spiked partner. The window median is
+    // robust to a contiguous minority of spiked nodes. 8× matches the seed-builder
+    // band; a genuine warm-branch gradient across a few log-grid nodes is well under it.
+    constexpr double kOutlierFac = 8.0;
+    constexpr int    kHalf       = 3;     // window half-width (median over 2·kHalf+1)
+
+    // Rebuild the grid from r_s = U[4N+1] (same as the residual / unpack).
+    const double r_s = U[4*N+1];
+    const double lr0 = std::log(r_s), lr1 = std::log(in.r_out);
+    auto rofi = [&](int i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        return std::exp(lr0 + (lr1 - lr0) * t);
+    };
+    auto Vfrom = [&](int i, double Sig_) -> double {
+        const double sqrtD = std::sqrt(std::max(kerr_delta(in.mass, in.spin, rofi(i)), 0.0));
+        const double dn = 2.0 * std::numbers::pi * Sig_ * sqrtD * in.r_g * c_cgs;
+        double V = -1e-6;
+        if (dn > 0.0) { const double X = -in.mdot / dn; V = X / std::sqrt(1.0 + X * X); }
+        if (!(V < 0.0)) V = -1e-6;
+        return std::clamp(V, -kVCap, -1e-12);
+    };
+    // Local log-Σ median over [i-kHalf, i+kHalf] EXCLUDING node i itself (so a spiked
+    // node never inflates its own reference). Window clamped to the grid; the pinned
+    // outer node N-1 contributes to its neighbours' windows but is never repaired here.
+    auto local_median = [&](int i, int off) -> double {
+        std::vector<double> w;
+        for (int k = std::max(0, i - kHalf); k <= std::min(N - 1, i + kHalf); ++k) {
+            if (k == i) continue;
+            w.push_back(std::log(std::max(U[4*k+off], kSigmaFloor)));
+        }
+        std::sort(w.begin(), w.end());
+        const size_t m = w.size();
+        return (m == 0) ? std::log(kSigmaFloor)
+                        : (m & 1 ? w[m/2] : 0.5 * (w[m/2 - 1] + w[m/2]));
+    };
+
+    int nrepaired = 0;
+    for (int i = 1; i < N - 1; ++i) {
+        const double Sc      = std::max(U[4*i+0], kSigmaFloor);
+        const double med_lnS = local_median(i, 0);          // smooth-trend log-Σ
+        const double lnfac   = std::log(kOutlierFac);
+        if (std::abs(std::log(Sc) - med_lnS) > lnfac) {
+            // On the wrong branch: project Σ and T_c back to the local smooth trend,
+            // then re-derive V from exact mass conservation. No magic profile.
+            const double Snew = std::exp(med_lnS);
+            const double Tnew = std::exp(local_median(i, 3));
+            U[4*i+0] = std::max(Snew, kSigmaFloor);
+            U[4*i+3] = std::max(Tnew, kTFloor);
+            U[4*i+1] = Vfrom(i, U[4*i+0]);
+            ++nrepaired;
+        }
+    }
+    return nrepaired;
+}
+
 static bool relax_structure(const SlimDiskInputs& in, const OpacityLUTs& opacity,
                             double ell_in, std::vector<double>& U) {
     using namespace constants;
@@ -1051,6 +1147,11 @@ static bool relax_structure(const SlimDiskInputs& in, const OpacityLUTs& opacity
     const int n = 4*N + 2;            // full residual / state length
 
     // Hold ℓ_in fixed: write it once, never step it.
+    U[4*N+0] = ell_in;
+
+    // De-glitch the (possibly warm-started) seed before the first residual eval, so
+    // a glitch inherited from a prior trial / rung cannot seed the Newton off-branch.
+    deglitch_sigma_outliers(in, U);
     U[4*N+0] = ell_in;
 
     // Active variable indices (Newton unknowns): all columns EXCEPT 4N (ℓ_in).
@@ -1127,7 +1228,7 @@ static bool relax_structure(const SlimDiskInputs& in, const OpacityLUTs& opacity
             auto setrows = [&](int b,int e,double sc){ sc=std::max(sc,1e-300); for(int r=b;r<e;++r) rs_inv[r]=1.0/sc; };
             setrows(0,N,gs.mass); setrows(N,2*N,gs.ang); setrows(2*N,3*N-1,gs.rad);
             setrows(3*N-1,4*N-2,gs.ene); setrows(4*N-2,4*N-1,gs.bc_ell);
-            setrows(4*N-1,4*N,gs.bc_T);
+            setrows(4*N-1,4*N,gs.ene);   // outer energy-balance BC row
             setrows(4*N,4*N+1,gs.reg_D0); setrows(4*N+1,4*N+2,gs.reg_N1);  // 4N+1 unused (inactive row)
         }
         // Reduced scaled Jacobian Js (na×na) and residual Rs (na) over the active sets:
@@ -1297,6 +1398,25 @@ static bool relax_structure(const SlimDiskInputs& in, const OpacityLUTs& opacity
         R.swap(Rtry);
         merit = merit_try;
         iters = it + 1;
+
+        // SOURCE fix / safety net: de-glitch any node that the accepted Newton step
+        // pushed onto the disconnected high-Σ / low-V mass-conservation branch (the
+        // confirmed cause of the irreducible ~9% energy floor). Project it back to
+        // the smooth warm branch (neighbour log-interpolation + exact mass-law V).
+        // If anything was repaired, refresh R/merit so the next iteration's Jacobian,
+        // line search and convergence test see the repaired (in-basin) state. Pure
+        // de-glitching — never touches a node already on the warm branch.
+        {
+            const int nrep = deglitch_sigma_outliers(in, U);
+            if (nrep > 0) {
+                U[4*N+0] = ell_in;                 // keep ℓ_in pinned exactly
+                slim_radial_residual(U, in, opacity, R);
+                merit = slim_scaled_residual_norm_active(U, R, in);
+                if (kDiag)
+                    std::printf("[INNER] it=%d DEGLITCH repaired %d Σ-outlier node(s) -> merit=%.3e\n",
+                                it, nrep, merit);
+            }
+        }
 
         if (kDiag) {
             const GroupMags g = slim_group_mags(U, R, in);
