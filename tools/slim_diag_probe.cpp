@@ -122,7 +122,7 @@ static void task_A_ii(const OpacityLUTs& op) {
     std::vector<double> Uw = U;
     const bool ok = relax_structure(in, op, ell_in, Uw);
     const double m1 = active_merit(Uw, in, op);
-    std::printf("[probe] A(ii) RESULT: inner_converged=%d  start_merit=%.4e end_merit=%.4e (floor=1e-6)\n",
+    std::printf("[probe] A(ii) RESULT: inner_converged=%d  start_merit=%.4e end_merit=%.4e (FD merit floor=1e-3)\n",
                 ok, m0, m1);
     // Break down the bc group: bc_ell (row 4N-2) vs outer energy balance (row 4N-1).
     {
@@ -664,6 +664,109 @@ static void task_C_vcollapse(const OpacityLUTs& op) {
     }
 }
 
+// ----------------------------------------------------------------------------
+// D: radial-equilibrium ℓ(r_out) verification (Task 1).
+// At the stalled solution, evaluate 𝒩₁ and 𝒟₀ at the OUTER node as a function of
+// ℓ(r_out). The pressure-free Keplerian ℓ_K is where 𝒜=0; the disk's radial
+// equilibrium is 𝒩₁=0 (𝒜 balances the pressure-gradient + advection terms). Show
+// that the converged sub-Keplerian ℓ(r_out)≈7.282 is the ℓ-root of 𝒩₁=0, NOT ℓ_K.
+// ----------------------------------------------------------------------------
+static void task_D_radial_equilibrium_ell(const OpacityLUTs& op) {
+    std::printf("\n############################################################\n");
+    std::printf("# D  radial-equilibrium ℓ(r_out): root of 𝒩₁=0 vs ℓ_K\n");
+    std::printf("############################################################\n");
+    using namespace constants;
+    using namespace slim_detail;
+    double Mdot_Edd = 0;
+    SlimDiskInputs in = make_inputs_a0(0.02, Mdot_Edd);
+    const int N = std::max(in.n_nodes, 4);
+    double ell_in = 0;
+    std::vector<double> U = near_true_seed(in, op, ell_in);
+    std::vector<double> Us = U;
+    relax_structure(in, op, ell_in, Us);
+    std::vector<double> r = grid_from_U(Us, in);
+    const int last = N - 1;
+    const double r_out = r[last];
+
+    // qadv_term_geom at the outer node uses FD across (last, last-1).
+    auto qadv_at = [&](int i, int j) -> double {
+        const NodeEval a = eval_node(in, op, r[i], Us[4*i+0], Us[4*i+1], Us[4*i+2], Us[4*i+3]);
+        const NodeEval b = eval_node(in, op, r[j], Us[4*j+0], Us[4*j+1], Us[4*j+2], Us[4*j+3]);
+        auto dln = [&](double f_lo, double f_hi, double r_lo, double r_hi) {
+            return (std::log(std::max(f_hi,1e-300)) - std::log(std::max(f_lo,1e-300)))
+                 / (std::log(r_hi) - std::log(r_lo)); };
+        const double dlnP = dln(a.oz.P, b.oz.P, a.r, b.r);
+        const double dlnS = dln(a.Sigma, b.Sigma, a.r, b.r);
+        const double r_cm = a.r * in.r_g;
+        const double Qadv = -(in.mdot / (2.0*std::numbers::pi*r_cm*r_cm)) * (a.oz.P/a.Sigma)
+                          * ((5.0/3.0 - 1.0)*dlnP - (5.0/3.0)*dlnS);
+        const double term = (2.0*std::numbers::pi*r_cm*r_cm/(in.mdot*1.5)) * Qadv;
+        return term / (c_cgs*c_cgs);
+    };
+    const double Qadv_g = qadv_at(last, last-1);
+
+    // calN1(ell) at the outer node: recompute NodeEval at trial ell.
+    auto N1_of_ell = [&](double ell) -> double {
+        const NodeEval e = eval_node(in, op, r_out, Us[4*last+0], Us[4*last+1], ell, Us[4*last+3]);
+        return calN1(in, e, Qadv_g);
+    };
+    const double ellK = ell_kepler(in.mass, in.spin, r_out);
+    const double ell_now = Us[4*last+2];
+    std::printf("  r_out=%.4f  ell_now(converged)=%.6f  ell_K(r_out)=%.6f  (diff %.4f%%)\n",
+                r_out, ell_now, ellK, 100.0*(ell_now-ellK)/ellK);
+    std::printf("  𝒩₁(ell_now)=%+.4e   𝒩₁(ell_K)=%+.4e\n", N1_of_ell(ell_now), N1_of_ell(ellK));
+
+    // --- Radial-momentum equilibrium: 𝒜(ell) = (r/Σ)(dP/dr) geometric, dimensionless. ---
+    // §22(2): (V/(1-V²))dV/dr = 𝒜/r − (1/Σ)dP/dr.  Drop the tiny inertial LHS at the
+    // outer thin edge → 𝒜 = r·(1/Σ)dP/dr.  In the code's dimensionless convention the
+    // pressure-gradient term is (P/Σ)/c² · dlnP/dlnr (P/Σ→geometric specific pressure).
+    {
+        const NodeEval a = eval_node(in, op, r[last], Us[4*last+0], Us[4*last+1], Us[4*last+2], Us[4*last+3]);
+        const NodeEval b = eval_node(in, op, r[last-1], Us[4*(last-1)+0], Us[4*(last-1)+1], Us[4*(last-1)+2], Us[4*(last-1)+3]);
+        const double dlnP = (std::log(std::max(b.oz.P,1e-300))-std::log(std::max(a.oz.P,1e-300)))
+                          / (std::log(b.r)-std::log(a.r));
+        const double pgrad = a.P_over_Sigma_geom * dlnP;   // (P/Σ)/c² · dlnP/dlnr  (dimensionless)
+        auto A_of_ell = [&](double ell)->double {
+            const NodeMech m = node_mech(in, r_out, ell);
+            return script_A(in, r_out, m);
+        };
+        std::printf("  [radial-eq] (r/Σ)dP/dr-term = (P/Σ)dlnP/dlnr = %+.4e ; 𝒜(ell_now)=%+.4e 𝒜(ell_K)=%+.4e\n",
+                    pgrad, A_of_ell(ell_now), A_of_ell(ellK));
+        // root of  𝒜(ell) − pgrad = 0
+        double lo2=0.85*ellK, hi2=1.02*ellK;
+        auto f=[&](double e){return A_of_ell(e)-pgrad;};
+        double flo=f(lo2), fhi=f(hi2);
+        std::printf("  [radial-eq] 𝒜−pgrad: f(%.4f)=%+.3e f(%.4f)=%+.3e\n", lo2,flo,hi2,fhi);
+        if (flo*fhi<=0.0){ for(int b2=0;b2<80;++b2){double m=0.5*(lo2+hi2); if(f(m)*flo<=0.0)hi2=m; else{lo2=m;flo=f(lo2);}}
+            std::printf("  [radial-eq] => ℓ_radeq(𝒜=pgrad) = %.6f  (converged ell_now=%.6f, diff %.4f%%)\n",
+                        0.5*(lo2+hi2), ell_now, 100.0*(0.5*(lo2+hi2)-ell_now)/ell_now); }
+        else std::printf("  [radial-eq] (no sign change)\n");
+    }
+    // --- Matched-slope check: linear extrapolation of ℓ from nodes last-2,last-1. ---
+    {
+        const double l2=Us[4*(last-2)+2], l1=Us[4*(last-1)+2];
+        const double lr2=std::log(r[last-2]), lr1=std::log(r[last-1]), lr0r=std::log(r[last]);
+        const double ell_extrap = l1 + (l1-l2)/(lr1-lr2)*(lr0r-lr1);
+        std::printf("  [matched-slope] linear-in-lnr extrap ℓ(r_out)=%.6f  (converged=%.6f, diff %.4f%%)\n",
+                    ell_extrap, ell_now, 100.0*(ell_extrap-ell_now)/ell_now);
+    }
+    // Bisect 𝒩₁(ell)=0 over [0.9 ellK, ellK].
+    double lo = 0.9*ellK, hi = ellK;
+    double glo = N1_of_ell(lo), ghi = N1_of_ell(hi);
+    std::printf("  bracket 𝒩₁: 𝒩₁(%.4f)=%+.3e  𝒩₁(%.4f)=%+.3e\n", lo, glo, hi, ghi);
+    if (glo*ghi <= 0.0) {
+        for (int b = 0; b < 80; ++b) {
+            const double m = 0.5*(lo+hi);
+            if (N1_of_ell(m)*glo <= 0.0) hi = m; else { lo = m; glo = N1_of_ell(lo); }
+        }
+        const double ell_eq = 0.5*(lo+hi);
+        std::printf("  => radial-equilibrium ℓ (root of 𝒩₁=0) = %.6f   (converged ell_now=%.6f, diff %.4f%%)\n",
+                    ell_eq, ell_now, 100.0*(ell_eq-ell_now)/ell_now);
+    } else {
+        std::printf("  (no sign change in 𝒩₁ over [0.9 ellK, ellK])\n");
+    }
+}
+
 } // namespace probe
 } // namespace grrt
 
@@ -671,8 +774,24 @@ int main() {
     using namespace grrt;
     auto op = build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
     grrt::probe::task_A_ii(op);
-    grrt::probe::task_B_energy_map(op);
-    grrt::probe::task_C_vcollapse(op);
+    grrt::probe::task_D_radial_equilibrium_ell(op);
+    // FULL driver at the easy corner a=0, f_Edd=0.02 (verifies Tasks 1&2 end-to-end).
+    {
+        using namespace grrt;
+        double Mdot_Edd = 0;
+        SlimDiskInputs in = grrt::probe::make_inputs_a0(0.02, Mdot_Edd);
+        SlimDiskRadial s = solve_slim_disk_radial(in, op);
+        std::printf("\n[probe] FULL a=0 f_Edd=0.02: converged=%d iters=%d final_residual=%.4e r_sonic=%.5f ell_in=%.6f\n",
+                    s.converged, s.iters, s.final_residual, s.r_sonic, s.ell_in);
+        if (s.converged) {
+            const double r_isco = isco_prograde(in.mass, in.spin);
+            double hr_max=0, fadv_lo=1e300, fadv_hi=-1e300;
+            for (size_t i=0;i<s.r.size();++i){ hr_max=std::max(hr_max, s.H[i]/(s.r[i]*in.r_g));
+                fadv_lo=std::min(fadv_lo,s.f_adv[i]); fadv_hi=std::max(fadv_hi,s.f_adv[i]); }
+            std::printf("[probe]   r_isco=%.4f (r_s<r_isco=%d) H/r_max=%.4f f_adv in [%.3e,%.3e]\n",
+                        r_isco, (int)(s.r_sonic<r_isco), hr_max, fadv_lo, fadv_hi);
+        }
+    }
     std::printf("\n[probe] done.\n");
     return 0;
 }

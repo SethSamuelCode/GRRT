@@ -136,7 +136,8 @@ GRRT_EXPORT std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
 ///   [N .. 2N-1]     angular momentum (algebraic, per node)
 ///   [2N .. 3N-2]    radial-momentum transonic ODE (trapezoidal, N-1 intervals)
 ///   [3N-1 .. 4N-3]  energy Q_vis=Q_rad+Q_adv ODE (trapezoidal, N-1 intervals)
-///   [4N-2, 4N-1]    outer boundary conditions (ℓ_out=ℓ_K(r_out), T_c,out=T_eff_thin)
+///   [4N-2, 4N-1]    outer boundary conditions (ℓ_out matched-slope radial-equilibrium
+///                   extrapolation, outer-node §23 energy balance for T_c,out)
 ///   [4N, 4N+1]      sonic-point regularity (𝒟₀(r_s)=0, 𝒩₁(r_s)=0)
 GRRT_EXPORT void slim_radial_residual(const std::vector<double>& U,
                                       const SlimDiskInputs& in,
