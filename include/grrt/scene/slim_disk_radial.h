@@ -109,6 +109,13 @@ GRRT_EXPORT OneZoneState one_zone_closure(double Sigma, double Tc, double r,
 /// Used by the seed and the outer/regularity boundary conditions.
 GRRT_EXPORT double ell_kepler(double M, double a, double r);
 
+/// Prograde Kerr ISCO radius (Bardeen-Press-Teukolsky 1972), in units of M.
+/// Inputs are dimensional M and a; the BPT72 formula scales linearly with M,
+/// so we evaluate the dimensionless r_isco(a/M) and multiply by M.  For M=1 it
+/// matches the bare BPT72 expression used by the tests.  The seed uses r_isco as
+/// the inner-node anchor and the energy outer BC uses it as the NT zero-torque radius.
+GRRT_EXPORT double isco_prograde(double M, double a);
+
 /// Invert the equatorial Kerr Ω↔ℓ relation: given the covariant specific
 /// angular momentum ℓ = u_φ at radius r, return the orbital angular velocity
 /// Ω = u^φ/u^t [geometric, 1/M]. A few Newton iterations seeded from Ω_K.

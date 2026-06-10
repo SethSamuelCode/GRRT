@@ -161,14 +161,34 @@ static double sigma_ff_hminus(double lambda_cm, double T) {
     return s00*(1-fl)*(1-ft) + s01*fl*(1-ft) + s10*(1-fl)*ft + s11*fl*ft;
 }
 
+/// Smooth high-temperature taper for the H⁻ opacity contribution.
+/// H⁻ is a cool-atmosphere opacity source (neutral H + a free electron); above
+/// ~10^4 K the gas is essentially fully ionized so H⁻ cannot form, and both H⁻
+/// tabulations top out at 10^4 K. Returns 1 below the lower edge, 0 at/above the
+/// upper edge, and a C¹ cosine ramp between, so kappa_R(T) stays continuous
+/// instead of stepping off the table's clamped boundary value (which fabricated
+/// a frequency-flat ~10^9 cm^2/g floor at the hot inner-disk midplane). By the
+/// upper edge H⁻ is already negligible vs free-free + electron scattering, so
+/// the taper discards no physical opacity — it only removes the extrapolation.
+static double hminus_T_taper(double T) {
+    constexpr double T_taper_lo = 1.0e4;   // H⁻ tables' max T; taper begins
+    constexpr double T_taper_hi = 3.0e4;   // H⁻ fully negligible; hard zero above
+    if (T <= T_taper_lo) return 1.0;
+    if (T >= T_taper_hi) return 0.0;
+    double s = (T - T_taper_lo) / (T_taper_hi - T_taper_lo);   // 0..1
+    return 0.5 * (1.0 + std::cos(std::numbers::pi * s));       // 1 -> 0, smooth
+}
+
 /// Combined H⁻ bound-free + free-free absorption coefficient [cm^{-1}]
 double alpha_hminus(double nu, double T, const IonizationState& ion) {
     if (T < 1500.0 || ion.n_HI <= 0.0) return 0.0;
+    double taper = hminus_T_taper(T);
+    if (taper <= 0.0) return 0.0;
     double lambda_cm = c_cgs / nu;
     double stim = 1.0 - std::exp(-h_planck * nu / (k_B * T));
     double alpha_bf = ion.n_Hminus * sigma_bf_hminus(lambda_cm) * stim;
     double alpha_free = ion.n_HI * ion.n_e * sigma_ff_hminus(lambda_cm, T);
-    return alpha_bf + alpha_free;
+    return taper * (alpha_bf + alpha_free);
 }
 
 /// Bound-free absorption from all tracked ions (Kramers cross-section with threshold edges) [cm^{-1}]
@@ -259,9 +279,25 @@ OpacityLUTs build_opacity_luts(double rho_min, double rho_max,
     luts.kappa_ross_lut.resize(size_2d);
     luts.mu_lut.resize(size_2d);
 
-    constexpr int n_ross_nu = 50;
-    double log_nu_ross_min = std::log10(1e13);
-    double log_nu_ross_max = std::log10(1e16);
+    // Rosseland-mean integration grid in the DIMENSIONLESS variable
+    // x = h*nu / (k_B*T). The Rosseland weight dB_nu/dT, written as a function
+    // of x, has a temperature-INDEPENDENT shape that peaks at x ~ 3.83. By
+    // integrating over a fixed x-window and mapping nu = x*k_B*T/h for each T in
+    // the build loop, the frequency window automatically tracks the Planck peak
+    // at every temperature (nu_peak ~ 8e10*T Hz). The previous fixed
+    // [1e13, 1e16] Hz window was only correct for T <~ 1e5 K; at the hot inner
+    // disk midplane (T ~ 1e7 K, nu_peak ~ 8e17 Hz) it sampled only the
+    // Rayleigh-Jeans tail where kappa_nu ~ nu^-3 is largest, over-estimating the
+    // harmonic-mean kappa_R by 7-8 orders of magnitude. x in [0.01, 30] spans
+    // well below and above the x~3.83 peak, capturing the transparent high-nu
+    // continuum that should dominate the (harmonic) Rosseland mean.
+    constexpr int n_ross_nu = 96;
+    constexpr double x_ross_min = 0.01;
+    constexpr double x_ross_max = 30.0;
+    const double log_x_ross_min = std::log10(x_ross_min);
+    const double log_x_ross_max = std::log10(x_ross_max);
+    const double dlnx_ross = (log_x_ross_max - log_x_ross_min)
+                           / (n_ross_nu - 1) * std::log(10.0);
 
     for (int j = 0; j < luts.n_rho; j++) {
         double log_rho = luts.log_rho_min + j * (luts.log_rho_max - luts.log_rho_min) / (luts.n_rho - 1);
@@ -284,12 +320,17 @@ OpacityLUTs build_opacity_luts(double rho_min, double rho_max,
                 luts.kappa_abs_lut[idx_3d] = kappa_abs(nu, rho, T, ion);
             }
 
-            // Rosseland mean
+            // Rosseland mean over a T-adaptive frequency window: integrate in
+            // x = h*nu/(k_B*T) over [x_ross_min, x_ross_max] log-spaced, mapping
+            // nu_i = x_i * k_B * T / h so the window follows the Planck peak.
+            // For log-spacing in x: dnu = nu * d(ln x).
+            const double nu_per_x = k_B * T / h_planck;   // nu = x * (k_B T / h)
             double numerator = 0.0, denominator = 0.0;
             for (int i = 0; i < n_ross_nu; i++) {
-                double log_nu = log_nu_ross_min + i * (log_nu_ross_max - log_nu_ross_min) / (n_ross_nu - 1);
-                double nu = std::pow(10.0, log_nu);
-                double dnu = nu * (log_nu_ross_max - log_nu_ross_min) / (n_ross_nu - 1) * std::log(10.0);
+                double log_x = log_x_ross_min + i * (log_x_ross_max - log_x_ross_min) / (n_ross_nu - 1);
+                double x = std::pow(10.0, log_x);
+                double nu = x * nu_per_x;
+                double dnu = nu * dlnx_ross;
                 double dBdT = dplanck_nu_dT(nu, T);
                 double ka = kappa_abs(nu, rho, T, ion);
                 if (ka > 1e-30 && dBdT > 0.0) {

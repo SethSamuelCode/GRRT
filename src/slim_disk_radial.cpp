@@ -134,6 +134,18 @@ double ell_kepler(double M, double a, double r) {
     return (g_tphi + g_phph * Om) * ut;                       // ℓ_K = u_φ
 }
 
+double isco_prograde(double M, double a) {
+    // BPT72 marginally-stable circular orbit (prograde). The expression is
+    // dimensionless in a_* = a/M and scales linearly with M, so evaluate at
+    // a_* and multiply by M. For M=1 this reduces to the bare BPT72 formula.
+    const double as = a / M;
+    const double Z1 = 1.0 + std::cbrt(1.0 - as * as)
+                          * (std::cbrt(1.0 + as) + std::cbrt(1.0 - as));
+    const double Z2 = std::sqrt(3.0 * as * as + Z1 * Z1);
+    const double r_star = 3.0 + Z2 - std::sqrt((3.0 - Z1) * (3.0 + Z1 + 2.0 * Z2));
+    return M * r_star;
+}
+
 double omega_from_ell(double M, double a, double r, double ell) {
     double g_tt, g_tphi, g_phph;
     eq_metric(M, a, r, g_tt, g_tphi, g_phph);
@@ -210,6 +222,7 @@ using slim_detail::kerr_A;
 using slim_detail::omega_perp2;
 using slim_detail::ell_kepler;
 using slim_detail::omega_from_ell;
+using slim_detail::isco_prograde;
 
 // Fixed Phase-1 adiabatic indices (documented simplification).
 constexpr double kGamma1 = 5.0 / 3.0;          // ideal monatomic gas
@@ -333,47 +346,142 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
     const int N = std::max(in.n_nodes, 4);
     std::vector<double> U((size_t)4 * N + 2, 0.0);
 
-    // Logarithmic radial grid r_in .. r_out (matches the residual's grid).
-    const double r_in = in.r_in, r_out = in.r_out;
-    const double lr0 = std::log(r_in), lr1 = std::log(r_out);
+    // Free-inner-node grid (Task 5, option B): node 0 IS the sonic point.
+    // Seed the sonic radius just inside the ISCO (it relaxes inward at high Ṁ),
+    // clamped above the horizon-floor guard in.r_in. The grid spans [r_s, r_out].
+    const double r_isco = isco_prograde(in.mass, in.spin);
+    const double r_s = std::max(0.98 * r_isco, in.r_in * 1.001);
+    const double r_out = in.r_out;
+    const double lr0 = std::log(r_s), lr1 = std::log(r_out);
 
-    // Characteristic Σ scale: a plausible α-disk surface density near r_in.
-    // Σ ~ Ṁ/(3π ν), ν = α c_s²/Ω.  Use a rough c_s from a guessed T to set scale;
-    // exact value is irrelevant — Task 5 relaxes it.  We just need finite/EOS-valid.
-    // Pick Σ_ref so that the mass-conservation V comes out comfortably subsonic.
-    const double r_ref = r_in;
-    const double Omega_ref_cgs = omega_k(in.mass, in.spin, r_ref) * c_cgs / in.r_g; // 1/s
-    // Hot inner-disk midplane temperature guess. A Novikov-Thorne disk at mid Ṁ
-    // (~10 M_sun, f_Edd~0.3) has a midplane T ~ a few ×10⁷ K near the inner edge;
-    // a merit-landscape scan of the residual confirmed the seed basin sits near
-    // ~5×10⁷ K (the earlier 1×10⁷ guess seeded ~5 orders too cold/dense).
-    const double T_ref = 5e7;                                   // K, hot inner disk guess
-    const double cs2_ref = k_B * T_ref / (mu_fully_ionized * m_p);
-    const double nu_ref = in.alpha * cs2_ref / std::max(Omega_ref_cgs, 1e-30);
-    double Sigma_ref = in.mdot / (3.0 * std::numbers::pi * std::max(nu_ref, 1e-30));
-    if (!(Sigma_ref > 0.0) || !std::isfinite(Sigma_ref)) Sigma_ref = 1e4;
-    // The thin-disk ν estimate uses the GAS sound speed only and the Newtonian
-    // 3πν law; near the relativistic inner edge it overestimates Σ by ~1-2 dex.
-    // A merit-landscape scan of the residual places the seed basin at ~0.03×Σ_ref,
-    // so we apply that calibration factor (keeps the seed EOS-valid and in-basin).
-    Sigma_ref *= 0.03;
+    // Novikov-Thorne thin-disk seed (no magic factors). At the thin low rung
+    // advection is negligible, so the seed satisfies the residual's OWN
+    // relativistic ANGULAR-MOMENTUM and ENERGY balances simultaneously, so those
+    // two groups start near zero:
+    //   • angular momentum (Group 2): (Ṁ/2π)(ℓ_K−ℓ_in)·r_g·c
+    //         = (A^½Δ^½/r)·r_g²·Γ·α·P   ⇒  P_target (the α-stress pins P, hence Σ).
+    //   • energy (Group 4, advection≈0): Q_vis = Q_rad = 64σT_c⁴/(3κΣ)
+    //         ⇒  T_c⁴ = 3κΣ·Q_vis/(64σ),  with the relativistic Q_vis below.
+    // P(Σ,T_c) is the one-zone closure's integrated pressure; Σ and T_c are coupled
+    // (angular momentum binds Σ at fixed T_c; energy binds T_c at fixed Σ), closed
+    // by a 1D bisection on T_c (with Σ on the angular-momentum branch each step).
+    // The opacity κ_R used in the energy balance is the residual's own LUT value.
+    const double ell_in = ell_kepler(in.mass, in.spin, r_isco);
 
+    // Grid radii + per-node Keplerian Ω_K, ℓ_K (for dΩ/dr and Q_vis).
+    std::vector<double> rg(N), OmK(N), ellK(N);
     for (int i = 0; i < N; ++i) {
         const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
-        const double r = std::exp(lr0 + (lr1 - lr0) * t);
+        rg[i]   = std::exp(lr0 + (lr1 - lr0) * t);
+        OmK[i]  = omega_k(in.mass, in.spin, rg[i]);                  // [1/M]
+        ellK[i] = ell_kepler(in.mass, in.spin, rg[i]);
+    }
 
-        // Σ(r) ∝ r^{-1} scaled to Σ_ref at r_ref.
-        const double Sigma = Sigma_ref * (r_ref / r);
+    for (int i = 0; i < N; ++i) {
+        const double r = rg[i];
+        // dΩ_K/dr in CGS (geometric → 1/s via c/r_g; r → cm via r_g), FD on the grid.
+        const int j = (i + 1 < N) ? i + 1 : i - 1;
+        const double dOmega_geom = (OmK[j] - OmK[i]) / (rg[j] - rg[i]);          // [1/M²]
+        const double dOmega_dr   = dOmega_geom * (c_cgs / in.r_g) / in.r_g;      // [1/s/cm]
+        const double sqrtDelta = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r), 0.0));
+        const double sqrtA     = std::sqrt(std::max(kerr_A(in.mass, in.spin, r), 0.0));
+        // Relativistic Q_vis (Group 4 form), Γ≈1 at the thin seed.
+        const double geomfac3  = sqrtA * sqrtDelta / (r * r * r);               // dimensionless
+        const double dl_cgs    = (ellK[i] - ell_in) * in.r_g * c_cgs;           // [cm²/s]
+        const double Qvis = -(in.mdot / (2.0 * std::numbers::pi)) * dl_cgs * dOmega_dr
+                          * (geomfac3 / in.r_g);                                 // [erg/cm²/s]
+        const double Qvis_pos = std::max(Qvis, 0.0);                            // ≥0 (heating)
+        // Angular-momentum P_target (Group 2, Γ≈1):
+        //   (Ṁ/2π)·dl_cgs = (A^½Δ^½/r)·r_g²·α·P  ⇒  P = LHS / [(A^½Δ^½/r)·r_g²·α].
+        const double geomlen   = sqrtA * sqrtDelta / r;                         // [M²]
+        const double angm_rhs_coef = geomlen * in.r_g * in.r_g * in.alpha;      // [cm²]
+        const double P_target = (in.mdot / (2.0 * std::numbers::pi)) * dl_cgs
+                              / std::max(angm_rhs_coef, 1e-300);                 // [erg/cm²]
 
-        // T_c(r): rough Novikov-Thorne-ish T ∝ r^{-3/4} scaled to T_ref at r_ref.
-        const double Tc = T_ref * std::pow(r_ref / r, 0.75);
+        // Σ(T_c): bisect Σ so the closure's P(Σ,T_c) == P_target (P increases
+        // monotonically with Σ at fixed T_c) — pins the angular-momentum balance.
+        auto sigma_for_Tc = [&](double Tc_) -> double {
+            double lo = 1e-2, hi = 1e12;
+            for (int b = 0; b < 70; ++b) {
+                const double mid = std::sqrt(lo * hi);            // geometric bisection
+                if (one_zone_closure(mid, Tc_, r, in, op).P < P_target) lo = mid; else hi = mid;
+            }
+            const double s = std::sqrt(lo * hi);
+            return (std::isfinite(s) && s > 0.0) ? s : 1e4;
+        };
+        // Energy-balanced T_c: bisect on the residual's OWN node energy imbalance
+        //   g(T_c) = Q_rad(T_c) − Q_vis(T_c),
+        // with Σ on the angular-momentum branch (sigma_for_Tc) and BOTH Q's built
+        // through eval_node so the Lorentz factor Γ, Ω(ℓ) and κ_R match the residual
+        // exactly. g is monotone increasing in T_c (Q_rad ∝ T⁴/(κΣ): T⁴↑, Σ↓, Kramers
+        // κ↓ all push it up; Q_vis is ~flat), so the GAS-supported root is the unique
+        // sign change — we bracket only up to the radiation-pressure ceiling on T_c
+        // (above which p_rad alone exceeds P_target and no Σ exists) so the bisection
+        // stays on the physical gas branch.  A naive T_c⁴=3κΣQ_vis/(64σ) fixed point
+        // is contractive toward a spurious COLD root (Kramers κ(T) inverts the slope).
+        auto V_for_sigma = [&](double Sig_) -> double {
+            const double dn = 2.0 * std::numbers::pi * Sig_ * sqrtDelta * in.r_g * c_cgs;
+            double Vv = -1e-6;
+            if (dn > 0.0) { const double X = -in.mdot / dn; Vv = X / std::sqrt(1.0 + X * X); }
+            if (!(Vv < 0.0)) Vv = -1e-6;
+            return std::clamp(Vv, -kVCap, -1e-12);
+        };
+        // Radiation-pressure T_c ceiling: P (integrated) ≈ 2·(aT⁴/3)·H even at Σ→0;
+        // cap T_c where p_rad·(scale height) would already overshoot P_target. Use
+        // the gas-free closure to find the largest T_c that still admits a Σ>floor.
+        const double dOmega_dr_node = dOmega_geom * (c_cgs / in.r_g) / in.r_g;       // [1/s/cm]
+        auto energy_imbalance = [&](double Tc_, double& Sig_out) -> double {
+            const double Sig_ = sigma_for_Tc(Tc_);
+            Sig_out = Sig_;
+            const NodeEval ev = eval_node(in, op, r, Sig_, V_for_sigma(Sig_), ellK[i], Tc_);
+            const double geomfac_e = ev.mech.sqrtA * ev.mech.sqrtDelta / (r * r * r);
+            const double dl_e = (ellK[i] - ell_in) * in.r_g * c_cgs;
+            const double Qvis_e = -(in.mdot / (2.0 * std::numbers::pi)) * dl_e * dOmega_dr_node
+                                * ev.Gamma * (geomfac_e / in.r_g);
+            const double kR = op.lookup_kappa_ross(ev.oz.rho_mid, Tc_)
+                            + op.lookup_kappa_es(ev.oz.rho_mid, Tc_);
+            const double Qrad_e = 64.0 * sigma_SB * Tc_ * Tc_ * Tc_ * Tc_
+                                / (3.0 * std::max(kR, 1e-300) * std::max(Sig_, 1e-30));
+            return Qrad_e - std::max(Qvis_e, 0.0);
+        };
+        // Upper T_c bracket = largest T_c for which a gas-supported Σ still exists
+        // (Σ above the bisection floor); scan upward geometrically.
+        double Thi = 1e5;
+        {
+            double Sig_probe = 1e4;
+            for (int s = 0; s < 60; ++s) {
+                const double Sg = sigma_for_Tc(Thi * 2.0);
+                if (!(Sg > 1.0)) break;               // Σ has collapsed → past the ceiling
+                Sig_probe = Sg;
+                Thi *= 2.0;
+            }
+            (void)Sig_probe;
+        }
+        double Tc = 1e6, Sigma = 1e4;
+        {
+            double Tlo = 1e4;
+            double glo = 0.0, ghi = 0.0; double Sd = 1e4;
+            glo = energy_imbalance(Tlo, Sd);
+            ghi = energy_imbalance(Thi, Sd);
+            if (glo * ghi > 0.0) {
+                // No bracketed root in the gas window: pick the end with smaller |g|.
+                Tc = (std::abs(glo) < std::abs(ghi)) ? Tlo : Thi;
+            } else {
+                for (int b = 0; b < 80; ++b) {
+                    const double Tm = std::sqrt(Tlo * Thi);
+                    double Sm = 1e4;
+                    if (energy_imbalance(Tm, Sm) < 0.0) Tlo = Tm; else Thi = Tm;
+                }
+                Tc = std::sqrt(Tlo * Thi);
+            }
+            Sigma = sigma_for_Tc(Tc);       // Σ consistent with the balanced T_c
+        }
 
         // ℓ(r) = Keplerian ℓ_K.
-        const double ell = ell_kepler(in.mass, in.spin, r);
+        const double ell = ellK[i];
 
         // V(r) from mass conservation:  Ṁ = -2π Σ Δ^½ (V/√(1-V²)) r_g c.
         // Let X ≡ V/√(1-V²) = -Ṁ / (2π Σ Δ^½ r_g c)  (X<0 inflow).
-        const double sqrtDelta = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r), 0.0));
         const double denom = 2.0 * std::numbers::pi * Sigma * sqrtDelta * in.r_g * c_cgs;
         double V = -1e-6;
         if (denom > 0.0) {
@@ -389,9 +497,80 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
         U[4 * i + 3] = Tc;
     }
 
-    // Globals: ℓ_in = ℓ_K(r_isco-ish ≈ r_in), r_s = r_in (initial guesses).
-    U[4 * N + 0] = ell_kepler(in.mass, in.spin, r_in);
-    U[4 * N + 1] = r_in;
+    // Radial-smoothness repair (numerical robustness, not a physics change). The
+    // per-node energy/Σ bisections above are INDEPENDENT, so a node near r_s where
+    // ℓ_K→ℓ_in (P_target→0, the NT zero-torque collapse) can land on a disconnected
+    // cold/low-Σ root while its neighbours stay on the warm branch — producing a
+    // Σ "cliff" (a single node 100×+ off both neighbours). That cliff makes the
+    // node's mass-conservation V huge and wrecks the radial-momentum/regularity
+    // FD stencils, stranding the inner relaxation. Replace any such interior
+    // outlier by log-interpolating Σ and T_c from its neighbours (the smooth NT
+    // branch), then re-deriving V from mass conservation. Pure de-glitching of the
+    // seed; the relaxation refines from there.
+    {
+        auto Vfrom = [&](int i, double Sig_) -> double {
+            const double sqrtD = std::sqrt(std::max(kerr_delta(in.mass, in.spin, rg[i]), 0.0));
+            const double dn = 2.0 * std::numbers::pi * Sig_ * sqrtD * in.r_g * c_cgs;
+            double V = -1e-6;
+            if (dn > 0.0) { const double X = -in.mdot / dn; V = X / std::sqrt(1.0 + X * X); }
+            if (!(V < 0.0)) V = -1e-6;
+            return std::clamp(V, -kVCap, -1e-12);
+        };
+        for (int i = 1; i < N - 1; ++i) {
+            const double Sm = U[4*(i-1)+0], Sc = U[4*i+0], Sp = U[4*(i+1)+0];
+            const double lo = std::min(Sm, Sp), hi = std::max(Sm, Sp);
+            // Outlier iff Σ_i is >8× outside the [neighbour-min, neighbour-max] band.
+            if (Sc > 8.0 * hi || Sc < lo / 8.0) {
+                const double Snew = std::sqrt(std::max(Sm, kSigmaFloor) * std::max(Sp, kSigmaFloor));
+                const double Tnew = std::sqrt(std::max(U[4*(i-1)+3], kTFloor)
+                                            * std::max(U[4*(i+1)+3], kTFloor));
+                U[4*i+0] = Snew;
+                U[4*i+3] = Tnew;
+                U[4*i+1] = Vfrom(i, Snew);
+            }
+        }
+    }
+
+    // Node 0 (= r_s) sonic override: make the seed START at Mach 1 so the
+    // regularity 𝒟₀(r_s)=V₀²−c_s²=0 is satisfied from the outset (otherwise the
+    // free-boundary relaxation has to discover the sonic transition from a fully
+    // subsonic seed, which strands r_s and stalls the radial-momentum block).
+    // At fixed T₀ both |V| (mass conservation, ∝1/Σ) and c_s (closure) depend on
+    // Σ; |V| decreases and c_s increases with Σ, so |V|²−c_s² is monotone
+    // decreasing in Σ — bisect Σ₀ to the Mach-1 crossing.
+    {
+        const double r0 = rg[0];
+        const double sqrtD0 = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r0), 0.0));
+        const double Tc0 = U[3];                                   // node-0 T_c from above
+        auto mach_excess = [&](double Sig_) -> double {            // V² − c_s²  (geometric, c-units)
+            const double dn = 2.0 * std::numbers::pi * Sig_ * sqrtD0 * in.r_g * c_cgs;
+            double V_ = -1e-6;
+            if (dn > 0.0) { const double X = -in.mdot / dn; V_ = X / std::sqrt(1.0 + X * X); }
+            V_ = std::clamp(V_, -kVCap, -1e-12);
+            const OneZoneState oz = one_zone_closure(Sig_, Tc0, r0, in, op);
+            const double cs2 = kGtilde1 * (oz.P / Sig_) / (c_cgs * c_cgs);  // Γ̃₁(P/Σ)/c²
+            return V_ * V_ - cs2;
+        };
+        double lo = 1e-2, hi = 1e12;
+        // mach_excess(lo) > 0 (tiny Σ → |V|→1 ≫ c_s); mach_excess(hi) < 0 (huge Σ).
+        if (mach_excess(lo) > 0.0 && mach_excess(hi) < 0.0) {
+            for (int b = 0; b < 80; ++b) {
+                const double mid = std::sqrt(lo * hi);
+                if (mach_excess(mid) > 0.0) lo = mid; else hi = mid;
+            }
+            const double Sig0 = std::sqrt(lo * hi);
+            const double dn = 2.0 * std::numbers::pi * Sig0 * sqrtD0 * in.r_g * c_cgs;
+            double V0 = -1e-6;
+            if (dn > 0.0) { const double X = -in.mdot / dn; V0 = X / std::sqrt(1.0 + X * X); }
+            V0 = std::clamp(V0, -kVCap, -1e-12);
+            U[0] = Sig0;
+            U[1] = V0;
+        }
+    }
+
+    // Globals: ℓ_in = ℓ_K(r_isco), r_s = the seeded sonic radius (node 0).
+    U[4 * N + 0] = ell_kepler(in.mass, in.spin, r_isco);
+    U[4 * N + 1] = r_s;
     return U;
 }
 
@@ -405,8 +584,15 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
     const int N = std::max(in.n_nodes, 4);
     R.assign((size_t)4 * N + 2, 0.0);
 
-    // Rebuild the (log) radial grid — same as the seed builder.
-    const double lr0 = std::log(in.r_in), lr1 = std::log(in.r_out);
+    const double ell_in = U[4 * N + 0];
+    const double r_s    = U[4 * N + 1];
+    const double Mdot   = in.mdot;                              // [g/s]
+
+    // FREE-INNER-NODE grid (Task 5, option B): the grid spans [r_s, r_out] with
+    // the CURRENT sonic radius r_s = U[4N+1] as the innermost node, so r[0] == r_s
+    // EXACTLY and node 0 IS the sonic point. in.r_in is only a hard floor/guard.
+    // Log spacing concentrates nodes near the hot inner disk / sonic point.
+    const double lr0 = std::log(r_s), lr1 = std::log(in.r_out);
     std::vector<double> r(N);
     for (int i = 0; i < N; ++i) {
         const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
@@ -419,9 +605,6 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
         e[i] = eval_node(in, op, r[i],
                          U[4 * i + 0], U[4 * i + 1], U[4 * i + 2], U[4 * i + 3]);
     }
-    const double ell_in = U[4 * N + 0];
-    const double r_s    = U[4 * N + 1];
-    const double Mdot   = in.mdot;                              // [g/s]
 
     // -----------------------------------------------------------------------
     // Group 1: mass conservation (N algebraic rows).  R = Ṁ_node - Ṁ_target.
@@ -504,11 +687,35 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
         return (N1 / D0g) * (1.0 - ei.V * ei.V);
     };
 
+    // L'Hôpital rhs at the sonic node 0 (= r_s). At convergence both 𝒩₁(r_s) and
+    // 𝒟₀(r_s) → 0, so (𝒩₁/𝒟₀) is 0/0; the finite transonic slope is the ratio of
+    // their radial derivatives. FD across nodes 0,1 on the log grid:
+    //   dlnV/dlnr|_0 = (d𝒩₁/dlnr)/(d𝒟₀/dlnr)·(1−V0²).
+    // Used ONLY for the node-0 rhs of the [0,1] trapezoidal row; node 1 keeps the
+    // direct 𝒩₁/𝒟₀ (𝒟₀(1)<0, non-singular).
+    auto rhs_radial_sonic_node0 = [&]() -> double {
+        const double Qadv0 = qadv_term_geom(0, 1);
+        const double Qadv1 = qadv_term_geom(1, 0);
+        const double N1_0 = calN1(in, e[0], Qadv0);
+        const double N1_1 = calN1(in, e[1], Qadv1);
+        const double D0_0 = calD0(e[0]);
+        const double D0_1 = calD0(e[1]);
+        const double dlnr = std::log(r[1]) - std::log(r[0]);
+        const double dN1 = (N1_1 - N1_0) / dlnr;
+        double dD0 = (D0_1 - D0_0) / dlnr;
+        // d𝒟₀/dlnr is generically nonzero (𝒟₀: 0 at node 0 → negative at node 1),
+        // but floor its magnitude to avoid a divide-by-zero on a transient iterate.
+        if (std::abs(dD0) < 1e-30) dD0 = std::copysign(1e-30, dD0 == 0 ? -1.0 : dD0);
+        return (dN1 / dD0) * (1.0 - e[0].V * e[0].V);
+    };
+
     for (int i = 0; i < N - 1; ++i) {
         const double lnVi  = std::log(std::max(-e[i].V,   1e-300));   // V<0; use ln|V|
         const double lnVi1 = std::log(std::max(-e[i+1].V, 1e-300));
         const double dlnr  = std::log(r[i+1]) - std::log(r[i]);
-        const double rhs_i  = rhs_radial(i,   i + 1);
+        // Node-0 rhs uses the L'Hôpital limit on the sonic interval [0,1]; all
+        // other interval endpoints use the direct 𝒩₁/𝒟₀.
+        const double rhs_i  = (i == 0) ? rhs_radial_sonic_node0() : rhs_radial(i, i + 1);
         const double rhs_i1 = rhs_radial(i+1, i);
         R[2 * N + i] = (lnVi1 - lnVi) - 0.5 * dlnr * (rhs_i + rhs_i1);
     }
@@ -583,41 +790,24 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
     {
         const double M_cgs = in.mass * in.r_g * c_cgs * c_cgs / G_cgs;  // M in g (from r_g=GM/c²)
         const double r_cm = in.r_out * in.r_g;
+        // Zero-torque radius is the ISCO (NT), NOT in.r_in (which is now only a guard).
+        const double r_isco = isco_prograde(in.mass, in.spin);
         const double F = (3.0 * G_cgs * M_cgs * Mdot / (8.0 * std::numbers::pi * r_cm * r_cm * r_cm))
-                       * (1.0 - std::sqrt(in.r_in / in.r_out));
+                       * (1.0 - std::sqrt(r_isco / in.r_out));
         const double T_eff = std::pow(std::max(F, 0.0) / sigma_SB, 0.25);
         R[4 * N - 1] = e[last].Tc - std::max(T_eff, kTFloor);
     }
 
     // -----------------------------------------------------------------------
-    // Group 6: sonic-point regularity (2 rows, §23): 𝒟₀(r_s)=0 AND 𝒩₁(r_s)=0,
-    // with (Σ,V,ℓ,T_c) linearly interpolated to r_s from the bracketing nodes.
+    // Group 6: sonic-point regularity AT node 0 (= r_s, the free inner node).
+    // 𝒟₀(r_s)=0 (Mach 1: V²=c_s²) and 𝒩₁(r_s)=0 (regularity → finite dV/dr).
+    // No interpolation: node 0 IS the sonic point, so evaluate directly at e[0].
+    // On [r_s, r_out] the subsonic branch has 𝒟₀ ≤ 0 with equality only here.
     // -----------------------------------------------------------------------
     {
-        // Locate the bracketing interval for r_s on the grid (clamp to ends).
-        double rs = std::clamp(r_s, r[0], r[N - 1]);
-        int k = 0;
-        while (k < N - 2 && r[k + 1] < rs) ++k;     // r[k] <= rs <= r[k+1]
-        const double rl = r[k], rh = r[k + 1];
-        const double w = (rh > rl) ? (rs - rl) / (rh - rl) : 0.0;
-        auto lerp = [&](double a, double b) { return a + (b - a) * w; };
-        const double Sig_s = lerp(e[k].Sigma, e[k+1].Sigma);
-        const double V_s   = lerp(e[k].V,     e[k+1].V);
-        const double ell_s = lerp(e[k].ell,   e[k+1].ell);
-        const double Tc_s  = lerp(e[k].Tc,    e[k+1].Tc);
-        const NodeEval es = eval_node(in, op, rs, Sig_s, V_s, ell_s, Tc_s);
-        // Q_adv at r_s via FD across the bracketing nodes (reuse qadv_term_geom
-        // approximated with the bracketing pair, evaluated at es).
-        const double dlnP = dln(e[k].oz.P, e[k+1].oz.P, e[k].r, e[k+1].r);
-        const double dlnS = dln(e[k].Sigma, e[k+1].Sigma, e[k].r, e[k+1].r);
-        const double r_cm = rs * in.r_g;
-        const double Qadv = -(Mdot / (2.0 * std::numbers::pi * r_cm * r_cm))
-                          * (es.oz.P / es.Sigma)
-                          * ((kGamma1 - 1.0) * dlnP - kGamma1 * dlnS);
-        const double Qadv_g = (2.0 * std::numbers::pi * r_cm * r_cm / (Mdot * kEta3)) * Qadv
-                            / (c_cgs * c_cgs);
-        R[4 * N + 0] = calD0(es);
-        R[4 * N + 1] = calN1(in, es, Qadv_g);
+        const double Qadv_g0 = qadv_term_geom(0, 1);   // FD across nodes 0,1
+        R[4 * N + 0] = calD0(e[0]);
+        R[4 * N + 1] = calN1(in, e[0], Qadv_g0);
     }
 }
 
@@ -698,17 +888,27 @@ static bool dense_solve(std::vector<double>& A, std::vector<double>& b, int n) {
 
 /// Characteristic per-group residual scales, derived from the STATE and INPUTS
 /// (never from the residual itself), so the merit genuinely → 0 as R → 0.
-struct GroupScales { double mass, ang, rad, ene, bc_ell, bc_T, reg; };
+struct GroupScales { double mass, ang, rad, ene, bc_ell, bc_T, reg_D0, reg_N1; };
 static GroupScales slim_group_scales(const std::vector<double>& U, const SlimDiskInputs& in) {
     using namespace constants;
     const int N = std::max(in.n_nodes, 4);
     const double Mdot = std::max(std::abs(in.mdot), 1e-300);
-    // Mean |ℓ|, |T_c|, |Σ| over the nodes (typical magnitudes of the state vars).
-    double mEll = 0, mT = 0, mSig = 0;
+    // Mean |ℓ|, |T_c|, |Σ|, and V² over the nodes (typical magnitudes of the
+    // state vars; V² sets the 𝒟₀ = V²−c_s² regularity scale, since V²≈c_s² near
+    // the sonic point).
+    double mEll = 0, mT = 0, mSig = 0, mV2 = 0;
     for (int i = 0; i < N; ++i) {
         mEll += std::abs(U[4*i+2]); mT += std::abs(U[4*i+3]); mSig += std::abs(U[4*i+0]);
+        mV2  += U[4*i+1] * U[4*i+1];
     }
     mEll = std::max(mEll / N, 1e-30); mT = std::max(mT / N, 1.0); mSig = std::max(mSig / N, 1e-30);
+    mV2  = std::max(mV2 / N, 1e-300); (void)mV2;
+    // Node-0 (= r_s) radial speed² — the natural magnitude of BOTH terms of the
+    // 𝒟₀ = V²−c_s² regularity row at the SONIC node (where V₀²≈c_s²). Using the
+    // bulk mean(V²) instead would under-resolve 𝒟₀: away from r_s the disk is far
+    // subsonic (V²≪c_s²(r_s)), so mean(V²) can be orders of magnitude below the
+    // sonic-node scale and the scaled 𝒟₀ residual blows up spuriously.
+    const double V0sq = std::max(U[1] * U[1], 1e-300);
 
     GroupScales s{};
     // mass [g/s]:   row = Ṁ_node - Ṁ ;  scale = Ṁ.
@@ -717,18 +917,33 @@ static GroupScales slim_group_scales(const std::vector<double>& U, const SlimDis
     s.ang  = (Mdot / (2.0 * std::numbers::pi)) * mEll * in.r_g * c_cgs;
     // radmom: dlnV-difference ODE, intrinsically O(1) dimensionless.
     s.rad  = 1.0;
-    // energy [erg/cm²/s]: scale by a characteristic Q_rad ≈ 64σT̄⁴/(3·κ̄·Σ̄).
-    // κ ~ electron-scattering 0.34 cm²/g is a safe representative; the exact value
-    // only sets the row weight, not the converged solution.
+    // energy [erg/cm²/s]: scale by the characteristic VISCOUS dissipation (the
+    // heating side, which dominates the Group-4 row) — the Novikov-Thorne flux
+    // F_NT = 3GMṀ/(8π r³) evaluated at a representative inner radius. This is the
+    // genuine row magnitude (the radiative Q_rad can be Kramers-throttled far below
+    // it, so a Q_rad-based scale grossly under-weights the row and stalls the line
+    // search). State/input-derived only, so the merit still → 0 as R → 0.
     {
-        const double kappa_rep = 0.34;
-        s.ene = std::max(64.0 * sigma_SB * mT*mT*mT*mT / (3.0 * kappa_rep * mSig), 1e-300);
+        const double M_cgs = in.mass * in.r_g * c_cgs * c_cgs / G_cgs;     // M [g]
+        // Representative radius: a few r_g into the disk (inner edge dominates the
+        // heating). Use 3× the inner-grid guard (≈ inner disk) in cm.
+        const double r_rep_cm = std::max(3.0 * std::max(in.r_in, 1.0), 1.0) * in.r_g;
+        s.ene = std::max(3.0 * G_cgs * M_cgs * Mdot
+                         / (8.0 * std::numbers::pi * r_rep_cm * r_rep_cm * r_rep_cm), 1e-300);
     }
     // outer BCs: row 4N-2 = ℓ-ℓ_K (scale ℓ̄), row 4N-1 = T_c-T_eff (scale T̄).
     s.bc_ell = mEll;
     s.bc_T   = mT;
-    // regularity: 𝒟₀, 𝒩₁ both dimensionless O(1).
-    s.reg = 1.0;
+    // regularity: the two rows have DIFFERENT magnitudes and need SEPARATE scales.
+    //   • 𝒟₀ = V²−c_s²  at the SONIC node ~ V₀²(=c_s²(r_s)) — scale by the node-0
+    //     radial speed². (mean(V²) over ALL nodes is dominated by the bulk-subsonic
+    //     disk where V²≪c_s²(r_s); using it over-amplifies 𝒟₀ by orders of
+    //     magnitude and the inner merit can never reach the floor.)
+    //   • 𝒩₁ = 𝒜 + Q_adv-term + pressure-term  ~ O(1) (the gravitational 𝒜 term is
+    //     O(1)+) — scale by 1. (Lumping it with the tiny 𝒟₀ scale would over-
+    //     weight the 𝒩₁ eigenvalue row and make the merit blow up.)
+    s.reg_D0 = V0sq;
+    s.reg_N1 = 1.0;
     return s;
 }
 
@@ -757,7 +972,36 @@ static double slim_scaled_residual_norm(const std::vector<double>& U,
     accum(3*N-1,   4*N-2, s.ene);
     accum(4*N-2,   4*N-1, s.bc_ell);   // ℓ(r_out)-ℓ_K
     accum(4*N-1,   4*N,   s.bc_T);     // T_c(r_out)-T_eff
-    accum(4*N,     4*N+2, s.reg);
+    accum(4*N,     4*N+1, s.reg_D0);   // 𝒟₀(r_s)=0
+    accum(4*N+1,   4*N+2, s.reg_N1);   // 𝒩₁(r_s)=0
+    return std::sqrt(sum / (double)std::max(cnt, 1));
+}
+
+/// Reduced (INNER-solve) scaled merit: identical to slim_scaled_residual_norm but
+/// EXCLUDES the 𝒩₁ regularity row R[4N+1].  In the two-level hybrid (spec §7) the
+/// inner Newton holds ℓ_in fixed and does NOT impose 𝒩₁(r_s)=0 — that row is the
+/// OUTER bracket root function g(ℓ_in).  𝒩₁ is generically ≠0 until the outer loop
+/// converges it, so including it would pin the inner merit above the floor forever.
+/// The inner convergence test must measure ONLY the 4N+1 active rows.
+static double slim_scaled_residual_norm_active(const std::vector<double>& U,
+                                               const std::vector<double>& R,
+                                               const SlimDiskInputs& in) {
+    const int N = std::max(in.n_nodes, 4);
+    const GroupScales s = slim_group_scales(U, in);
+
+    double sum = 0.0; int cnt = 0;
+    auto accum = [&](int begin, int end, double scale) {
+        const double sc = std::max(scale, 1e-300);
+        for (int i = begin; i < end; ++i) { double v = R[i]/sc; sum += v*v; ++cnt; }
+    };
+    accum(0,       N,     s.mass);
+    accum(N,       2*N,   s.ang);
+    accum(2*N,     3*N-1, s.rad);
+    accum(3*N-1,   4*N-2, s.ene);
+    accum(4*N-2,   4*N-1, s.bc_ell);   // ℓ(r_out)-ℓ_K
+    accum(4*N-1,   4*N,   s.bc_T);     // T_c(r_out)-T_eff
+    accum(4*N,     4*N+1, s.reg_D0);   // 𝒟₀(r_s)=0  (the only inner regularity row)
+    // NOTE: row 4N+1 (𝒩₁) deliberately omitted — it is the OUTER bracket residual.
     return std::sqrt(sum / (double)std::max(cnt, 1));
 }
 
@@ -775,43 +1019,64 @@ static GroupMags slim_group_mags(const std::vector<double>& U, const std::vector
     return { rms(0,N,s.mass), rms(N,2*N,s.ang), rms(2*N,3*N-1,s.rad),
              rms(3*N-1,4*N-2,s.ene),
              std::max(rms(4*N-2,4*N-1,s.bc_ell), rms(4*N-1,4*N,s.bc_T)),
-             rms(4*N,4*N+2,s.reg) };
+             std::max(rms(4*N,4*N+1,s.reg_D0), rms(4*N+1,4*N+2,s.reg_N1)) };
 }
 
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// Transonic radial solver (Newton relaxation)
+// INNER solve: fixed-ℓ_in Newton relaxation of the radial structure (spec §7)
 // ---------------------------------------------------------------------------
-SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUTs& opacity) {
+// Two-level hybrid (Sądowski / Muchotrzeb-Czerny): the OUTER loop brackets the
+// eigenvalue ℓ_in; this INNER solve relaxes the structure for a FIXED ℓ_in.
+//
+// relax_structure() Newton-relaxes the 4N+1 unknowns = ALL of U EXCEPT U[4N]=ℓ_in
+// (held fixed at the passed value), over the 4N+1 residual rows = all rows EXCEPT
+// R[4N+1] (the 𝒩₁ regularity row, which is the OUTER bracket's root function).
+// The reduced system is well-posed: with ℓ_in fixed there is no eigenvalue
+// degeneracy — r_s is pinned by 𝒟₀(r_s)=0 plus the radial-momentum chain back to
+// the outer BC. ALL the Newton machinery (numerical Jacobian, row+column scaling,
+// Levenberg-Marquardt, state-derived scaled merit, trust region, damped line
+// search, SLIM_DIAG) is preserved — only the variable/row INDEX SETS are reduced
+// (skip column 4N, skip row 4N+1) and the merit/convergence test uses the active
+// (𝒩₁-excluded) reduced norm. U is in-out (warm-started by the caller).
+//
+// Returns true iff the reduced merit < floor AND the max relative step < tol.
+namespace {
+static bool relax_structure(const SlimDiskInputs& in, const OpacityLUTs& opacity,
+                            double ell_in, std::vector<double>& U) {
     using namespace constants;
     using namespace slim_detail;
     const int N = std::max(in.n_nodes, 4);
-    const int n = 4*N + 2;
-    SlimDiskRadial out;
+    const int n = 4*N + 2;            // full residual / state length
 
-    // 1) Thin-disk seed.
-    std::vector<double> U = build_thin_disk_seed(in, opacity);
+    // Hold ℓ_in fixed: write it once, never step it.
+    U[4*N+0] = ell_in;
+
+    // Active variable indices (Newton unknowns): all columns EXCEPT 4N (ℓ_in).
+    // Active row indices (residual rows):        all rows    EXCEPT 4N+1 (𝒩₁).
+    // Both lists have length na = 4N+1; the reduced Newton system is na×na.
+    const int na = n - 1;
+    std::vector<int> var(na), row(na);
+    {
+        int p = 0; for (int j = 0; j < n; ++j) if (j != 4*N)   var[p++] = j;   // skip col ℓ_in
+        p = 0;     for (int j = 0; j < n; ++j) if (j != 4*N+1) row[p++] = j;   // skip row 𝒩₁
+    }
 
     const bool kDiag = std::getenv("SLIM_DIAG") != nullptr;
 
-    std::vector<double> R, J, Jcopy, rhs, Utry, Rtry;
+    std::vector<double> R, J, rhs, Utry, Rtry;
     slim_radial_residual(U, in, opacity, R);
-    double merit = slim_scaled_residual_norm(U, R, in);
+    double merit = slim_scaled_residual_norm_active(U, R, in);
 
     if (kDiag) {
         const GroupMags g = slim_group_mags(U, R, in);
-        std::printf("[SLIM] seed merit=%.3e  mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f ell_in=%.4f\n",
-                    merit, g.mass, g.ang, g.rad, g.ene, g.bc, g.reg, U[4*N+1], U[4*N+0]);
+        std::printf("[INNER] ell_in=%.5f seed merit=%.3e  mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f g(N1raw)=%.3e\n",
+                    ell_in, merit, g.mass, g.ang, g.rad, g.ene, g.bc, g.reg, U[4*N+1], R[4*N+1]);
     }
 
-    // Rebuild the log radial grid (same as the residual/seed) for unpacking.
-    const double lr0 = std::log(in.r_in), lr1 = std::log(in.r_out);
-    std::vector<double> rgrid(N);
-    for (int i = 0; i < N; ++i) {
-        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
-        rgrid[i] = std::exp(lr0 + (lr1 - lr0) * t);
-    }
+    bool converged = false;
+    int iters = 0; (void)iters;
 
     // Practical scaled-merit floor: below this the residual is at the noise level
     // of the FD-gradient (dlnP/dlnΣ) coupling and the bilinear opacity-LUT slopes.
@@ -819,38 +1084,36 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
     // Step cap on the strictly-positive variables (Σ off 0, T_c off 3) so a single
     // Newton step cannot drive them negative (the closure / EOS need Σ,T_c>0).
     constexpr double kStepCap = 0.5;
-    // Levenberg-Marquardt damping (adapted each iteration; see the solve below).
+    // Levenberg-Marquardt damping, adapted by a Nielsen/Marquardt GAIN-RATIO rule
+    // (see the solve below): μ rises whenever the realized merit drop is poor
+    // relative to the model's prediction (even on an accepted step), and falls
+    // only when the step genuinely tracks the local model. lm_nu is the geometric
+    // bump factor used on rejection. Bounds: a μ ceiling (bail above it) and a sane
+    // floor so an over-Newtonized step can never park μ at ≈0 forever.
     double lm_mu = 1e-3;
+    double lm_nu = 2.0;
+    constexpr double kMuMax = 1e12;
+    constexpr double kMuMin = 1e-9;
+
+    // F = ½‖Rs‖² over the ACTIVE rows (the SAME scaled sum-of-squares the active
+    // merit RMS measures), so the gain ratio's act = F_old−F_new is monotonically
+    // consistent with the accept/reject test. cnt = number of active rows (4N−1:
+    // mass N + ang N + rad N−1 + ene N−1 + bc_ell 1 + bc_T 1 + reg_D0 1). The
+    // active merit is sqrt(Σ Rs²/cnt), hence F = ½·cnt·merit².
+    const double cnt_active = (double)(4 * N - 1);
+    auto merit_to_F = [cnt_active](double m) { return 0.5 * cnt_active * m * m; };
 
     for (int it = 0; it < in.max_iters; ++it) {
-        // 2a) Numerical Jacobian and Newton step  J dU = -R.
+        // 2a) Numerical Jacobian (full n×n) — we gather the ACTIVE submatrix below.
         slim_numerical_jacobian(U, in, opacity, J);
-        if (kDiag && it == 0) {
-            // Column 2-norms for the two globals + min/max nonzero column norm,
-            // to spot a near-null direction (e.g. an insensitive r_s column).
-            auto colnorm = [&](int c){ double s=0; for(int r=0;r<n;++r){double v=J[(size_t)r*n+c]; s+=v*v;} return std::sqrt(s); };
-            double mn = 1e300, mx = 0; int mn_col = -1;
-            for (int c = 0; c < n; ++c) { double cn = colnorm(c); if (cn > mx) mx = cn; if (cn > 0 && cn < mn) { mn = cn; mn_col = c; } }
-            std::printf("[SLIM] J: col(ell_in)=%.3e col(r_s)=%.3e  min-nonzero-colnorm=%.3e@col%d max-colnorm=%.3e ratio=%.3e\n",
-                        colnorm(4*N), colnorm(4*N+1), mn, mn_col, mx, mn/std::max(mx,1e-300));
-        }
-        // 2a') Row + column scaling (non-dimensionalize the Newton system).
-        //
-        // The raw Jacobian columns span ~33 orders of magnitude (e.g. the ℓ_in
-        // column ~1e34 in the Mdot·r_g·c-weighted angular-momentum rows vs the r_s
-        // column ~1e2) because the state variables (Σ~1e6, V~1e-5, ℓ~1, T_c~1e6,
-        // r_s~1) and the residual rows (mass ~1e17 down to dimensionless O(1)) have
-        // wildly mismatched scales. Gaussian elimination on a 1e33-conditioned
-        // matrix yields a garbage Newton step (the small-norm directions acquire
-        // enormous components). We solve the EQUIVALENT well-scaled system
-        //   (Dr · J · Dc)·y = -(Dr · R),  dU = Dc·y
-        // with Dc = diag(per-variable magnitude) and Dr = diag(1/per-group scale).
-        // This is an exact reformulation (no physics change) that simply makes the
-        // linear solve numerically well-posed.  The column BVP avoids this because
-        // its four state variables are comparable in magnitude.
+
+        // 2a') Row + column scaling (non-dimensionalize the reduced Newton system).
+        // Same scaling as the original monolithic solver (Dc = per-variable
+        // magnitude, Dr = 1/per-group scale), restricted to the active index sets.
+        // The raw Jacobian columns span ~33 orders of magnitude; this makes the
+        // linear solve numerically well-posed (an exact, physics-neutral rescale).
         std::vector<double> cs(n), rs_inv(n);
         {
-            // Column scales: characteristic magnitude of each state variable.
             double mSig=0, mV=0, mEll=0, mT=0;
             for (int i = 0; i < N; ++i) {
                 mSig=std::max(mSig,std::abs(U[4*i+0])); mV =std::max(mV ,std::abs(U[4*i+1]));
@@ -858,158 +1121,217 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
             }
             mSig=std::max(mSig,1e-30); mV=std::max(mV,1e-30); mEll=std::max(mEll,1e-30); mT=std::max(mT,1.0);
             for (int i = 0; i < N; ++i) { cs[4*i+0]=mSig; cs[4*i+1]=mV; cs[4*i+2]=mEll; cs[4*i+3]=mT; }
-            cs[4*N+0]=std::max(std::abs(U[4*N+0]),1e-30);   // ℓ_in
+            cs[4*N+0]=std::max(std::abs(U[4*N+0]),1e-30);   // ℓ_in (unused column, kept for indexing)
             cs[4*N+1]=std::max(std::abs(U[4*N+1]),1e-30);   // r_s
-            // Row scales: per-group characteristic residual magnitude (reciprocal).
             const GroupScales gs = slim_group_scales(U, in);
             auto setrows = [&](int b,int e,double sc){ sc=std::max(sc,1e-300); for(int r=b;r<e;++r) rs_inv[r]=1.0/sc; };
             setrows(0,N,gs.mass); setrows(N,2*N,gs.ang); setrows(2*N,3*N-1,gs.rad);
             setrows(3*N-1,4*N-2,gs.ene); setrows(4*N-2,4*N-1,gs.bc_ell);
-            setrows(4*N-1,4*N,gs.bc_T); setrows(4*N,4*N+2,gs.reg);
+            setrows(4*N-1,4*N,gs.bc_T);
+            setrows(4*N,4*N+1,gs.reg_D0); setrows(4*N+1,4*N+2,gs.reg_N1);  // 4N+1 unused (inactive row)
         }
-        // Scaled Jacobian Js = Dr·J·Dc and scaled residual Rs = Dr·R.
-        std::vector<double> Js((size_t)n*n, 0.0), Rs(n, 0.0);
-        for (int r = 0; r < n; ++r) {
-            Rs[r] = R[r] * rs_inv[r];
-            for (int c = 0; c < n; ++c)
-                Js[(size_t)r*n+c] = J[(size_t)r*n+c] * rs_inv[r] * cs[c];
+        // Reduced scaled Jacobian Js (na×na) and residual Rs (na) over the active sets:
+        //   Js[a][b] = Dr[row[a]] · J[row[a]][var[b]] · Dc[var[b]],  Rs[a] = Dr[row[a]]·R[row[a]]
+        std::vector<double> Js((size_t)na*na, 0.0), Rs(na, 0.0);
+        for (int a = 0; a < na; ++a) {
+            const int ra = row[a];
+            Rs[a] = R[ra] * rs_inv[ra];
+            for (int b = 0; b < na; ++b) {
+                const int vb = var[b];
+                Js[(size_t)a*na+b] = J[(size_t)ra*n+vb] * rs_inv[ra] * cs[vb];
+            }
         }
 
         // Levenberg-Marquardt on the scaled normal equations:
         //   (Js^T Js + μ·diag(Js^T Js)) y = -Js^T Rs.
-        // Pure Newton (μ→0) gives a garbage step here because the mass-conservation
-        // rows (mdot = -2πΣVΓΔ^½·r_g·c) make the (Σ,V) block near rank-deficient —
-        // a whole direction (scale Σ up, V down at fixed mdot) is nearly null, so
-        // the unregularized solve produces ~1e9 fractional steps that the trust
-        // region throttles to ~1e-11 (no progress). LM damping rotates the step
-        // toward scaled gradient descent in that subspace while staying Newton-like
-        // elsewhere; μ is adapted (decrease on success, increase on stall) so the
-        // method recovers quadratic convergence near the solution. Standard,
-        // physics-neutral regularization of an ill-posed linear solve.
-        std::vector<double> JtJ((size_t)n*n, 0.0), Jtr(n, 0.0);
-        for (int i = 0; i < n; ++i) {
-            for (int k = 0; k < n; ++k) {
-                const double jik = Js[(size_t)k*n+i];   // Js[k][i]
+        // LM damping rotates the step toward scaled gradient descent in the near-null
+        // (Σ↑,V↓ at fixed Ṁ) subspace while staying Newton-like elsewhere; μ adapts
+        // (decrease on success, increase on stall). Physics-neutral regularization.
+        std::vector<double> JtJ((size_t)na*na, 0.0), Jtr(na, 0.0);
+        for (int i = 0; i < na; ++i) {
+            for (int k = 0; k < na; ++k) {
+                const double jik = Js[(size_t)k*na+i];   // Js[k][i]
                 if (jik == 0.0) continue;
                 Jtr[i] += jik * Rs[k];
-                for (int j = 0; j < n; ++j) JtJ[(size_t)i*n+j] += jik * Js[(size_t)k*n+j];
+                for (int j = 0; j < na; ++j) JtJ[(size_t)i*na+j] += jik * Js[(size_t)k*na+j];
             }
         }
-        std::vector<double> Adamp((size_t)n*n), bdamp(n);
-        bool solved = false;
-        for (int tries = 0; tries < 12 && !solved; ++tries) {
-            Adamp = JtJ;
-            for (int i = 0; i < n; ++i)
-                Adamp[(size_t)i*n+i] += lm_mu * std::max(JtJ[(size_t)i*n+i], 1e-300);
-            for (int i = 0; i < n; ++i) bdamp[i] = -Jtr[i];
-            if (dense_solve(Adamp, bdamp, n)) { solved = true; break; }
-            lm_mu *= 10.0;                       // singular even damped -> stiffen
-        }
-        if (!solved) {
-            if (kDiag) std::printf("[SLIM] it=%d SINGULAR (LM) -> bail\n", it);
-            break;
-        }
-        // Unscale: dU = Dc·y.
-        rhs.assign(n, 0.0);
-        for (int c = 0; c < n; ++c) rhs[c] = bdamp[c] * cs[c];
-        const std::vector<double>& dU = rhs;
+        // 2b) Gain-ratio (trust-region) Levenberg-Marquardt step. We RE-SOLVE the
+        //     damped normal equations at the CURRENT μ; if the realized merit drop
+        //     is poor versus the model prediction (gain ratio ρ≤0) we REJECT, raise
+        //     μ geometrically (Nielsen bump), and re-solve WITHOUT advancing U. We
+        //     accept only a genuine decrease (ρ>0), then lower μ in proportion to
+        //     how well the step tracked the model. This replaces the old "decay on
+        //     accept / raise only on line-search stall" heuristic, which ratcheted
+        //     μ to its floor (near-pure-Newton) and stalled in a microscopic-λ step.
+        const double F_old = merit_to_F(merit);
+        std::vector<double> Adamp((size_t)na*na), bdamp(na);
+        bool step_taken = false;        // did we ACCEPT a step this iteration?
+        bool bail = false;              // hard failure (singular at μ_max)
+        double lambda = 1.0;            // line-search scale of the accepted step
+        double maxrel = 0.0;
+        double merit_try = merit;
+        int reject_count = 0;
 
-        // 2b) Trust-region cap: limit the fractional step on the positive vars
-        //     (Σ, T_c) so they stay positive and we don't overshoot the closure
-        //     nonlinearity in one shot; the line search runs from the capped step.
-        double lambda = 1.0;
-        for (int i = 0; i < N; ++i) {
-            for (int c : {0, 3}) {                          // Σ (off 0), T_c (off 3)
-                const double u = U[4*i+c], d = dU[4*i+c];
-                if (u != 0.0 && d != 0.0) {
-                    const double frac = std::abs(d / u);
-                    if (frac * lambda > kStepCap) lambda = kStepCap / frac;
+        while (true) {
+            // Solve (JtJ + μ·diag(JtJ)) y = -Jtr at the current μ. If singular even
+            // when damped, stiffen μ and re-solve (the inner LM stabilizer).
+            bool solved = false;
+            for (int tries = 0; tries < 12 && !solved; ++tries) {
+                Adamp = JtJ;
+                for (int i = 0; i < na; ++i)
+                    Adamp[(size_t)i*na+i] += lm_mu * std::max(JtJ[(size_t)i*na+i], 1e-300);
+                for (int i = 0; i < na; ++i) bdamp[i] = -Jtr[i];
+                if (dense_solve(Adamp, bdamp, na)) { solved = true; break; }
+                lm_mu = std::min(lm_mu * 10.0, kMuMax);
+                if (lm_mu >= kMuMax) break;
+            }
+            if (!solved) {
+                if (kDiag) std::printf("[INNER] it=%d SINGULAR (LM) at mu=%.1e -> bail\n", it, lm_mu);
+                bail = true; break;
+            }
+
+            // y = bdamp (scaled step). Predicted reduction of F=½‖Rs‖² for the LM
+            // step:  pred = ½ yᵀ(μ·D·y − Jtr),  D=diag(JtJ),  Jtr = Js^T Rs (scaled
+            // gradient).  ≥0 for the LM step by construction.
+            double pred = 0.0;
+            for (int i = 0; i < na; ++i) {
+                const double Dii = std::max(JtJ[(size_t)i*na+i], 1e-300);
+                pred += lm_mu * Dii * bdamp[i] * bdamp[i] - bdamp[i] * Jtr[i];
+            }
+            pred *= 0.5;
+
+            // Unscale + scatter into the active variables only: dU[var[b]] = Dc·y.
+            rhs.assign(n, 0.0);
+            for (int b = 0; b < na; ++b) rhs[var[b]] = bdamp[b] * cs[var[b]];
+            rhs[4*N+0] = 0.0;                        // ℓ_in column: never step it
+            const std::vector<double>& dU = rhs;
+
+            // Trust-region cap on the strictly-positive vars (Σ, T_c): the largest
+            // λ that keeps |Δ/u| ≤ kStepCap. Prefer λ=1; only the feasibility line
+            // search below shrinks λ further (just enough to regain physicality).
+            double lam = 1.0;
+            for (int i = 0; i < N; ++i) {
+                for (int c : {0, 3}) {                  // Σ (off 0), T_c (off 3)
+                    const double u = U[4*i+c], d = dU[4*i+c];
+                    if (u != 0.0 && d != 0.0) {
+                        const double frac = std::abs(d / u);
+                        if (frac * lam > kStepCap) lam = kStepCap / frac;
+                    }
                 }
             }
+
+            // Feasibility line search: take the LARGEST λ (≤ the trust-region cap)
+            // that yields a PHYSICAL iterate (Σ>0, T_c>0, |V|<1, r_s∈(r_in,r_out)),
+            // i.e. reduce λ only to regain feasibility — do NOT shrink it to chase
+            // a merit decrease (the gain ratio governs accept/reject instead).
+            bool physical = false;
+            double F_new = F_old;
+            for (int ls = 0; ls < 40; ++ls) {
+                Utry.assign(U.begin(), U.end());
+                for (int i = 0; i < n; ++i) Utry[i] += lam * dU[i];
+                Utry[4*N+0] = ell_in;               // keep ℓ_in pinned exactly
+                physical = true;
+                for (int i = 0; i < N && physical; ++i) {
+                    const double Sig = Utry[4*i+0], Vv = Utry[4*i+1], Tc = Utry[4*i+3];
+                    if (Sig <= 0.0 || Tc <= 0.0 || std::abs(Vv) >= 1.0) physical = false;
+                }
+                if (physical) {
+                    const double rs = Utry[4*N+1];
+                    if (!(rs > in.r_in && rs < in.r_out)) physical = false;
+                }
+                if (physical) {
+                    slim_radial_residual(Utry, in, opacity, Rtry);
+                    merit_try = slim_scaled_residual_norm_active(Utry, Rtry, in);
+                    F_new = merit_to_F(merit_try);
+                    break;
+                }
+                lam *= 0.5;
+            }
+
+            // Gain ratio ρ = act/pred. A non-physical full step (no feasible λ
+            // found) counts as ρ≤0 (reject). pred is clamped away from 0.
+            const double act = physical ? (F_old - F_new) : -1.0;
+            const double rho = act / std::max(pred, 1e-300);
+
+            if (rho > 0.0) {
+                // Genuine decrease -> ACCEPT. Lower μ in proportion to fit quality
+                // (Nielsen): μ *= max(1/3, 1 − (2ρ−1)³); reset the bump factor.
+                const double t = 2.0 * rho - 1.0;
+                lm_mu = std::max(lm_mu * std::max(1.0/3.0, 1.0 - t*t*t), kMuMin);
+                lm_nu = 2.0;
+                lambda = lam;
+                step_taken = true;
+                break;
+            }
+            // No real decrease (incl. an infeasible full step) -> REJECT. Raise μ
+            // (μ *= ν; ν *= 2) and re-solve WITHOUT advancing U. Bail honestly if μ
+            // exceeds the ceiling with no acceptable step.
+            ++reject_count;
+            if (lm_mu >= kMuMax) {
+                if (kDiag) {
+                    const GroupMags g = slim_group_mags(U, R, in);
+                    std::printf("[INNER] it=%d GAIN-RATIO STALL merit=%.3e (mu=%.1e maxed, rejects=%d)  "
+                                "mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f\n",
+                                it, merit, lm_mu, reject_count, g.mass, g.ang, g.rad, g.ene, g.bc, g.reg, U[4*N+1]);
+                }
+                bail = true; break;
+            }
+            lm_mu = std::min(lm_mu * lm_nu, kMuMax);
+            lm_nu *= 2.0;
         }
 
-        // 2c) Damped line search on the SCALED merit. Reject any iterate that is
-        //     non-physical (Σ<=0, T_c<=0, or |V|>=1) before evaluating the residual.
-        bool accepted = false;
-        double merit_try = merit;
-        for (int ls = 0; ls < 40; ++ls) {
-            Utry.assign(U.begin(), U.end());
-            for (int i = 0; i < n; ++i) Utry[i] += lambda * dU[i];
-            bool physical = true;
-            for (int i = 0; i < N && physical; ++i) {
-                const double Sig = Utry[4*i+0], Vv = Utry[4*i+1], Tc = Utry[4*i+3];
-                if (Sig <= 0.0 || Tc <= 0.0 || std::abs(Vv) >= 1.0) physical = false;
-            }
-            // r_s must stay on the grid for the regularity interpolation to be sane.
-            if (physical) {
-                const double rs = Utry[4*N+1];
-                if (!(rs > rgrid.front() && rs < rgrid.back())) physical = false;
-            }
-            if (physical) {
-                slim_radial_residual(Utry, in, opacity, Rtry);
-                merit_try = slim_scaled_residual_norm(Utry, Rtry, in);
-                if (kDiag && it == 0)
-                    std::printf("[SLIM]   ls=%d lambda=%.3e merit_try=%.4e (merit=%.4e)\n",
-                                ls, lambda, merit_try, merit);
-                if (merit_try < merit) { accepted = true; break; }
-            }
-            lambda *= 0.5;
-        }
-        if (!accepted) {
-            // LM hallmark: a stalled step means μ is too small (step too Newton-like
-            // into the near-null direction). Stiffen μ and re-try this iteration
-            // (toward gradient descent) rather than giving up — up to a μ ceiling.
-            if (lm_mu < 1e12) {
-                lm_mu *= 10.0;
-                if (kDiag && it == 0) std::printf("[SLIM]   STALL -> raise lm_mu=%.1e, retry\n", lm_mu);
-                --it;                            // re-do this iteration with stiffer μ
-                continue;
-            }
-            if (kDiag) {
-                const GroupMags g = slim_group_mags(U, R, in);
-                std::printf("[SLIM] it=%d LINE-SEARCH STALL merit=%.3e (lm_mu maxed)  "
-                            "mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f ell_in=%.4f\n",
-                            it, merit, g.mass, g.ang, g.rad, g.ene, g.bc, g.reg, U[4*N+1], U[4*N+0]);
-            }
-            break;                              // stuck -> bail (non-converged)
-        }
-        // Accepted: relax μ toward Newton for faster (quadratic) local convergence.
-        lm_mu = std::max(lm_mu * 0.3, 1e-12);
+        if (bail) break;                            // stuck / singular -> non-converged
+        if (!step_taken) break;                     // defensive (shouldn't happen)
 
-        // 2d) Convergence on the (capped) relative step size.
-        double maxrel = 0.0;
-        for (int i = 0; i < n; ++i) {
-            const double rel = std::abs(lambda * dU[i]) / std::max(std::abs(U[i]), 1e-300);
+        // 2d) Convergence on the (capped) relative step size (active variables).
+        // The accepted increment is (Utry - U) = lambda·dU over the active vars.
+        maxrel = 0.0;
+        for (int b = 0; b < na; ++b) {
+            const int j = var[b];
+            const double rel = std::abs(Utry[j] - U[j]) / std::max(std::abs(U[j]), 1e-300);
             maxrel = std::max(maxrel, rel);
         }
 
         U.swap(Utry);
         R.swap(Rtry);
         merit = merit_try;
-        out.iters = it + 1;
-        out.final_residual = merit;
+        iters = it + 1;
 
         if (kDiag) {
             const GroupMags g = slim_group_mags(U, R, in);
-            std::printf("[SLIM] it=%d lambda=%.2e mu=%.1e merit=%.3e maxrel=%.2e  "
-                        "mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f ell_in=%.4f\n",
+            std::printf("[INNER] it=%d lambda=%.2e mu=%.1e merit=%.3e maxrel=%.2e  "
+                        "mass=%.2e ang=%.2e rad=%.2e ene=%.2e bc=%.2e reg=%.2e | r_s=%.4f g(N1raw)=%.3e\n",
                         it, lambda, lm_mu, merit, maxrel, g.mass, g.ang, g.rad, g.ene, g.bc, g.reg,
-                        U[4*N+1], U[4*N+0]);
+                        U[4*N+1], R[4*N+1]);
         }
 
-        // Both must hold: relative step small AND scaled residual below the floor.
-        if (maxrel < in.tol && merit < kMeritFloor) { out.converged = true; break; }
+        // Reduced merit below floor AND relative step small.
+        if (maxrel < in.tol && merit < kMeritFloor) { converged = true; break; }
     }
 
-    // Honest fallback: never fabricate a profile.
-    if (!out.converged) {
-        out.r.clear(); out.Sigma.clear(); out.V.clear(); out.Omega.clear();
-        out.Tc.clear(); out.H.clear(); out.f_adv.clear();
-        out.ell_in = 0.0; out.r_sonic = 0.0;
-        return out;
-    }
+    return converged;
+}
 
-    // 3) Unpack the converged state.
+// ---------------------------------------------------------------------------
+// Unpack a converged state U into the SlimDiskRadial output profile.
+// ---------------------------------------------------------------------------
+static void unpack_profile(const SlimDiskInputs& in, const OpacityLUTs& opacity,
+                           const std::vector<double>& U, SlimDiskRadial& out) {
+    using namespace constants;
+    using namespace slim_detail;
+    const int N = std::max(in.n_nodes, 4);
+
+    // Rebuild the free-inner-node grid from the converged r_s = U[4N+1] (node 0 =
+    // sonic point), spanning [r_s, r_out].
+    std::vector<double> rgrid(N);
+    {
+        const double lr0u = std::log(U[4*N+1]), lr1u = std::log(in.r_out);
+        for (int i = 0; i < N; ++i) {
+            const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+            rgrid[i] = std::exp(lr0u + (lr1u - lr0u) * t);
+        }
+    }
     out.r.resize(N); out.Sigma.resize(N); out.V.resize(N); out.Omega.resize(N);
     out.Tc.resize(N); out.H.resize(N); out.f_adv.resize(N);
     const double ell_in = U[4*N+0];
@@ -1026,12 +1348,9 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
         out.r[i]     = r;
         out.Sigma[i] = Sig;
         out.V[i]     = V;
-        // Ω from ℓ (geometric 1/M) → 1/s via c/r_g.
         out.Omega[i] = omega_from_ell(in.mass, in.spin, r, ell) * (c_cgs / in.r_g);
         out.Tc[i]    = Tc;
         out.H[i]     = oz.H;
-        // f_adv = Q_adv / Q_rad per node (advected fraction). FD gradients of
-        // lnP, lnΣ on the log grid (one-sided at the ends).
         const int j = (i + 1 < N) ? i + 1 : i - 1;
         const OneZoneState ozj = one_zone_closure(std::max(U[4*j+0], kSigmaFloor),
                                                   std::max(U[4*j+3], kTFloor), rgrid[j], in, opacity);
@@ -1049,6 +1368,227 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
     }
     out.ell_in  = ell_in;
     out.r_sonic = U[4*N+1];
+}
+
+// ---------------------------------------------------------------------------
+// OUTER bracket: find ℓ_in such that g(ℓ_in) = 𝒩₁(r_s; ℓ_in) = R[4N+1] = 0
+// ---------------------------------------------------------------------------
+// For a trial ℓ_in, relax_structure converges the inner BVP; the FULL residual's
+// 𝒩₁ regularity row (scaled by reg_N1) is the outer root function g(ℓ_in). We
+// scan a physical window around ℓ_K(r_isco), find a sign change in g, then bisect.
+// A failed inner solve is treated as one topology side (flow can't reach a regular
+// sonic point) and the bracket steps away from it. Warm-starts U across trials.
+//
+// On success: leaves the converged state in U (with U[4N]=ℓ_in, U[4N+1]=r_s) and
+// returns true. On failure to bracket at all: returns false (honest fallback).
+static bool solve_outer_bracket(const SlimDiskInputs& in, const OpacityLUTs& opacity,
+                                std::vector<double>& U) {
+    using namespace constants;
+    using namespace slim_detail;
+    const int N = std::max(in.n_nodes, 4);
+    const bool kDiag = std::getenv("SLIM_DIAG") != nullptr;
+
+    const double r_isco = isco_prograde(in.mass, in.spin);
+    const double ellK_isco = ell_kepler(in.mass, in.spin, r_isco);
+
+    // Scaled outer-root function: g(ℓ_in) = R[4N+1]/reg_N1 after the inner converges.
+    // Returns {ok, g, U_at_trial}. ok=false => inner did not converge for this ℓ_in.
+    std::vector<double> Ubase = U;     // warm-start template for each trial
+    auto eval_g = [&](double ell_in, std::vector<double>& Uwork, double& g) -> bool {
+        Uwork = Ubase;
+        const bool ok = relax_structure(in, opacity, ell_in, Uwork);
+        if (!ok) { g = std::nan(""); return false; }
+        std::vector<double> Rfull;
+        slim_radial_residual(Uwork, in, opacity, Rfull);
+        const GroupScales gs = slim_group_scales(Uwork, in);
+        g = Rfull[4*N+1] / std::max(gs.reg_N1, 1e-300);
+        return true;
+    };
+
+    // --- Scan a window [lo_frac, hi_frac]·ℓ_K(r_isco) for a sign change in g. ---
+    // ℓ_in lies near and slightly below ℓ_K(r_isco) physically. Start tight, widen
+    // the floor toward 0.5· (and the ceiling slightly above 1.0·) if no bracket.
+    struct Sample { double ell, g; std::vector<double> U; bool ok; };
+
+    auto scan = [&](double lo_frac, double hi_frac, int nsamp,
+                    double& ell_a, double& g_a, std::vector<double>& Ua,
+                    double& ell_b, double& g_b, std::vector<double>& Ub) -> bool {
+        std::vector<Sample> S;
+        S.reserve(nsamp);
+        for (int k = 0; k < nsamp; ++k) {
+            const double f = lo_frac + (hi_frac - lo_frac) * double(k) / double(nsamp - 1);
+            const double ell = f * ellK_isco;
+            Sample s; s.ell = ell;
+            std::vector<double> Uw;
+            s.ok = eval_g(ell, Uw, s.g);
+            s.U.swap(Uw);
+            if (kDiag)
+                std::printf("[OUTER]   scan ell_in=%.5f (%.3f·ellK_isco) inner_ok=%d g=%.4e\n",
+                            ell, f, (int)s.ok, s.g);
+            // Warm-start the next trial from a converged neighbour to stay in-basin.
+            if (s.ok) Ubase = s.U;
+            S.push_back(std::move(s));
+        }
+        // Find an adjacent pair of CONVERGED samples that straddle g=0.
+        for (size_t k = 1; k < S.size(); ++k) {
+            if (S[k-1].ok && S[k].ok && S[k-1].g * S[k].g <= 0.0
+                && std::isfinite(S[k-1].g) && std::isfinite(S[k].g)) {
+                ell_a = S[k-1].ell; g_a = S[k-1].g; Ua = S[k-1].U;
+                ell_b = S[k].ell;   g_b = S[k].g;   Ub = S[k].U;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    double ell_a=0, g_a=0, ell_b=0, g_b=0;
+    std::vector<double> Ua, Ub;
+    bool bracketed = false;
+    // Window ladder: tight first, then progressively wider. (lo_frac, hi_frac, nsamp)
+    const double windows[][3] = {
+        {0.80, 1.00, 7},
+        {0.60, 1.05, 10},
+        {0.40, 1.10, 13},
+    };
+    for (const auto& w : windows) {
+        if (kDiag)
+            std::printf("[OUTER] scan window [%.2f, %.2f]·ellK_isco (ellK_isco=%.5f), %d samples\n",
+                        w[0], w[1], ellK_isco, (int)w[2]);
+        if (scan(w[0], w[1], (int)w[2], ell_a, g_a, Ua, ell_b, g_b, Ub)) { bracketed = true; break; }
+    }
+    if (!bracketed) {
+        if (kDiag) std::printf("[OUTER] NO sign change in g(ell_in) across all windows -> fallback\n");
+        return false;
+    }
+    if (kDiag)
+        std::printf("[OUTER] bracketed: g(%.5f)=%.4e , g(%.5f)=%.4e -> bisect\n",
+                    ell_a, g_a, ell_b, g_b);
+
+    // --- Bisect g(ℓ_in) to a tolerance on g (scaled) or on the ℓ_in interval. ---
+    // Warm-start each inner solve from the bracket endpoint whose U is nearest.
+    constexpr double kGtol = 1e-4;       // |g| (already scaled by reg_N1)
+    constexpr int    kMaxBisect = 40;
+    std::vector<double> Umid;
+    int nbis = 0;
+    for (; nbis < kMaxBisect; ++nbis) {
+        const double ell_m = 0.5 * (ell_a + ell_b);
+        // Warm-start from whichever endpoint is closer (keeps the inner in-basin).
+        Ubase = (std::abs(ell_m - ell_a) < std::abs(ell_m - ell_b)) ? Ua : Ub;
+        double g_m = 0.0;
+        const bool ok = eval_g(ell_m, Umid, g_m);
+        if (kDiag)
+            std::printf("[OUTER] bisect %d: ell_m=%.6f inner_ok=%d g=%.4e  [%.6f,%.6f]\n",
+                        nbis, ell_m, (int)ok, g_m, ell_a, ell_b);
+        if (!ok) {
+            // Inner failed at the midpoint: that side has no regular sonic point.
+            // Collapse the bracket toward the converged endpoint with smaller |g|.
+            if (std::abs(g_a) <= std::abs(g_b)) { ell_b = ell_m; }
+            else                                { ell_a = ell_m; }
+            continue;
+        }
+        if (std::abs(g_m) < kGtol) {
+            U.swap(Umid);
+            U[4*N+0] = ell_m;
+            if (kDiag) std::printf("[OUTER] CONVERGED ell_in=%.6f g=%.4e (%d bisections)\n",
+                                   ell_m, g_m, nbis + 1);
+            return true;
+        }
+        if (g_a * g_m <= 0.0) { ell_b = ell_m; g_b = g_m; Ub = Umid; }
+        else                  { ell_a = ell_m; g_a = g_m; Ua = Umid; }
+        if (std::abs(ell_b - ell_a) < 1e-9 * std::max(std::abs(ellK_isco), 1e-30)) {
+            // Interval collapsed: accept the better endpoint as the eigenvalue.
+            const double ell_acc = (std::abs(g_a) <= std::abs(g_b)) ? ell_a : ell_b;
+            Ubase = (std::abs(g_a) <= std::abs(g_b)) ? Ua : Ub;
+            if (eval_g(ell_acc, Umid, g_m)) {
+                U.swap(Umid); U[4*N+0] = ell_acc;
+                if (kDiag) std::printf("[OUTER] interval collapsed -> ell_in=%.6f g=%.4e (%d bisections)\n",
+                                       ell_acc, g_m, nbis + 1);
+                return true;
+            }
+            break;
+        }
+    }
+    if (kDiag) std::printf("[OUTER] bisection did not reach g-tol in %d steps -> fallback\n", nbis);
+    return false;
+}
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// Transonic radial solver: Ṁ-continuation driver wrapping the outer ℓ_in bracket
+// (spec §7 REVISED 2026-06-09 — two-level hybrid)
+// ---------------------------------------------------------------------------
+// The Ṁ ladder wraps the OUTER ℓ_in bracket (which wraps the INNER fixed-ℓ_in
+// relaxation). At low Ṁ the disk is thin (sonic≈ISCO, ℓ_in≈ℓ_K(ISCO)) so the first
+// bracket is easy; each successive (geometric) rung warm-starts the inner U and the
+// ℓ_in search window from the last converged result. Honest empty fallback if any
+// rung's bracket fails (never fabricates a profile).
+SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUTs& opacity) {
+    using namespace constants;
+    const bool kDiag = std::getenv("SLIM_DIAG") != nullptr;
+
+    // Eddington accretion rate (textbook η=0.1 convention, trap #12):
+    //   L_Edd = 4πG M m_p c / σ_T   (≡ 4πGM c / κ_es with κ_es = σ_T/m_p),
+    //   Ṁ_Edd = 10 L_Edd / c² = 10·(4πGM m_p)/(σ_T c).
+    const double M_cgs = in.mass * in.r_g * c_cgs * c_cgs / G_cgs;   // M [g] (r_g=GM/c²)
+    const double kappa_es = 0.34;                                    // cm²/g (Thomson, X≈0.7)
+    const double L_Edd = 4.0 * std::numbers::pi * G_cgs * M_cgs * c_cgs / kappa_es; // erg/s
+    const double Mdot_Edd = 10.0 * L_Edd / (c_cgs * c_cgs);          // g/s
+    const double Mdot_lo  = 0.02 * Mdot_Edd;
+
+    // Build a geometric Ṁ ladder from Mdot_lo up to in.mdot (≤2× per rung, ≤12).
+    // If already thin (≤ the low rung), the single rung IS in.mdot.
+    std::vector<double> rungs;
+    if (!(in.mdot > Mdot_lo)) {
+        rungs.push_back(in.mdot);
+    } else {
+        rungs.push_back(Mdot_lo);
+        while (rungs.back() * 2.0 < in.mdot && (int)rungs.size() < 11)
+            rungs.push_back(rungs.back() * 2.0);
+        rungs.push_back(in.mdot);   // final rung = the requested target
+    }
+
+    SlimDiskRadial out;
+    std::vector<double> U;          // warm state, carried across rungs
+    bool have_warm = false;
+
+    for (size_t k = 0; k < rungs.size(); ++k) {
+        SlimDiskInputs in_rung = in;
+        in_rung.mdot = rungs[k];
+        if (kDiag)
+            std::printf("[SLIM] === Mdot rung %zu/%zu: Mdot=%.3e (Mdot_Edd=%.3e, f_Edd=%.3f) ===\n",
+                        k + 1, rungs.size(), rungs[k], Mdot_Edd, rungs[k] / Mdot_Edd);
+        // Warm-start U from the previous rung, or build the clean thin-disk seed.
+        if (!have_warm) U = build_thin_disk_seed(in_rung, opacity);
+
+        const bool ok = solve_outer_bracket(in_rung, opacity, U);
+        if (!ok) {
+            if (kDiag)
+                std::printf("[SLIM] rung %zu (Mdot=%.3e) bracket FAILED -> honest fallback\n",
+                            k + 1, rungs[k]);
+            return SlimDiskRadial{};   // honest fallback (empty, converged=false)
+        }
+        have_warm = true;
+    }
+
+    // Final rung converged: unpack the profile at in.mdot.
+    {
+        SlimDiskInputs in_final = in;   // in.mdot is the target
+        unpack_profile(in_final, opacity, U, out);
+        out.converged = true;
+        out.iters = (int)rungs.size();
+        std::vector<double> Rf;
+        slim_radial_residual(U, in_final, opacity, Rf);
+        out.final_residual = slim_scaled_residual_norm(U, Rf, in_final);
+        if (kDiag) {
+            const int N = std::max(in.n_nodes, 4);
+            const GroupScales gs = slim_group_scales(U, in_final);
+            std::printf("[SLIM] FINAL converged: ell_in=%.6f r_sonic=%.5f final_residual=%.3e | "
+                        "D0(r_s)=%.3e (scaled %.3e)  N1(r_s)=%.3e (scaled %.3e)\n",
+                        out.ell_in, out.r_sonic, out.final_residual,
+                        Rf[4*N+0], Rf[4*N+0]/std::max(gs.reg_D0,1e-300),
+                        Rf[4*N+1], Rf[4*N+1]/std::max(gs.reg_N1,1e-300));
+        }
+    }
     return out;
 }
 } // namespace grrt

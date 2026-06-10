@@ -142,6 +142,9 @@ endif()
 add_executable(test-opacity tests/test_opacity.cpp)
 target_link_libraries(test-opacity PRIVATE grrt)
 
+add_executable(test-opacity-rosseland tests/test_opacity_rosseland.cpp)
+target_link_libraries(test-opacity-rosseland PRIVATE grrt)
+
 add_executable(test-volumetric tests/test_volumetric.cpp)
 target_link_libraries(test-volumetric PRIVATE grrt)
 
@@ -165,6 +168,12 @@ target_link_libraries(test-column-bvp PRIVATE grrt)
 
 add_executable(test-slim-disk-radial tests/test_slim_disk_radial.cpp)
 target_link_libraries(test-slim-disk-radial PRIVATE grrt)
+
+# TEMPORARY DIAGNOSTIC PROBE (slim-disk basin-vs-noise verdict). Includes the
+# slim/opacity .cpp directly to reach internal helpers; does NOT link grrt to
+# avoid duplicate symbols. Safe to delete along with tools/slim_diag_probe.cpp.
+add_executable(slim-diag-probe tools/slim_diag_probe.cpp)
+target_include_directories(slim-diag-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
 # Diagnostic tool: dump the volumetric-disk LUTs to CSV (banding investigation).
 add_executable(dump-disk-lut tools/dump_disk_lut.cpp)
