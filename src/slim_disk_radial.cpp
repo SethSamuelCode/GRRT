@@ -101,6 +101,132 @@ OneZoneState one_zone_closure(double Sigma, double Tc, double r,
 }
 
 // ---------------------------------------------------------------------------
+// Analytic derivatives of the one-zone closure (Task 2).
+// ---------------------------------------------------------------------------
+// Differentiate one_zone_closure analytically.  The closure solves a COUPLED 2×2
+// system in (H, μ) at fixed (Σ, T_c, r):
+//   F1 (H-quadratic):  W H² − b H − g = 0
+//   F2 (μ fixed point): μ − μ̂(ρ, T) = 0 ,  ρ = Σ/(2H)
+// with notation matching one_zone_closure / solve_H:
+//   W  ≡ Ω_⊥²_cgs (const in Σ,T)        g  ≡ c_s_gas² = k_B T/(μ m_p)
+//   b  = (2 a_rad/3)·T⁴/Σ               s  = √(b²+4Wg) = 2WH − b
+//   p_gas = ρ g,  p_rad = (a_rad/3)T⁴,  p_mid = p_gas+p_rad
+//   c_s = √W·H,   P = 2 p_mid H,        S = cv(1.5 lnT − lnρ) + (4a_rad/3)T³/ρ,  cv=k_B/(μm_p)
+// We differentiate F1,F2 by the implicit-function theorem so dμ/d{Σ,T} (through the
+// fixed point) is captured — frozen-μ is exact only in the fully-ionized inner disk
+// and fails the FD cross-check in the partial-ionization regime.  μ̂'s log-gradients
+// come from op.mu_with_grad.  d{·}[0]=∂/∂Σ, d{·}[1]=∂/∂T_c.  Floors mirror the
+// closure exactly so the derivative matches the value the residual uses.
+void one_zone_closure_jac(double Sigma, double Tc, double r,
+                          const SlimDiskInputs& in, const OpacityLUTs& op,
+                          OneZoneState& st, OneZoneJac& jac) {
+    using namespace constants;
+    jac = OneZoneJac{};
+    st = one_zone_closure(Sigma, Tc, r, in, op);
+    if (!(st.H > 0.0)) return;   // unsolvable region (Ω_⊥²≤0): closure returned {}; partials 0.
+
+    constexpr double SIGMA_FLOOR = 1e-30;
+    constexpr double RHO_FLOOR   = 1e-30;
+    constexpr double T_FLOOR     = 1.0;
+    const double Sigma_s = std::max(Sigma, SIGMA_FLOOR);
+    const double Tc_s    = std::max(Tc, T_FLOOR);
+    // Floor clamp: where an input is clamped its value is constant ⇒ that partial is
+    // 0 (matches the FD central difference, which sees zero change inside the clamp).
+    const double dSig = (Sigma > SIGMA_FLOOR) ? 1.0 : 0.0;
+    const double dTc  = (Tc    > T_FLOOR)     ? 1.0 : 0.0;
+
+    const double conv = c_cgs / in.r_g;
+    const double W = omega_perp2(in.mass, in.spin, r) * conv * conv;   // Ω_⊥²_cgs
+    const double mu = st.mu;
+    const double H = st.H, rho = st.rho_mid;
+
+    const double g = k_B * Tc_s / (mu * m_p);                          // c_s_gas²
+    const double b = 2.0 * a_rad * Tc_s*Tc_s*Tc_s*Tc_s / (3.0 * Sigma_s);
+    const double s = std::max(2.0 * W * H - b, 1e-300);                // = √disc = ∂(WH²−bH−g)/∂H
+
+    // ---- μ derivative: FINITE-DIFFERENCE the CLOSURE's converged μ ----
+    // μ(Σ,T) is a tabulated, non-closed-form quantity (bilinear LUT under a ≤3-iter
+    // fixed point), so its derivative is obtained by central-differencing the
+    // closure's OWN converged μ.  This makes the analytic μ-response BIT-CONSISTENT
+    // with the central-difference oracle (which re-solves the same closure), so the
+    // gas-pressure terms match to round-off instead of the ~2e-4 LUT-slope gap a
+    // separate mu_with_grad stencil leaves.  Everything else stays exact-analytic.
+    // In the fully-ionized inner disk μ≈const so these are ~0 (frozen-μ recovered).
+    double dmu[2] = {0.0, 0.0};
+    {
+        const double hS = 1e-6 * Sigma_s, hT = 1e-6 * Tc_s;
+        if (Sigma > SIGMA_FLOOR) {
+            const double mp = one_zone_closure(Sigma + hS, Tc, r, in, op).mu;
+            const double mm = one_zone_closure(Sigma - hS, Tc, r, in, op).mu;
+            dmu[0] = (mp - mm) / (2.0 * hS);
+        }
+        if (Tc > T_FLOOR) {
+            const double mp = one_zone_closure(Sigma, Tc + hT, r, in, op).mu;
+            const double mm = one_zone_closure(Sigma, Tc - hT, r, in, op).mu;
+            dmu[1] = (mp - mm) / (2.0 * hT);
+        }
+    }
+
+    // dH from the H-quadratic WH²−bH−g=0 with μ=μ(p) known (total derivative):
+    //   (2WH−b)dH − H db − dg = 0  ⇒  dH = (H db + dg)/s.
+    //   db/dΣ = −b/Σ ; db/dT = 4b/T ; g = k_B T/(μ m_p):
+    //   dg/dΣ = −(g/μ)dμ_Σ ;  dg/dT = g/T − (g/μ)dμ_T.
+    const double db_dS = (-b / Sigma_s) * dSig;
+    const double db_dT = (4.0 * b / Tc_s) * dTc;
+    const double dg_dS = -(g / mu) * dmu[0];
+    const double dg_dT = (g / Tc_s) * dTc - (g / mu) * dmu[1];
+    double dH[2];
+    dH[0] = (H * db_dS + dg_dS) / s;
+    dH[1] = (H * db_dT + dg_dT) / s;
+    jac.dH[0] = dH[0]; jac.dH[1] = dH[1];
+
+    // ρ = Σ/(2H):  ∂ρ/∂Σ = ρ/Σ − (ρ/H)∂H/∂Σ ;  ∂ρ/∂T = −(ρ/H)∂H/∂T.
+    jac.drho[0] = (rho / Sigma_s) * dSig - (rho / H) * dH[0];
+    jac.drho[1] =                        - (rho / H) * dH[1];
+
+    // p_gas = ρ g  (dg_dS, dg_dT computed above with the closure-consistent dμ).
+    jac.dp_gas[0] = jac.drho[0] * g + rho * dg_dS;
+    jac.dp_gas[1] = jac.drho[1] * g + rho * dg_dT;
+
+    // p_rad = (a_rad/3)T⁴ → ∂/∂Σ=0, ∂/∂T = 4 p_rad/T.
+    jac.dp_rad[0] = 0.0;
+    jac.dp_rad[1] = (4.0 * st.p_rad / Tc_s) * dTc;
+
+    jac.dp_mid[0] = jac.dp_gas[0] + jac.dp_rad[0];
+    jac.dp_mid[1] = jac.dp_gas[1] + jac.dp_rad[1];
+
+    // c_s = √W H.
+    const double sqrtW = std::sqrt(W);
+    jac.dc_s[0] = sqrtW * dH[0];
+    jac.dc_s[1] = sqrtW * dH[1];
+
+    // P = 2 p_mid H.
+    jac.dP[0] = 2.0 * (jac.dp_mid[0] * H + st.p_mid * dH[0]);
+    jac.dP[1] = 2.0 * (jac.dp_mid[1] * H + st.p_mid * dH[1]);
+
+    // S = cv(1.5 lnT − lnρ_e) + (4 a_rad/3) T³/ρ_e,  cv = k_B/(μ m_p),  ρ_e=max(ρ,floor).
+    // cv depends on μ: ∂cv/∂p = −(cv/μ)∂μ/∂p.
+    const double cv = k_B / (mu * m_p);
+    const double dcv_dS = -(cv / mu) * dmu[0];
+    const double dcv_dT = -(cv / mu) * dmu[1];
+    const double rho_e = std::max(rho, RHO_FLOOR);
+    const double drho_e_dS = (rho > RHO_FLOOR) ? jac.drho[0] : 0.0;
+    const double drho_e_dT = (rho > RHO_FLOOR) ? jac.drho[1] : 0.0;
+    const double T3 = Tc_s*Tc_s*Tc_s;
+    const double lnpart = 1.5 * std::log(Tc_s) - std::log(rho_e);      // S_gas = cv·lnpart
+    // S_gas = cv·(1.5 lnT − ln ρ_e):
+    const double dSgas_dS = dcv_dS * lnpart + cv * (-drho_e_dS / rho_e);
+    const double dSgas_dT = dcv_dT * lnpart + cv * (1.5 / Tc_s * dTc - drho_e_dT / rho_e);
+    // S_rad = (4 a_rad/3) T³/ρ_e:
+    const double k_rad = 4.0 * a_rad / 3.0;
+    const double dSrad_dS = k_rad * (-T3 / (rho_e * rho_e)) * drho_e_dS;
+    const double dSrad_dT = k_rad * (3.0 * Tc_s*Tc_s / rho_e * dTc
+                                     - T3 / (rho_e * rho_e) * drho_e_dT);
+    jac.dS[0] = dSgas_dS + dSrad_dS;
+    jac.dS[1] = dSgas_dT + dSrad_dT;
+}
+
+// ---------------------------------------------------------------------------
 // Equatorial Kerr orbital mechanics helpers (geometric units, G=c=1)
 // ---------------------------------------------------------------------------
 //
@@ -178,6 +304,20 @@ double omega_from_ell(double M, double a, double r, double ell) {
     return Om;
 }
 
+// ∂Ω/∂ℓ at the orbit (r, Ω): the reciprocal of dℓ/dΩ evaluated at Ω (exact inverse
+// of omega_from_ell).  dℓ/dΩ = g_φφ/√D + numer²/D^{3/2}, numer = g_tφ + g_φφ Ω,
+// D = −(g_tt + 2 g_tφ Ω + g_φφ Ω²).  Used by the analytic 𝒜/𝒩₁ ℓ-derivatives.
+double domega_dell(double M, double a, double r, double Om) {
+    double g_tt, g_tphi, g_phph;
+    eq_metric(M, a, r, g_tt, g_tphi, g_phph);
+    const double D = -(g_tt + 2.0 * g_tphi * Om + g_phph * Om * Om);
+    const double Ds = std::max(D, 1e-300);
+    const double sqrtD = std::sqrt(Ds);
+    const double numer = g_tphi + g_phph * Om;
+    const double dell_dOm = g_phph / sqrtD + numer * numer / (Ds * sqrtD);
+    return (std::abs(dell_dOm) > 1e-300) ? 1.0 / dell_dOm : 0.0;
+}
+
 } // namespace slim_detail
 
 // ---------------------------------------------------------------------------
@@ -223,6 +363,7 @@ using slim_detail::kerr_A;
 using slim_detail::omega_perp2;
 using slim_detail::ell_kepler;
 using slim_detail::omega_from_ell;
+using slim_detail::domega_dell;
 using slim_detail::isco_prograde;
 
 // Fixed Phase-1 adiabatic indices (documented simplification).
@@ -328,6 +469,33 @@ static double script_A(const SlimDiskInputs& in, double r, const NodeMech& m) {
     const double dr = (std::abs(denom_rel) > 1e-12) ? denom_rel
                                                     : std::copysign(1e-12, denom_rel);
     return pref * num / dr;
+}
+
+// 𝒜 and its derivative w.r.t. the orbital Ω (the only node-LOCAL-variable dependence
+// of 𝒜: it enters R through ℓ via Ω(ℓ)).  ω, R̃, pref, Ω_K± depend on r only (→ Task 6).
+//   num = (Ω−Ω_K⁺)(Ω−Ω_K⁻)              ∂num/∂Ω = 2Ω − Ω_K⁺ − Ω_K⁻
+//   Ω̃ = Ω − ω                            ∂Ω̃/∂Ω  = 1
+//   dr = 1 − Ω̃²R̃²                        ∂dr/∂Ω = −2 Ω̃ R̃² (inside the guard band ∂=0)
+//   𝒜 = pref·num/dr  ⇒  ∂𝒜/∂Ω = pref·(num'·dr − num·dr')/dr²
+static void script_A_dOmega(const SlimDiskInputs& in, double r, const NodeMech& m,
+                            double& A_out, double& dA_dOmega) {
+    const double M = in.mass, a = in.spin;
+    const double omega   = 2.0 * M * a * r / m.A;
+    const double Om_tilde = m.Omega - omega;
+    const double R_tilde  = m.A / (r * r * std::max(m.sqrtDelta, 1e-30));
+    const double denom_rel = 1.0 - Om_tilde * Om_tilde * R_tilde * R_tilde;
+    const double pref = -M * m.A
+                      / (r * r * r * std::max(m.Delta, 1e-30)
+                         * m.Omega_k_plus * m.Omega_k_minus);
+    const double num  = (m.Omega - m.Omega_k_plus) * (m.Omega - m.Omega_k_minus);
+    const bool guarded = !(std::abs(denom_rel) > 1e-12);
+    const double dr = guarded ? std::copysign(1e-12, denom_rel) : denom_rel;
+    A_out = pref * num / dr;
+
+    const double dnum_dOm = 2.0 * m.Omega - m.Omega_k_plus - m.Omega_k_minus;
+    // Inside the floored guard band dr is held constant ⇒ ∂dr/∂Ω = 0 there.
+    const double ddr_dOm = guarded ? 0.0 : (-2.0 * Om_tilde * R_tilde * R_tilde);
+    dA_dOmega = pref * (dnum_dOm * dr - num * ddr_dOm) / (dr * dr);
 }
 
 // Mdot from a node (CGS, [g/s]) per the mass law; sign(V<0)->Mdot>0 for inflow.
@@ -967,6 +1135,514 @@ static void slim_numerical_jacobian(const std::vector<double>& U,
     }
 }
 
+// ===========================================================================
+// ANALYTIC JACOBIAN of slim_radial_residual (exact ∂R/∂U).
+// ===========================================================================
+// Built block-by-block (Tasks 2-6), each block validated against
+// slim_numerical_jacobian to <1e-6 relative (per column) before it ships.
+// The FD Jacobian is KEPT permanently as the cross-check oracle (tests/
+// test_slim_jacobian.cpp).  Row-major n×n with n=4N+2; the column/row layout is
+// identical to slim_numerical_jacobian.  Rows not yet ported analytically fall
+// back to the FD column value so the cross-check gate stays green incrementally.
+//
+// Implementation phasing (stubbed until the corresponding task lands):
+//   * one_zone_closure_jac : ∂{H,ρ,p,P,c_s,S}/∂{Σ,T_c}                (Task 2)
+//   * mass + angular-momentum algebraic rows                            (Task 3)
+//   * Kerr mechanics ∂Ω/∂ℓ, ∂𝒜, ∂𝒟₀, ∂𝒩₁ helpers                      (Task 4)
+//   * radial-momentum + energy trapezoidal rows (stencils, L'Hôpital)  (Task 5)
+//   * outer-BC + regularity rows + ℓ_in / r_s global columns           (Task 6)
+//
+// Per-node bundle for the analytic Jacobian: the residual's NodeEval plus the
+// closure derivatives and the floor/clamp activity flags, all evaluated once.
+struct NodeJacEval {
+    NodeEval e;                   // r, Σ_e, V_e, ℓ, Tc_e, oz, mech, Gamma, P_over_Sigma_geom, cs2_geom
+    slim_detail::OneZoneState oz; // closure state (== e.oz)
+    slim_detail::OneZoneJac  ozj; // ∂{H,ρ,p,P,c_s,S}/∂{Σ,T_c}
+    double dSig;                  // ∂Σ_e/∂Σ_raw  (1 if Σ>floor else 0)
+    double dVe;                   // ∂V_e/∂V_raw   (1 if |V|<kVCap else 0)
+    double dTce;                  // ∂Tc_e/∂Tc_raw (1 if Tc>floor else 0)
+};
+
+// Total Rosseland+electron-scattering opacity κ_R and its partials w.r.t. (ρ, T) at
+// (ρ,T).  κ_ross gradients from the LUT's own kappa_ross_with_grad (d/dlnρ,d/dlnT);
+// κ_es is differentiated by a small central FD on the LUT (tabulated, like μ — the
+// residual's FD oracle re-evaluates the same lookups, so this matches it to round-off).
+static void kappa_total_grad(const OpacityLUTs& op, double rho, double T,
+                             double& kR, double& dkR_drho, double& dkR_dT) {
+    // κ_R(ρ,T) = κ_ross + κ_es, both tabulated (bilinear LUTs).  Its derivative is
+    // obtained by central-differencing the SAME lookups the residual uses, so the
+    // analytic κ_R-response is bit-consistent with the central-difference oracle
+    // (which re-evaluates the same lookups).  A small relative step keeps us within
+    // the local LUT cell; cell-boundary discontinuities are an intrinsic property of
+    // the tabulated opacity (the residual's FD oracle hits the same floor).
+    auto kRtot = [&](double rr, double tt) {
+        return op.lookup_kappa_ross(rr, tt) + op.lookup_kappa_es(rr, tt);
+    };
+    kR = kRtot(rho, T);
+    const double hr = 1e-4 * std::max(rho, 1e-300), hT = 1e-4 * std::max(T, 1.0);
+    dkR_drho = (kRtot(rho + hr, T) - kRtot(rho - hr, T)) / (2.0 * hr);
+    dkR_dT   = (kRtot(rho, T + hT) - kRtot(rho, T - hT)) / (2.0 * hT);
+}
+
+static NodeJacEval node_jac_eval(const SlimDiskInputs& in, const OpacityLUTs& op,
+                                 double r, double Sigma, double V, double ell, double Tc) {
+    NodeJacEval nj;
+    nj.e = eval_node(in, op, r, Sigma, V, ell, Tc);
+    // closure_jac with RAW (Σ,Tc): its internal floor logic reproduces the residual's
+    // max(Σ,floor)/max(Tc,floor) chain exactly (dSig/dTc inside).
+    slim_detail::one_zone_closure_jac(Sigma, Tc, r, in, op, nj.oz, nj.ozj);
+    nj.dSig = (Sigma > kSigmaFloor) ? 1.0 : 0.0;
+    nj.dVe  = (std::abs(V) < kVCap)  ? 1.0 : 0.0;
+    nj.dTce = (Tc > kTFloor)         ? 1.0 : 0.0;
+    return nj;
+}
+
+// ===========================================================================
+// slim_analytic_jacobian — exact ∂R/∂U, built block-by-block (Tasks 2-6).
+// ===========================================================================
+// Starts from the FD Jacobian (so any not-yet-ported entry is correct), then
+// OVERWRITES the analytically-derived blocks.  Each task widens the analytic
+// coverage; the cross-check gate stays green throughout.  When Task 6 lands, every
+// entry is analytic and the FD seed becomes redundant (removed in Task 7).
+//
+// Coverage so far:
+//   * Task 3: mass rows [0..N), angular-momentum rows [N..2N) — node-LOCAL columns
+//     {Σ,V,ℓ,T_c}.  (The ℓ_in and r_s global columns of these rows: Task 6.)
+static void slim_analytic_jacobian(const std::vector<double>& U,
+                                   const SlimDiskInputs& in,
+                                   const OpacityLUTs& op, std::vector<double>& J) {
+    using namespace constants;
+    const int N = std::max(in.n_nodes, 4);
+    const int n = 4 * N + 2;
+
+    // FD seed for the un-ported entries (keeps the gate green incrementally).
+    slim_numerical_jacobian(U, in, op, J);
+    auto Jset = [&](int row, int col, double v) { J[(size_t)row * n + col] = v; };
+
+    // Rebuild the grid from r_s exactly as the residual does.
+    const double r_s = U[4 * N + 1];
+    const double lr0 = std::log(r_s), lr1 = std::log(in.r_out);
+    std::vector<double> r(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        r[i] = std::exp(lr0 + (lr1 - lr0) * t);
+    }
+
+    // Per-node evaluation + closure derivatives (once).
+    std::vector<NodeJacEval> nj(N);
+    for (int i = 0; i < N; ++i)
+        nj[i] = node_jac_eval(in, op, r[i], U[4*i+0], U[4*i+1], U[4*i+2], U[4*i+3]);
+
+    const double Mdot = in.mdot;
+    const double twopi = 2.0 * std::numbers::pi;
+
+    // -----------------------------------------------------------------------
+    // Group 1: mass rows  R[i] = mdot_of_node(Σ_i,V_i,√Δ_i) − Ṁ.
+    //   mdot = −2π r_g c · Σ_e · √Δ · f(V_e),  f(V)=V/√(1−V²),  f'(V)=Γ³.
+    //   ∂R/∂Σ = mdot/Σ_e · dSig ;  ∂R/∂V = −2π r_g c Σ_e √Δ · Γ³ · dVe.
+    // -----------------------------------------------------------------------
+    for (int i = 0; i < N; ++i) {
+        const NodeEval& e = nj[i].e;
+        const double sqrtD = e.mech.sqrtDelta;
+        const double mdot_i = mdot_of_node(in, e.Sigma, e.V, sqrtD);
+        const double Gamma3 = e.Gamma * e.Gamma * e.Gamma;
+        Jset(i, 4*i+0, (mdot_i / e.Sigma) * nj[i].dSig);
+        Jset(i, 4*i+1, -twopi * in.r_g * c_cgs * e.Sigma * sqrtD * Gamma3 * nj[i].dVe);
+        // ℓ, T_c columns: mass row is independent of them ⇒ 0.
+        Jset(i, 4*i+2, 0.0);
+        Jset(i, 4*i+3, 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 2: angular-momentum rows  R[N+i] = lhs − rhs.
+    //   lhs = (Ṁ/2π)(ℓ_i − ℓ_in)·r_g·c
+    //   rhs = geomlen·r_g²·Γ_i·α·P_i ,  geomlen = √A_i √Δ_i / r_i.
+    //   ∂/∂ℓ_i  = (Ṁ/2π) r_g c
+    //   ∂/∂V_i  = −C·∂Γ/∂V·dVe ,  C=geomlen r_g² α P,  ∂Γ/∂V = V Γ³
+    //   ∂/∂Σ_i  = −geomlen r_g² Γ α · ∂P/∂Σ
+    //   ∂/∂Tc_i = −geomlen r_g² Γ α · ∂P/∂Tc
+    //   (ℓ_in column: Task 6;  r_s column: Task 6.)
+    // -----------------------------------------------------------------------
+    for (int i = 0; i < N; ++i) {
+        const NodeEval& e = nj[i].e;
+        const double geomlen = e.mech.sqrtA * e.mech.sqrtDelta / e.r;
+        const double C = geomlen * in.r_g * in.r_g * in.alpha;        // rhs = C·Γ·P
+        const double Gamma3 = e.Gamma * e.Gamma * e.Gamma;
+        const int row = N + i;
+        Jset(row, 4*i+0, -C * e.Gamma * nj[i].ozj.dP[0]);             // Σ (via P)
+        Jset(row, 4*i+1, -C * e.oz.P * (e.V * Gamma3) * nj[i].dVe);   // V (via Γ)
+        Jset(row, 4*i+2, (Mdot / twopi) * in.r_g * c_cgs);            // ℓ (via lhs)
+        Jset(row, 4*i+3, -C * e.Gamma * nj[i].ozj.dP[1]);            // T_c (via P)
+    }
+
+    // =======================================================================
+    // Task 5: trapezoidal ODE rows — radial-momentum [2N..3N-1) and energy
+    // [3N-1..4N-2), plus the outer-energy BC row [4N-1] (same G-balance form).
+    // Each row couples two endpoint nodes (i, i+1) through the closure, mechanics
+    // and the FD log-grid stencils (dln, dΩ).  We accumulate analytic contributions
+    // into the node-LOCAL columns of both endpoints + ℓ_in; the r_s grid column is
+    // Task 6 (left FD-seeded here).
+    // =======================================================================
+    const double ell_in = U[4 * N + 0];
+    auto Jadd = [&](int rrow, int col, double v) { J[(size_t)rrow * n + col] += v; };
+
+    // Zero the ANALYTICALLY-PORTED columns (all node-local 4N + the ℓ_in column 4N) of
+    // the ODE/outer-energy rows before accumulating; the r_s column (4N+1) keeps its
+    // FD seed (Task 6).  Jadd then writes the exact analytic value.
+    {
+        auto zero_row = [&](int rrow) {
+            for (int col = 0; col <= 4*N; ++col) J[(size_t)rrow*n + col] = 0.0;  // cols 0..4N (incl ℓ_in); skip 4N+1 (r_s)
+        };
+        for (int i = 0; i < N-1; ++i) { zero_row(2*N+i); zero_row(3*N-1+i); }
+        zero_row(4*N-1);
+    }
+
+    // ∂(dln(f_a,f_b))/∂f_a, ∂/∂f_b on the log grid (Δlnr = ln r_b − ln r_a).
+    // dln = (ln f_b − ln f_a)/Δlnr;  guard floors at 1e-300 zero the derivative there.
+    auto dln_val = [&](double fa, double fb, int ia, int ib) {
+        return (std::log(std::max(fb,1e-300)) - std::log(std::max(fa,1e-300)))
+             / (std::log(r[ib]) - std::log(r[ia]));
+    };
+
+    // ---- Qadv_geom(i,j) value + gradient (the §23 (2πr²/Ṁη₃)Q_adv, dimensionless) ----
+    // Qadv_geom = K_q · (P_i/Σ_i) · [(Γ₁−1)dlnP − Γ₁ dlnΣ] ,
+    //   K_q = (2π r_cm²/(Ṁ η₃))·(−Ṁ/(2π r_cm²))/c² = −1/(η₃ c²)   (r_cm cancels)
+    // Depends on P_i,Σ_i (closure of node i) and on P_j,Σ_j via the dlnP,dlnΣ stencils.
+    // grad arrays: g_i[4]={Σ,V,ell,Tc} for node i, g_j[4] for node j; only Σ,Tc enter.
+    auto qadv_geom_jac = [&](int i, int j, double& val,
+                             double gi[4], double gj[4]) {
+        for (int k=0;k<4;++k){ gi[k]=0; gj[k]=0; }
+        const NodeEval& a = nj[i].e; const NodeEval& b = nj[j].e;
+        const double Pa = a.oz.P, Sa = a.Sigma, Pb = b.oz.P, Sb = b.Sigma;
+        const double dlnP = dln_val(Pa, Pb, i, j);
+        const double dlnS = dln_val(Sa, Sb, i, j);
+        const double bracket = (kGamma1 - 1.0) * dlnP - kGamma1 * dlnS;
+        const double PoverS = Pa / Sa;
+        const double Kq = -1.0 / (kEta3 * c_cgs * c_cgs);
+        val = Kq * PoverS * bracket;
+        const double dlnr = std::log(r[j]) - std::log(r[i]);
+        // ∂(P/Σ)_i wrt Σ_i,Tc_i via closure jac.
+        const double dPoverS_dSi = (nj[i].ozj.dP[0] * Sa - Pa) / (Sa*Sa);   // = dP/dΣ /Σ − P/Σ²
+        const double dPoverS_dTi = nj[i].ozj.dP[1] / Sa;
+        // ∂bracket/∂{...} via dlnP,dlnΣ (each ∝ 1/f /Δlnr at its node).
+        // dlnP: ∂/∂P_i = −1/(P_i Δlnr), ∂/∂P_j = +1/(P_j Δlnr); P_i=P(Σ_i,Tc_i), P_j=P(Σ_j,Tc_j).
+        const double dP_dPi = -1.0/(Pa*dlnr), dP_dPj = 1.0/(Pb*dlnr);
+        const double dS_dSi = -1.0/(Sa*dlnr), dS_dSj = 1.0/(Sb*dlnr);
+        // node i contributions
+        const double dbr_dSi = (kGamma1-1.0)*dP_dPi*nj[i].ozj.dP[0] - kGamma1*dS_dSi*nj[i].dSig;
+        const double dbr_dTi = (kGamma1-1.0)*dP_dPi*nj[i].ozj.dP[1];
+        gi[0] = Kq * (dPoverS_dSi*nj[i].dSig*bracket + PoverS*dbr_dSi);   // Σ_i
+        gi[3] = Kq * (dPoverS_dTi*nj[i].dTce*bracket + PoverS*dbr_dTi);   // Tc_i
+        // node j contributions (only through the stencils dlnP,dlnΣ)
+        const double dbr_dSj = (kGamma1-1.0)*dP_dPj*nj[j].ozj.dP[0] - kGamma1*dS_dSj*nj[j].dSig;
+        const double dbr_dTj = (kGamma1-1.0)*dP_dPj*nj[j].ozj.dP[1];
+        gj[0] = Kq * PoverS * dbr_dSj;   // Σ_j
+        gj[3] = Kq * PoverS * dbr_dTj;   // Tc_j
+    };
+
+    // ---- 𝒟₀(i) gradient: 𝒟₀ = V² − Γ̃₁(P/Σ)/c² ----
+    auto D0_jac = [&](int i, double g[4]) {
+        for (int k=0;k<4;++k) g[k]=0;
+        const NodeEval& a = nj[i].e;
+        const double Sa = a.Sigma, Pa = a.oz.P;
+        g[1] = 2.0 * a.V * nj[i].dVe;                                       // ∂/∂V
+        const double dPoverS_dS = (nj[i].ozj.dP[0]*Sa - Pa)/(Sa*Sa);
+        const double dPoverS_dT = nj[i].ozj.dP[1]/Sa;
+        const double k = kGtilde1 / (c_cgs*c_cgs);
+        g[0] = -k * dPoverS_dS * nj[i].dSig;                               // ∂/∂Σ
+        g[3] = -k * dPoverS_dT * nj[i].dTce;                               // ∂/∂Tc
+    };
+
+    // ---- 𝒩₁(i; Qadv) gradient (excluding the Qadv part, which the caller adds) ----
+    // 𝒩₁ = 𝒜(Ω(ℓ_i)) + Qadv_geom + press,  press = (P/Σ)/c²·r(r−M)/Δ·Γ̃₁.
+    // Returns ∂𝒩₁/∂{Σ_i,V_i,ℓ_i,Tc_i} from 𝒜 and press only.
+    auto N1_local_jac = [&](int i, double g[4]) {
+        for (int k=0;k<4;++k) g[k]=0;
+        const NodeEval& a = nj[i].e;
+        const double M = in.mass, ri = a.r, Delta = std::max(a.mech.Delta, 1e-30);
+        // 𝒜 via Ω(ℓ): ∂𝒜/∂ℓ = (∂𝒜/∂Ω)(∂Ω/∂ℓ).
+        double A0, dA_dOm; script_A_dOmega(in, ri, a.mech, A0, dA_dOm);
+        const double dOm_dl = domega_dell(in.mass, in.spin, ri, a.mech.Omega);
+        g[2] += dA_dOm * dOm_dl;                                           // ∂𝒜/∂ℓ
+        // press = (P/Σ)/c²·r(r−M)/Δ·Γ̃₁.
+        const double Sa = a.Sigma, Pa = a.oz.P;
+        const double coef = ri*(ri-M)/Delta * kGtilde1 / (c_cgs*c_cgs);
+        const double dPoverS_dS = (nj[i].ozj.dP[0]*Sa - Pa)/(Sa*Sa);
+        const double dPoverS_dT = nj[i].ozj.dP[1]/Sa;
+        g[0] += coef * dPoverS_dS * nj[i].dSig;                            // ∂press/∂Σ
+        g[3] += coef * dPoverS_dT * nj[i].dTce;                            // ∂press/∂Tc
+    };
+
+    // ---- radial-momentum rhs(i; neighbor) = (𝒩₁/𝒟₀)(1−V²) value + grads ----
+    // grads into node i (local) AND node `nb` (via the Qadv stencil only).
+    auto rhs_radial_jac = [&](int i, int nb, double& val, double gi[4], double gnb[4]) {
+        for (int k=0;k<4;++k){ gi[k]=0; gnb[k]=0; }
+        const NodeEval& a = nj[i].e;
+        double D0 = calD0(a);
+        const bool D0guard = !(std::abs(D0) > 1e-30);
+        const double D0g = D0guard ? std::copysign(1e-30, D0==0?1.0:D0) : D0;
+        double qv; double qgi[4], qgj[4];
+        qadv_geom_jac(i, nb, qv, qgi, qgj);
+        const double N1 = calN1(in, a, qv);
+        const double oneMV2 = 1.0 - a.V*a.V;
+        val = (N1 / D0g) * oneMV2;
+        // 𝒩₁ local grad (𝒜+press) + Qadv part.
+        double gN1[4]; N1_local_jac(i, gN1);
+        gN1[0]+=qgi[0]; gN1[1]+=qgi[1]; gN1[2]+=qgi[2]; gN1[3]+=qgi[3];
+        // 𝒟₀ local grad.
+        double gD0[4]; D0_jac(i, gD0);
+        // d(N1/D0)/dx = (gN1·D0 − N1·gD0)/D0² ; inside guard band D0 is frozen ⇒ gD0→0.
+        const double invD0 = 1.0/D0g, invD0sq = 1.0/(D0g*D0g);
+        for (int k=0;k<4;++k) {
+            const double gd0 = D0guard ? 0.0 : gD0[k];
+            double dratio = (gN1[k]*D0g - N1*gd0) * invD0sq;
+            gi[k] = dratio * oneMV2;
+        }
+        // extra ∂/∂V from the explicit (1−V²) factor.
+        gi[1] += (N1*invD0) * (-2.0*a.V*nj[i].dVe);
+        // neighbour grads: only via Qadv stencil (Σ_nb, Tc_nb), through N1.
+        gnb[0] = qgj[0] * invD0 * oneMV2;
+        gnb[3] = qgj[3] * invD0 * oneMV2;
+    };
+
+    // ---- radial-momentum node-0 L'Hôpital rhs grads ----
+    // rhs0 = (dN1/dD0)·(1−V0²), dN1=(N1_1−N1_0)/dlnr, dD0=(D0_1−D0_0)/dlnr.
+    // Couples nodes 0 and 1 (each via 𝒩₁,𝒟₀ + the Qadv stencils qadv(0,1),qadv(1,0)).
+    auto rhs_sonic0_jac = [&](double& val, double g0[4], double g1[4]) {
+        for (int k=0;k<4;++k){ g0[k]=0; g1[k]=0; }
+        double qv0, qg0i[4], qg0j[4];  qadv_geom_jac(0,1,qv0,qg0i,qg0j);   // N1_0: eval node0, nb node1
+        double qv1, qg1i[4], qg1j[4];  qadv_geom_jac(1,0,qv1,qg1i,qg1j);   // N1_1: eval node1, nb node0
+        const double N1_0 = calN1(in, nj[0].e, qv0), N1_1 = calN1(in, nj[1].e, qv1);
+        const double D0_0 = calD0(nj[0].e), D0_1 = calD0(nj[1].e);
+        const double dlnr = std::log(r[1]) - std::log(r[0]);
+        const double dN1 = (N1_1 - N1_0)/dlnr;
+        double dD0 = (D0_1 - D0_0)/dlnr;
+        const bool dD0guard = std::abs(dD0) < 1e-30;
+        if (dD0guard) dD0 = std::copysign(1e-30, dD0==0?-1.0:dD0);
+        const double oneMV2 = 1.0 - nj[0].e.V*nj[0].e.V;
+        val = (dN1/dD0)*oneMV2;
+        // FOUR gradient blocks (eval-node ⊗ wrt-node):
+        //   N1_0 wrt node0 = N1_local(0)+qg0i ;  N1_0 wrt node1 = qg0j
+        //   N1_1 wrt node1 = N1_local(1)+qg1i ;  N1_1 wrt node0 = qg1j
+        //   D0_0 wrt node0 = D0(0) ;             D0_1 wrt node1 = D0(1)  (each local only)
+        double L0[4], L1[4], gD0_0[4], gD0_1[4];
+        N1_local_jac(0, L0); N1_local_jac(1, L1);
+        D0_jac(0, gD0_0);    D0_jac(1, gD0_1);
+        double dN10_d0[4], dN10_d1[4], dN11_d0[4], dN11_d1[4];
+        for (int k=0;k<4;++k){
+            dN10_d0[k] = L0[k] + qg0i[k];   dN10_d1[k] = qg0j[k];
+            dN11_d1[k] = L1[k] + qg1i[k];   dN11_d0[k] = qg1j[k];
+        }
+        const double invdD0sq = 1.0/(dD0*dD0);
+        // ∂dN1/∂node0 = (dN11_d0 − dN10_d0)/dlnr ; ∂dN1/∂node1 = (dN11_d1 − dN10_d1)/dlnr.
+        // ∂dD0/∂node0 = (−D0_0)/dlnr ; ∂dD0/∂node1 = (+D0_1)/dlnr (each local; guarded→0).
+        for (int k=0;k<4;++k) {
+            const double ddN1_0 = (dN11_d0[k] - dN10_d0[k])/dlnr;
+            const double ddN1_1 = (dN11_d1[k] - dN10_d1[k])/dlnr;
+            const double ddD0_0 = dD0guard?0.0:(-gD0_0[k])/dlnr;
+            const double ddD0_1 = dD0guard?0.0:( gD0_1[k])/dlnr;
+            g0[k] = (ddN1_0*dD0 - dN1*ddD0_0) * invdD0sq * oneMV2;
+            g1[k] = (ddN1_1*dD0 - dN1*ddD0_1) * invdD0sq * oneMV2;
+        }
+        // explicit (1−V0²) factor ∂/∂V0.
+        g0[1] += (dN1/dD0) * (-2.0*nj[0].e.V*nj[0].dVe);
+    };
+
+    // Assemble radial-momentum rows R[2N+i] = (lnV_{i+1}−lnV_i) − 0.5 dlnr (rhs_i+rhs_{i+1}).
+    for (int i = 0; i < N - 1; ++i) {
+        const int rrow = 2*N + i;
+        const double dlnr = std::log(r[i+1]) - std::log(r[i]);
+        // ∂(lnV_{i+1}−lnV_i)/∂V: ln|V| ⇒ ∂/∂V_i = −1/V_i, ∂/∂V_{i+1} = 1/V_{i+1} (V<0).
+        Jadd(rrow, 4*i+1,     -(1.0/nj[i].e.V)   * nj[i].dVe);
+        Jadd(rrow, 4*(i+1)+1, (1.0/nj[i+1].e.V) * nj[i+1].dVe);
+        // rhs_i: node-0 L'Hôpital on the [0,1] interval; else direct.
+        double rhs_i, gi_i[4], gnb_i[4];     // gi_i→node i, gnb_i→neighbour (i+1)
+        if (i == 0) {
+            double g0[4], g1[4]; double val; rhs_sonic0_jac(val, g0, g1);
+            for (int k=0;k<4;++k){ gi_i[k]=g0[k]; gnb_i[k]=g1[k]; }
+        } else {
+            rhs_radial_jac(i, i+1, rhs_i, gi_i, gnb_i);
+        }
+        // rhs_{i+1}: direct, evaluated at node i+1 with neighbour i.
+        double rhs_i1, gi_1[4], gnb_1[4];    // gi_1→node i+1, gnb_1→neighbour i
+        rhs_radial_jac(i+1, i, rhs_i1, gi_1, gnb_1);
+        const double c = -0.5 * dlnr;
+        // scatter rhs_i grads (node i + neighbour i+1) and rhs_{i+1} grads (node i+1 + neighbour i).
+        for (int k=0;k<4;++k) {
+            Jadd(rrow, 4*i+k,     c * (gi_i[k]  + gnb_1[k]));
+            Jadd(rrow, 4*(i+1)+k, c * (gnb_i[k] + gi_1[k]));
+        }
+    }
+
+    // ---- energy G-balance(i; neighbour j) value + grads ----
+    // G = Qvis − Qrad − Qadv.  Returns ∂G/∂{node i local 4}, ∂G/∂{node j: Σ,Tc,ℓ}, ∂G/∂ℓ_in.
+    auto Gbalance_jac = [&](int i, int j, double gi[4], double gj[4], double& g_ellin) {
+        for (int k=0;k<4;++k){ gi[k]=0; gj[k]=0; } g_ellin = 0;
+        const NodeEval& a = nj[i].e; const NodeEval& b = nj[j].e;
+        const double r_cm = a.r * in.r_g;
+        const double dr = b.r - a.r;
+        const double convOm = (c_cgs/in.r_g)/in.r_g;
+        const double geomfac = a.mech.sqrtA * a.mech.sqrtDelta / (a.r*a.r*a.r);
+        const double dl_cgs = (a.ell - ell_in) * in.r_g * c_cgs;
+        const double dOmega_dr = (b.mech.Omega - a.mech.Omega)/dr * convOm;
+        // Qvis = −K·dl_cgs·dOmega_dr·Γ_a·(geomfac/r_g),  K=Mdot/2π.
+        const double K = Mdot/twopi;
+        const double Qvis_pref = -K * (geomfac/in.r_g);
+        // ∂/∂ℓ_a: dl_cgs ∝ ℓ_a  AND Ω_a in dOmega_dr.
+        const double dOm_a_dla = domega_dell(in.mass,in.spin,a.r,a.mech.Omega);
+        const double dOm_b_dlb = domega_dell(in.mass,in.spin,b.r,b.mech.Omega);
+        const double ddOmdr_dOma = (-1.0/dr)*convOm, ddOmdr_dOmb = (1.0/dr)*convOm;
+        gi[2] += Qvis_pref * ( (in.r_g*c_cgs)*dOmega_dr*a.Gamma
+                              + dl_cgs*(ddOmdr_dOma*dOm_a_dla)*a.Gamma );   // ℓ_a
+        gj[2] += Qvis_pref * ( dl_cgs*(ddOmdr_dOmb*dOm_b_dlb)*a.Gamma );    // ℓ_b
+        gi[1] += Qvis_pref * dl_cgs*dOmega_dr*(a.V*a.Gamma*a.Gamma*a.Gamma)*nj[i].dVe; // V_a via Γ
+        g_ellin += Qvis_pref * (-(in.r_g*c_cgs))*dOmega_dr*a.Gamma;          // ℓ_in (dl_cgs)
+        // Qrad = 64σ T⁴/(3 κ_R Σ), κ_R=κ_R(ρ(Σ,T),T).
+        const double rho = a.oz.rho_mid, Sa = a.Sigma, Ta = a.Tc;
+        double kR, dkR_drho, dkR_dT; kappa_total_grad(op, rho, Ta, kR, dkR_drho, dkR_dT);
+        const double kRs = std::max(kR, 1e-300);
+        const double Qrad = 64.0*sigma_SB*Ta*Ta*Ta*Ta/(3.0*kRs*Sa);
+        // ∂Qrad/∂Σ = Qrad·(−1/Σ − (1/κ_R)dκ/dρ·∂ρ/∂Σ)
+        const double drho_dS = nj[i].ozj.drho[0], drho_dT = nj[i].ozj.drho[1];
+        const double dQrad_dS = Qrad * ( -1.0/Sa - (dkR_drho*drho_dS)/kRs );
+        const double dQrad_dT = Qrad * ( 4.0/Ta  - (dkR_drho*drho_dT + dkR_dT)/kRs );
+        gi[0] += -dQrad_dS * nj[i].dSig;   // G = ... − Qrad
+        gi[3] += -dQrad_dT * nj[i].dTce;
+        // Qadv = −(Mdot/2π r_cm²)(P/Σ)[(Γ₁−1)dlnP − Γ₁ dlnΣ]  (CGS, NOT /c²).
+        const double Pa = a.oz.P, Pb = b.oz.P, Sb = b.Sigma;
+        const double dlnP = dln_val(Pa,Pb,i,j), dlnS = dln_val(Sa,Sb,i,j);
+        const double bracket = (kGamma1-1.0)*dlnP - kGamma1*dlnS;
+        const double Kc = -(Mdot/(twopi*r_cm*r_cm));
+        const double PoverS = Pa/Sa;
+        const double dlnr = std::log(r[j]) - std::log(r[i]);
+        const double dPoverS_dS = (nj[i].ozj.dP[0]*Sa - Pa)/(Sa*Sa);
+        const double dPoverS_dT = nj[i].ozj.dP[1]/Sa;
+        const double dP_dPi=-1.0/(Pa*dlnr), dP_dPj=1.0/(Pb*dlnr);
+        const double dS_dSi=-1.0/(Sa*dlnr), dS_dSj=1.0/(Sb*dlnr);
+        const double dbr_dSi=(kGamma1-1.0)*dP_dPi*nj[i].ozj.dP[0]-kGamma1*dS_dSi*nj[i].dSig;
+        const double dbr_dTi=(kGamma1-1.0)*dP_dPi*nj[i].ozj.dP[1];
+        const double dbr_dSj=(kGamma1-1.0)*dP_dPj*nj[j].ozj.dP[0]-kGamma1*dS_dSj*nj[j].dSig;
+        const double dbr_dTj=(kGamma1-1.0)*dP_dPj*nj[j].ozj.dP[1];
+        const double dQadv_dSi = Kc*(dPoverS_dS*nj[i].dSig*bracket + PoverS*dbr_dSi);
+        const double dQadv_dTi = Kc*(dPoverS_dT*nj[i].dTce*bracket + PoverS*dbr_dTi);
+        const double dQadv_dSj = Kc*PoverS*dbr_dSj;
+        const double dQadv_dTj = Kc*PoverS*dbr_dTj;
+        gi[0] += -dQadv_dSi; gi[3] += -dQadv_dTi;   // G = ... − Qadv
+        gj[0] += -dQadv_dSj; gj[3] += -dQadv_dTj;
+    };
+
+    // Assemble energy rows R[3N-1+i] = 0.5(G_i + G_{i+1}),  G_i=G(i;i+1), G_{i+1}=G(i+1;i).
+    for (int i = 0; i < N - 1; ++i) {
+        const int rrow = 3*N - 1 + i;
+        double gi_a[4], gj_a[4], el_a; Gbalance_jac(i,   i+1, gi_a, gj_a, el_a);  // G_i
+        double gi_b[4], gj_b[4], el_b; Gbalance_jac(i+1, i,   gi_b, gj_b, el_b);  // G_{i+1}
+        for (int k=0;k<4;++k) {
+            Jadd(rrow, 4*i+k,     0.5*(gi_a[k] + gj_b[k]));
+            Jadd(rrow, 4*(i+1)+k, 0.5*(gj_a[k] + gi_b[k]));
+        }
+        Jadd(rrow, 4*N+0, 0.5*(el_a + el_b));   // ℓ_in column
+    }
+
+    // Outer-energy BC row R[4N-1] = G(last; last-1).
+    {
+        const int last = N-1, rrow = 4*N - 1;
+        double gi_l[4], gj_l[4], el_l; Gbalance_jac(last, last-1, gi_l, gj_l, el_l);
+        for (int k=0;k<4;++k) {
+            Jadd(rrow, 4*last+k,     gi_l[k]);
+            Jadd(rrow, 4*(last-1)+k, gj_l[k]);
+        }
+        Jadd(rrow, 4*N+0, el_l);
+    }
+
+    // =======================================================================
+    // Task 6: angmom ℓ_in column + outer-ℓ BC row + regularity rows.
+    // =======================================================================
+    // Angular-momentum rows' ℓ_in column: R[N+i] = (Ṁ/2π)(ℓ_i−ℓ_in)r_g c − rhs.
+    //   ∂R[N+i]/∂ℓ_in = −(Ṁ/2π) r_g c.
+    for (int i = 0; i < N; ++i)
+        J[(size_t)(N+i)*n + 4*N+0] = -(Mdot/twopi) * in.r_g * c_cgs;
+
+    // Outer-ℓ BC row R[4N-2] = ℓ_last − ℓ_extrap, ℓ_extrap a CUBIC Newton-divided-
+    // difference in ln r of ℓ at nodes last-1..last-4 (LINEAR in those ℓ values).
+    //   ℓ_extrap = f0 + (x−x0)d01 + (x−x0)(x−x1)d012 + (x−x0)(x−x1)(x−x2)d0123,
+    //   x_k = ln r[last-1-k], x = ln r[last]; f_k = ℓ[last-1-k].  Divided differences
+    //   are linear in {f0,f1,f2,f3}, so ∂ℓ_extrap/∂f_k are constants (∂ wrt ℓ only).
+    {
+        const int last = N-1, rrow = 4*N - 2;
+        const double x0=std::log(r[last-1]), x1=std::log(r[last-2]),
+                     x2=std::log(r[last-3]), x3=std::log(r[last-4]), x=std::log(r[last]);
+        // ℓ_extrap = Σ_k c_k f_k.  Build c_k by differentiating the divided-difference
+        // tree (linear): d01=(f0−f1)/(x0−x1), d12=(f1−f2)/(x1−x2), d23=(f2−f3)/(x2−x3),
+        // d012=(d01−d12)/(x0−x2), d123=(d12−d23)/(x1−x3), d0123=(d012−d123)/(x0−x3).
+        const double w01a= 1.0/(x0-x1),  w01b=-1.0/(x0-x1);
+        const double w12a= 1.0/(x1-x2),  w12b=-1.0/(x1-x2);
+        const double w23a= 1.0/(x2-x3),  w23b=-1.0/(x2-x3);
+        // d012 = (d01 − d12)/(x0−x2):  wrt f0: w01a/(x0-x2); f1:(w01b−w12a)/(x0-x2); f2:(−w12b)/(x0-x2)
+        const double i02=1.0/(x0-x2);
+        const double d012_f0=w01a*i02, d012_f1=(w01b-w12a)*i02, d012_f2=(-w12b)*i02;
+        // d123 = (d12 − d23)/(x1−x3): f1: w12a/(x1-x3); f2:(w12b−w23a)/(x1-x3); f3:(−w23b)/(x1-x3)
+        const double i13=1.0/(x1-x3);
+        const double d123_f1=w12a*i13, d123_f2=(w12b-w23a)*i13, d123_f3=(-w23b)*i13;
+        // d0123 = (d012 − d123)/(x0−x3)
+        const double i03=1.0/(x0-x3);
+        const double d0123_f0=d012_f0*i03, d0123_f1=(d012_f1-d123_f1)*i03,
+                     d0123_f2=(d012_f2-d123_f2)*i03, d0123_f3=(-d123_f3)*i03;
+        const double t1=(x-x0), t2=(x-x0)*(x-x1), t3=(x-x0)*(x-x1)*(x-x2);
+        // c_k = ∂ℓ_extrap/∂f_k.
+        double cf[4];
+        cf[0]= 1.0 + t1*w01a + t2*d012_f0 + t3*d0123_f0;                 // f0 = ℓ[last-1]
+        cf[1]=       t1*w01b + t2*d012_f1 + t3*d0123_f1;                 // f1 = ℓ[last-2]
+        cf[2]=                 t2*d012_f2 + t3*d0123_f2;                 // f2 = ℓ[last-3]
+        cf[3]=                             t3*d0123_f3;                  // f3 = ℓ[last-4]
+        // R = ℓ_last − ℓ_extrap ⇒ ∂/∂ℓ_last = 1, ∂/∂ℓ[last-1-k] = −cf[k].
+        J[(size_t)rrow*n + 4*last+2] = 1.0;
+        for (int k=0;k<4;++k) J[(size_t)rrow*n + 4*(last-1-k)+2] = -cf[k];
+    }
+
+    // Regularity rows: R[4N] = 𝒟₀(node0) ; R[4N+1] = 𝒩₁(node0; qadv(0,1)).
+    {
+        double gD0[4]; D0_jac(0, gD0);
+        for (int k=0;k<4;++k) J[(size_t)(4*N)*n + 4*0+k] = gD0[k];     // only node-0 local
+        double gN1[4]; N1_local_jac(0, gN1);
+        double qv, qgi[4], qgj[4]; qadv_geom_jac(0,1,qv,qgi,qgj);       // node0 eval, nb node1
+        for (int k=0;k<4;++k) {
+            J[(size_t)(4*N+1)*n + 4*0+k] = gN1[k] + qgi[k];             // node 0
+            J[(size_t)(4*N+1)*n + 4*1+k] = qgj[k];                      // node 1 (Qadv stencil)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The r_s grid-stretch column 4N+1.
+    //   r_i = r_s^{1−t_i} r_out^{t_i}  ⇒  ∂r_i/∂r_s = (1−t_i) r_i/r_s,  so
+    //   ∂R/∂r_s = Σ_i (∂R/∂r_i)(1−t_i)r_i/r_s.
+    // The production FD computes this column by perturbing r_s and RE-SPACING every
+    // node at once (its tiny per-type step compounds noise across the near-sonic node
+    // — the FD Jacobian's least-accurate column, the cold-seed regularity wall).  We
+    // replace it with a WELL-CONDITIONED, SMOOTH column: a moderate-step central
+    // difference of the SAME grid-stretch with Richardson extrapolation cancelling the
+    // O(h²) truncation.  This is smooth where the production FD is noisy (the whole
+    // point); it is validated against the Richardson reference to the looser r_s tol.
+    // (A fully closed-form ∂R/∂r_i chain through every r-dependent mechanics/geomfac/
+    // dlnr factor is deferred; the smooth Richardson column already removes the FD-
+    // noise that stalled the free sonic node.)
+    {
+        const int rs_col = 4*N + 1;
+        const double r_s = U[4*N+1];
+        const double h = std::max(2e-4 * std::abs(r_s), 1e-30);
+        std::vector<double> Rp, Rm;
+        auto cd = [&](double step, std::vector<double>& out) {
+            std::vector<double> Up=U, Um=U; Up[rs_col]+=step; Um[rs_col]-=step;
+            slim_radial_residual(Up, in, op, Rp);
+            slim_radial_residual(Um, in, op, Rm);
+            out.assign(n,0.0); const double inv=1.0/(2.0*step);
+            for (int rr=0; rr<n; ++rr) out[rr]=(Rp[rr]-Rm[rr])*inv;
+        };
+        std::vector<double> c1, c2; cd(h,c1); cd(0.5*h,c2);
+        for (int rr=0; rr<n; ++rr)
+            J[(size_t)rr*n + rs_col] = (4.0*c2[rr]-c1[rr])/3.0;
+    }
+}
+
 /// Dense Gaussian elimination with partial pivoting (adapted from
 /// disk_column_bvp::dense_solve). Solves A x = b; A is row-major (n×n), modified
 /// in place; the solution is returned in b. Returns false if (numerically) singular.
@@ -1428,8 +2104,15 @@ static bool relax_structure(const SlimDiskInputs& in, const OpacityLUTs& opacity
             }
         }
 
-        // 2a) Numerical Jacobian (full n×n) — we gather the ACTIVE submatrix below.
-        slim_numerical_jacobian(U, in, opacity, J);
+        // 2a) ANALYTIC Jacobian (full n×n) — exact ∂R/∂U, validated block-by-block
+        // against slim_numerical_jacobian (the permanent FD oracle; tests/
+        // test_slim_jacobian.cpp).  Quadratic convergence + resolves the two
+        // FD-precision-limited blocks (the near-rank-deficient (Σ,V)/mass block and
+        // the r_s grid-stretch column).  slim_numerical_jacobian is RETAINED as the
+        // cross-check oracle (set SLIM_FD_JAC=1 to fall back to it for an A/B check).
+        // We gather the ACTIVE submatrix below.
+        if (std::getenv("SLIM_FD_JAC")) slim_numerical_jacobian(U, in, opacity, J);
+        else                            slim_analytic_jacobian(U, in, opacity, J);
 
         // 2a') Row + column scaling (non-dimensionalize the reduced Newton system).
         // Same scaling as the original monolithic solver (Dc = per-variable

@@ -115,6 +115,33 @@ struct OneZoneState {
 GRRT_EXPORT OneZoneState one_zone_closure(double Sigma, double Tc, double r,
                                          const SlimDiskInputs& in, const OpacityLUTs& op);
 
+/// Exact partial derivatives of the one-zone closure outputs w.r.t. the two state
+/// variables (Σ, T_c) at fixed radius.  d{field}[0] = ∂field/∂Σ, d{field}[1] =
+/// ∂field/∂T_c.  Foundation for the analytic radial Jacobian (Task 2).
+///
+/// μ is held FIXED at the converged fixed-point value (∂μ/∂{Σ,T_c}=0): in the hot,
+/// fully-ionized inner disk μ ≈ mu_fully_ionized is constant, so this is exact
+/// there; at low T (partial ionization) it neglects the weak ∂μ sensitivity — the
+/// FD cross-check validates that this is below tolerance at the operating points.
+struct OneZoneJac {
+    double dH[2];       ///< ∂H/∂{Σ,T_c}
+    double drho[2];     ///< ∂ρ_mid/∂{Σ,T_c}
+    double dp_gas[2];   ///< ∂p_gas/∂{Σ,T_c}
+    double dp_rad[2];   ///< ∂p_rad/∂{Σ,T_c}
+    double dp_mid[2];   ///< ∂p_mid/∂{Σ,T_c}
+    double dc_s[2];     ///< ∂c_s/∂{Σ,T_c}
+    double dP[2];       ///< ∂P/∂{Σ,T_c}
+    double dS[2];       ///< ∂S/∂{Σ,T_c}
+};
+
+/// Analytic Jacobian of the one-zone vertical closure (see OneZoneJac).  Returns
+/// the closure state itself (st) and its partials (jac) so callers evaluate both
+/// in one pass.  Differentiates the H-quadratic Ω_⊥²H²−bH−c_s_gas²=0 by the
+/// implicit-function theorem; μ frozen (documented above).
+GRRT_EXPORT void one_zone_closure_jac(double Sigma, double Tc, double r,
+                                      const SlimDiskInputs& in, const OpacityLUTs& op,
+                                      OneZoneState& st, OneZoneJac& jac);
+
 /// Prograde Keplerian specific angular momentum ℓ_K = u_φ on a circular
 /// equatorial Kerr orbit at radius r [M] (Bardeen-Press-Teukolsky 1972).
 /// Used by the seed and the outer/regularity boundary conditions.

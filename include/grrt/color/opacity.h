@@ -50,6 +50,13 @@ struct OpacityLUTs {
     /// Default opacity-derivative supplier for the column-BVP Newton Jacobian.
     GRRT_EXPORT void kappa_ross_with_grad(double rho_cgs, double T,
         double& kR, double& dkR_dlnrho, double& dkR_dlnT) const;
+
+    /// Mean molecular weight and its logarithmic gradients at (rho_cgs, T), via
+    /// central finite differences on the log-spaced table (same edge-aware stencil
+    /// as kappa_ross_with_grad). d/dlnrho and d/dlnT are dimensionless; convert to
+    /// dmu/drho = (d/dlnrho)/rho. Feeds the analytic one-zone closure derivative.
+    GRRT_EXPORT void mu_with_grad(double rho_cgs, double T,
+        double& mu, double& dmu_dlnrho, double& dmu_dlnT) const;
 };
 
 GRRT_EXPORT OpacityLUTs build_opacity_luts(double rho_min, double rho_max,

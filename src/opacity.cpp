@@ -427,4 +427,25 @@ void OpacityLUTs::kappa_ross_with_grad(double rho_cgs, double T,
                      [&](double t) { return lookup_kappa_ross(rho_cgs, t); });
 }
 
+void OpacityLUTs::mu_with_grad(double rho_cgs, double T,
+        double& mu, double& dmu_dlnrho, double& dmu_dlnT) const {
+    mu = lookup_mu(rho_cgs, T);
+    constexpr double h = 0.01;            // step in natural-log space
+    const double ln10 = std::log(10.0);
+    // Edge-aware 2-point log-slope, identical stencil to kappa_ross_with_grad: the
+    // mu LUT is bilinear in (log10 rho, log10 T), so this returns the local cell
+    // slope (matching the central-difference the FD Jacobian sees away from edges).
+    auto dln = [&](double lx, double lo, double hi, auto eval) -> double {
+        const double step = h / ln10;
+        double a = lx - step, b = lx + step;
+        if (a < lo)      { a = lo;  b = lo + 2.0 * step; }
+        else if (b > hi) { b = hi;  a = hi - 2.0 * step; }
+        return (eval(std::pow(10.0, b)) - eval(std::pow(10.0, a))) / ((b - a) * ln10);
+    };
+    dmu_dlnrho = dln(std::log10(rho_cgs), log_rho_min, log_rho_max,
+                     [&](double r) { return lookup_mu(r, T); });
+    dmu_dlnT   = dln(std::log10(T), log_T_min, log_T_max,
+                     [&](double t) { return lookup_mu(rho_cgs, t); });
+}
+
 } // namespace grrt

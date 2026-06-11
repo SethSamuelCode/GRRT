@@ -169,11 +169,38 @@ target_link_libraries(test-column-bvp PRIVATE grrt)
 add_executable(test-slim-disk-radial tests/test_slim_disk_radial.cpp)
 target_link_libraries(test-slim-disk-radial PRIVATE grrt)
 
+# Analytic-Jacobian vs FD cross-check (the permanent correctness oracle for the
+# analytic slim-disk Jacobian).  #includes slim_disk_radial.cpp + opacity.cpp
+# directly to reach the anonymous-namespace helpers (slim_numerical_jacobian /
+# slim_analytic_jacobian), the same pattern as the slim-* probe tools; does NOT
+# link grrt to avoid duplicate symbols.
+add_executable(test-slim-jacobian tests/test_slim_jacobian.cpp)
+target_include_directories(test-slim-jacobian PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
 # TEMPORARY DIAGNOSTIC PROBE (slim-disk basin-vs-noise verdict). Includes the
 # slim/opacity .cpp directly to reach internal helpers; does NOT link grrt to
 # avoid duplicate symbols. Safe to delete along with tools/slim_diag_probe.cpp.
 add_executable(slim-diag-probe tools/slim_diag_probe.cpp)
 target_include_directories(slim-diag-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# TEMPORARY DIAGNOSTIC PROBE (spin-walk first-rung stall: warm-start re-projection
+# vs a>0 inner-solve basin). Same include-the-cpp pattern as slim-diag-probe.
+# Safe to delete along with tools/slim_spinwalk_probe.cpp.
+add_executable(slim-spinwalk-probe tools/slim_spinwalk_probe.cpp)
+target_include_directories(slim-spinwalk-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# TEMPORARY DIAGNOSTIC PROBE (cold-seed spin sweep: at what spin does a fresh
+# cold thin-disk seed stop converging?). Same include-the-cpp pattern.
+# Safe to delete along with tools/slim_coldseed_sweep.cpp.
+add_executable(slim-coldseed-sweep tools/slim_coldseed_sweep.cpp)
+target_include_directories(slim-coldseed-sweep PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# TEMPORARY DIAGNOSTIC PROBE (warm-start Mdot-continuation sweep: does carrying U
+# warm across a fine f_Edd ladder cross the Eddington regularity wall where the
+# cold seed fails?). Same include-the-cpp pattern.
+# Safe to delete along with tools/slim_warmstart_sweep.cpp.
+add_executable(slim-warmstart-sweep tools/slim_warmstart_sweep.cpp)
+target_include_directories(slim-warmstart-sweep PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
 # TEMPORARY full-target probe (a=0.998, f_Edd≈0.9). Links grrt. Safe to delete
 # along with tools/slim_full_target_probe.cpp.
