@@ -427,6 +427,13 @@ struct SolveBudget {
 // nullptr when no solve is active; relax_structure tolerates that (no-op budget).
 SolveBudget* g_budget = nullptr;
 
+// Return a copy of `in` with mdot overridden (arclength continuation promotes Ṁ to
+// an unknown; the residual/Jacobian read in.mdot, so each augmented evaluation rebuilds
+// the inputs at the current continuation Ṁ).
+static inline SlimDiskInputs in_with_mdot(const SlimDiskInputs& in, double mdot) {
+    SlimDiskInputs out = in; out.mdot = mdot; return out;
+}
+
 struct NodeMech {
     double Delta, sqrtDelta, A, sqrtA;
     double Omega;          // orbital Ω [geometric 1/M] from ℓ
@@ -1662,6 +1669,145 @@ static bool dense_solve(std::vector<double>& A, std::vector<double>& b, int n) {
     return true;
 }
 
+// ===========================================================================
+// Task 1 (arclength continuation): ∂R/∂Ṁ column  (R_Mdot, length 4N+2).
+// ===========================================================================
+// Pseudo-arclength continuation promotes the accretion rate Ṁ (= in.mdot) to a
+// CONTINUATION UNKNOWN, so the bordered augmented system needs the residual's
+// sensitivity to Ṁ at FIXED state U.  Ṁ enters slim_radial_residual ONLY through
+// the local `Mdot = in.mdot` (it is the SAME scalar everywhere the residual reads
+// it), via:
+//   • the mass rows  R[i] = mdot_of_node(Σ_i,V_i,√Δ_i) − Ṁ      ⇒ ∂R[i]/∂Ṁ = −1,
+//   • the Q_vis / Q_adv prefactors in the energy rows, the radial-momentum 𝒩₁
+//     (its (2πr²/(Ṁη₃))Q_adv term — note Ṁ cancels analytically there), and the
+//     viscous/advective heating of the outer-energy BC + the 𝒩₁ regularity row.
+// Because it is ONE column we use a central finite difference on in.mdot — cheap
+// and adequate (the plan explicitly permits FD here; the EXACT analytic Jacobian
+// stays in the augmented system's J block, where FD noise at the fold is the issue
+// the analytic Jacobian was built to remove).  The mass-row entries come out at the
+// exact analytic −1 (the FD of a term linear in Ṁ is exact to round-off); the
+// energy/𝒩₁ rows pick up their Ṁ-prefactor sensitivities.
+//
+// Returns R_Mdot[row] = ∂R[row]/∂Ṁ.  Uses a relative step on in.mdot with an
+// absolute floor so a tiny Ṁ never collapses the step to round-off.
+static void slim_R_Mdot_column(const std::vector<double>& U, const SlimDiskInputs& in,
+                               const OpacityLUTs& op, std::vector<double>& R_Mdot) {
+    const int N = std::max(in.n_nodes, 4);
+    const int n = 4 * N + 2;
+    const double h = std::max(1e-6 * std::abs(in.mdot), 1e-300);
+    SlimDiskInputs in_p = in, in_m = in;
+    in_p.mdot = in.mdot + h;
+    in_m.mdot = in.mdot - h;
+    std::vector<double> Rp, Rm;
+    slim_radial_residual(U, in_p, op, Rp);
+    slim_radial_residual(U, in_m, op, Rm);
+    R_Mdot.assign(n, 0.0);
+    const double inv = 1.0 / (2.0 * h);
+    for (int row = 0; row < n; ++row) R_Mdot[row] = (Rp[row] - Rm[row]) * inv;
+}
+
+// ===========================================================================
+// Task 2 (arclength continuation): bordered augmented system + tangent.
+// ===========================================================================
+// The continuation unknown is W = (U, Ṁ), length m = 4N+3 (U is the full 4N+2
+// state INCLUDING ℓ_in at 4N and r_s at 4N+1, plus Ṁ as the last component).  The
+// residual map R(W) has 4N+2 rows; its Jacobian w.r.t. W is the BORDERED matrix
+//   Jw = [ J  |  R_Mdot ]            ( (4N+2) × (4N+3) )
+// with J = slim_analytic_jacobian (the EXACT analytic Jacobian — the enabler) and
+// R_Mdot = ∂R/∂Ṁ (Task 1).
+//
+// TANGENT (U̇, Ṁ̇):  the null vector of Jw, i.e. J·U̇ + R_Mdot·Ṁ̇ = 0, normalized to
+// ‖U̇‖²+Ṁ̇²=1 and oriented to continue the previous direction.  At a fold J is
+// SINGULAR (that is the turning point), so we never invert J alone.  Instead we
+// solve the SQUARE bordered system
+//   [[ J,        R_Mdot ],   [ U̇  ]   [ 0 ]
+//    [ t_prevᵀ,  ṁ_prev ]] · [ Ṁ̇ ] = [ 1 ]
+// whose last row is the previous tangent (a generic vector for the first call).
+// This augmented matrix stays NONSINGULAR through the fold (Keller's theorem), so a
+// single dense_solve yields the raw tangent; we then normalize and orient it.  The
+// sign flip of Ṁ̇ at the fold (Ṁ decreasing through the unstable segment) is exactly
+// the mechanism that lets the trace go AROUND the turning point.
+//
+// `t_prev` (length m) seeds the bordering row + the orientation; pass the previous
+// accepted tangent.  For the FIRST tangent pass a vector dominated by the Ṁ̇
+// component (e.g. all-zero except the last = 1) so the initial direction increases
+// Ṁ.  Returns false only if the bordered system is genuinely singular (degenerate).
+//
+// SCALED normalization: the raw state spans ~33 decades (Σ~1e4, V~1e-6, T_c~1e6,
+// Ṁ~1e18), so a RAW unit tangent would be dominated by the largest component and the
+// arclength step would barely move the physically important variables (incl. Ṁ).  We
+// therefore normalize in a SCALED metric: ‖t‖²_w ≡ Σ (t_i / w_i)² = 1, with w_i = the
+// per-variable column magnitude (the SAME non-dimensionalization the Newton solve
+// uses).  The returned tangent is in RAW component units but unit-normed under w; the
+// caller's predictor and Keller arclength row use the SAME weights w (output param) so
+// the parametrization is balanced across all components including Ṁ.
+static void slim_arclength_weights(const std::vector<double>& U, double Mdot,
+                                   int N, std::vector<double>& w) {
+    const int n = 4 * N + 2, m = n + 1;
+    double mSig=0,mV=0,mEll=0,mT=0;
+    for (int i=0;i<N;++i){ mSig=std::max(mSig,std::abs(U[4*i+0])); mV=std::max(mV,std::abs(U[4*i+1]));
+                           mEll=std::max(mEll,std::abs(U[4*i+2])); mT=std::max(mT,std::abs(U[4*i+3])); }
+    mSig=std::max(mSig,1e-30); mV=std::max(mV,1e-30); mEll=std::max(mEll,1e-30); mT=std::max(mT,1.0);
+    w.assign(m,1.0);
+    // The arclength norm is ‖t‖²_w = Σ_state (t_i/w_i)² + (t_Ṁ/w_Ṁ)².  There are n≈4N
+    // STATE DOF but only ONE Ṁ DOF, so if each state weight = its bare magnitude the
+    // state sum (n terms) swamps the single Ṁ term and the continuation barely advances
+    // in Ṁ (it wiggles the structure at fixed f_Edd and the Ṁ̇ orientation goes sign-
+    // noisy).  We INFLATE the state weights by a factor C·√n so the AGGREGATE state
+    // contribution becomes COMPARABLE to (slightly below) the single Ṁ term: then Ṁ
+    // carries roughly HALF the arclength metric and each Keller step makes genuine Ṁ
+    // progress (Δf_Edd ~ a few % per unit ds), while the state still carries enough of
+    // the metric to let the tangent ROTATE through the turning point (the whole point of
+    // arclength vs Ṁ-marching).  C>1 because the tangent concentrates in a FEW critical
+    // state directions, so the aggregate state norm exceeds the equal-spread mean; C≈4
+    // empirically puts the Ṁ fraction near 0.5 at the slim-disk operating points.
+    const double sw = 20.0 * std::sqrt((double)n);   // state-weight inflation (C·√n)
+    for (int i=0;i<N;++i){ w[4*i+0]=mSig*sw; w[4*i+1]=mV*sw; w[4*i+2]=mEll*sw; w[4*i+3]=mT*sw; }
+    w[4*N+0]=std::max(std::abs(U[4*N+0]),1e-30)*sw;   // ℓ_in
+    w[4*N+1]=std::max(std::abs(U[4*N+1]),1e-30)*sw;   // r_s
+    w[n]    =std::max(std::abs(Mdot),1e-300);          // Ṁ (single DOF, no inflation)
+}
+static bool slim_arclength_tangent(const std::vector<double>& U, const SlimDiskInputs& in,
+                                   const OpacityLUTs& op, const std::vector<double>& t_prev,
+                                   std::vector<double>& tangent) {
+    const int N = std::max(in.n_nodes, 4);
+    const int n = 4 * N + 2;     // residual / U length
+    const int m = n + 1;         // augmented unknown length (U + Ṁ)
+
+    std::vector<double> J, R_Mdot;
+    slim_analytic_jacobian(U, in, op, J);
+    slim_R_Mdot_column(U, in, op, R_Mdot);
+
+    // Build the bordered (m×m) matrix A and rhs b = [0…0, 1].
+    //   rows 0..n-1 : [ J[row][:]  R_Mdot[row] ]
+    //   row  n      : [ t_prev[0..n-1]          t_prev[n] ]
+    std::vector<double> A((size_t)m * m, 0.0), b(m, 0.0);
+    for (int row = 0; row < n; ++row) {
+        for (int col = 0; col < n; ++col) A[(size_t)row * m + col] = J[(size_t)row * n + col];
+        A[(size_t)row * m + n] = R_Mdot[row];
+    }
+    for (int col = 0; col < m; ++col) A[(size_t)n * m + col] = t_prev[col];
+    b[n] = 1.0;
+
+    if (!dense_solve(A, b, m)) return false;   // genuinely degenerate
+
+    // b now holds the raw (un-normalized) tangent.  Normalize in the SCALED metric
+    // ‖t‖²_w = Σ (t_i/w_i)² = 1 so all components contribute comparably.
+    std::vector<double> w; slim_arclength_weights(U, in.mdot, N, w);
+    double nrm = 0.0; for (int i=0;i<m;++i){ const double s=b[i]/w[i]; nrm += s*s; }
+    nrm = std::sqrt(nrm);
+    if (!(nrm > 0.0)) return false;
+    for (double& v : b) v /= nrm;
+
+    // Orient to continue the previous direction (scaled dot prev·new > 0).  For the
+    // first call t_prev seeds the direction, so this aligns the very first tangent.
+    double dot = 0.0; for (int i = 0; i < m; ++i) dot += (t_prev[i]/w[i]) * (b[i]/w[i]);
+    if (dot < 0.0) for (double& v : b) v = -v;
+
+    tangent.swap(b);
+    return true;
+}
+
 /// Characteristic per-group residual scales, derived from the STATE and INPUTS
 /// (never from the residual itself), so the merit genuinely → 0 as R → 0.
 struct GroupScales { double mass, ang, rad, ene, bc_ell, bc_T, reg_D0, reg_N1; };
@@ -2737,6 +2883,249 @@ static std::vector<double> warm_reproject_spin(const std::vector<double>& U_old,
     return U;
 }
 
+// ===========================================================================
+// Task 3 (arclength continuation): augmented predictor-corrector.
+// ===========================================================================
+// The corrector Newton-solves the AUGMENTED square system in W = (U, Ṁ) (length
+// m = 4N+3):
+//   rows 0..4N+1 :  R(U,Ṁ) = 0            (the FULL §23 residual — BOTH regularity
+//                                           rows 𝒟₀(r_s)=0 AND 𝒩₁(r_s)=0 are kept,
+//                                           so ℓ_in and r_s are solved JOINTLY and
+//                                           the sonic regularity stays satisfied —
+//                                           NO separate outer ℓ_in bracket here).
+//   row  4N+2    :  N ≡ (U−U₀)·U̇₀ + (Ṁ−Ṁ₀)·Ṁ̇₀ − Δs = 0   (Keller arclength row)
+// with the augmented Jacobian
+//   A = [[ J,    R_Mdot ],          (J = slim_analytic_jacobian — EXACT, the enabler)
+//        [ U̇₀ᵀ,  Ṁ̇₀    ]]
+// the SAME bordered matrix as the tangent solve.  This is the plan's documented
+// choice: ℓ_in is a full state component pinned by the 𝒩₁ regularity row, solved
+// jointly in the augmented Newton (simplest route that keeps sonic regularity).
+//
+// We re-use relax_structure's proven machinery, adapted to the FULL (no excluded
+// row/col) augmented system:
+//   • row + column SCALING (non-dimensionalize the 33-decade-spread Jacobian),
+//   • Levenberg-Marquardt with the Nielsen GAIN-RATIO accept/reject + μ adaptation,
+//   • a FEASIBILITY line search (Σ>0, T_c>0, |V|<1, r_s∈(r_in,r_out), Ṁ>0),
+//   • the same Σ-outlier DE-GLITCH between accepted steps.
+// The arclength row carries its own scale (Δs), and Ṁ gets a column scale = |Ṁ₀|.
+//
+// On the augmented merit we use the FULL scaled residual norm (slim_scaled_residual_
+// norm — INCLUDES 𝒩₁, since the corrector DOES drive 𝒩₁→0) combined with the scaled
+// arclength-row residual.  Convergence: merit floored AND the arclength row satisfied
+// AND the validity gate passes (require_N1=true — this IS a fully-regular solution).
+//
+// In/out: U (length 4N+2) and Mdot (the continuation Ṁ).  U0,Mdot0 = the predictor
+// base point; tan0 (length 4N+3, scaled-unit) = the predictor tangent; w0 (length
+// 4N+3) = the base-point Keller weights; ds = the (dimensionless) scaled arclength
+// step.  Returns true iff the corrector converged to a physically-valid regular soln.
+struct ArclengthCorrectorResult {
+    bool converged = false;
+    double merit = 0.0;       // final FULL scaled merit (incl. 𝒩₁)
+    double arc_resid = 0.0;   // |N|/ds at the accepted point (scaled arclength row)
+    int iters = 0;
+};
+static ArclengthCorrectorResult arclength_corrector(
+        const SlimDiskInputs& in, const OpacityLUTs& op,
+        const std::vector<double>& U0, double Mdot0,
+        const std::vector<double>& tan0, const std::vector<double>& w0, double ds,
+        std::vector<double>& U, double& Mdot, int max_iters) {
+    using namespace constants;
+    const int N = std::max(in.n_nodes, 4);
+    const int n = 4 * N + 2;     // residual / U length
+    const int m = n + 1;         // augmented unknown length
+    const bool kDiag = std::getenv("SLIM_DIAG") != nullptr;
+
+    ArclengthCorrectorResult res;
+
+    // Keller arclength constraint in the SCALED metric (consistent with the scaled-
+    // unit tangent tan0 and the base-point weights w0):
+    //   N ≡ Σ_i (W_i − W₀_i)·(tan0_i / w0_i²) − ds        (W = (U, Ṁ))
+    // ∂N/∂W_i = tan0_i / w0_i².  ds is the (dimensionless) scaled arclength step.
+    auto arc_coef = [&](int i) { return tan0[i] / (w0[i] * w0[i]); };
+
+    // Augmented merit: FULL scaled residual norm (incl. 𝒩₁) ⊕ the scaled arclength row.
+    auto eval_merit = [&](const std::vector<double>& Uw, double Mw,
+                          std::vector<double>& Rfull, double& arc) -> double {
+        SlimDiskInputs inw = in; inw.mdot = Mw;
+        slim_radial_residual(Uw, inw, op, Rfull);
+        const double rms = slim_scaled_residual_norm(Uw, Rfull, inw);   // FULL (incl. 𝒩₁)
+        double Ndot = (Mw - Mdot0) * arc_coef(n) - ds;
+        for (int i = 0; i < n; ++i) Ndot += (Uw[i] - U0[i]) * arc_coef(i);
+        arc = Ndot / std::max(std::abs(ds), 1e-300);
+        // Combine: RMS over (4N+2 scaled residual rows + 1 scaled arc row).
+        const double comb = std::sqrt((rms*rms*(double)n + arc*arc) / (double)(n + 1));
+        return comb;
+    };
+
+    std::vector<double> Rfull;
+    double arc = 0.0;
+    double merit = eval_merit(U, Mdot, Rfull, arc);
+
+    // LM state (mirrors relax_structure).
+    double lm_mu = 1e-3, lm_nu = 2.0;
+    constexpr double kMuMax = 1e12, kMuMin = 1e-9;
+    constexpr double kStepCap = 0.5;       // cap on |Δ/u| for Σ,T_c,Ṁ per step
+    constexpr double kMeritFloor = 5e-3;   // augmented FD floor (a touch looser than the
+                                           // analytic-J inner floor: the arc row + the FD
+                                           // r_s/μ/κ columns set it; validity gate guards)
+
+    if (kDiag)
+        std::printf("[ARC-CORR] enter ds=%.4e Mdot0=%.4e seed merit=%.3e arc=%.3e\n",
+                    ds, Mdot0, merit, arc);
+
+    for (int it = 0; it < max_iters; ++it) {
+        if (g_budget) { ++g_budget->inner_iters; if (g_budget->check()) break; }
+
+        // --- Build the augmented Jacobian A (m×m): [[J, R_Mdot],[U̇₀ᵀ, Ṁ̇₀]]. ---
+        std::vector<double> J, R_Mdot;
+        slim_analytic_jacobian(U, in_with_mdot(in, Mdot), op, J);
+        slim_R_Mdot_column(U, in_with_mdot(in, Mdot), op, R_Mdot);
+
+        // Row + column scaling over the augmented system.  Cols 0..n-1 = the state
+        // column scales (per-variable magnitude); col n = |Ṁ₀| (the Ṁ scale).  Rows
+        // 0..n-1 = 1/group-scale (FULL set incl. 𝒩₁); row n (arclength) = 1 (it is
+        // already O(1) after the /ds in N).
+        std::vector<double> cs(m), rs_inv(m);
+        {
+            double mSig=0,mV=0,mEll=0,mT=0;
+            for (int i=0;i<N;++i){ mSig=std::max(mSig,std::abs(U[4*i+0])); mV=std::max(mV,std::abs(U[4*i+1]));
+                                   mEll=std::max(mEll,std::abs(U[4*i+2])); mT=std::max(mT,std::abs(U[4*i+3])); }
+            mSig=std::max(mSig,1e-30); mV=std::max(mV,1e-30); mEll=std::max(mEll,1e-30); mT=std::max(mT,1.0);
+            for (int i=0;i<N;++i){ cs[4*i+0]=mSig; cs[4*i+1]=mV; cs[4*i+2]=mEll; cs[4*i+3]=mT; }
+            cs[4*N+0]=std::max(std::abs(U[4*N+0]),1e-30);   // ℓ_in
+            cs[4*N+1]=std::max(std::abs(U[4*N+1]),1e-30);   // r_s
+            cs[n]    =std::max(std::abs(Mdot),1e-300);      // Ṁ
+            const GroupScales gs = slim_group_scales(U, in_with_mdot(in, Mdot));
+            auto setrows=[&](int b,int e,double sc){ sc=std::max(sc,1e-300); for(int r=b;r<e;++r) rs_inv[r]=1.0/sc; };
+            setrows(0,N,gs.mass); setrows(N,2*N,gs.ang); setrows(2*N,3*N-1,gs.rad);
+            setrows(3*N-1,4*N-2,gs.ene); setrows(4*N-2,4*N-1,gs.bc_ell);
+            setrows(4*N-1,4*N,gs.ene); setrows(4*N,4*N+1,gs.reg_D0); setrows(4*N+1,4*N+2,gs.reg_N1);
+            rs_inv[n]=1.0/std::max(std::abs(ds),1e-300);    // arclength row scale = ds
+        }
+
+        // Scaled augmented Jacobian Js (m×m) and residual Rs (m).
+        std::vector<double> Js((size_t)m*m,0.0), Rs(m,0.0);
+        for (int row=0; row<n; ++row) {
+            Rs[row] = Rfull[row]*rs_inv[row];
+            for (int col=0; col<n; ++col)
+                Js[(size_t)row*m+col] = J[(size_t)row*n+col]*rs_inv[row]*cs[col];
+            Js[(size_t)row*m+n] = R_Mdot[row]*rs_inv[row]*cs[n];
+        }
+        // Arclength row n (SCALED Keller): N = Σ_i (W_i−W₀_i)·arc_coef(i) − ds,
+        // arc_coef(i)=tan0_i/w0_i².  ∂N/∂W_i = arc_coef(i).  Residual scaled by 1/ds.
+        {
+            double Ndot = (Mdot - Mdot0)*arc_coef(n) - ds;
+            for (int i=0;i<n;++i) Ndot += (U[i]-U0[i])*arc_coef(i);
+            Rs[n] = Ndot*rs_inv[n];
+            for (int col=0; col<n; ++col) Js[(size_t)n*m+col] = arc_coef(col)*rs_inv[n]*cs[col];
+            Js[(size_t)n*m+n] = arc_coef(n)*rs_inv[n]*cs[n];
+        }
+
+        // Normal equations (Js^T Js + μ diag) y = −Js^T Rs.
+        std::vector<double> JtJ((size_t)m*m,0.0), Jtr(m,0.0);
+        for (int i=0;i<m;++i) for (int k=0;k<m;++k) {
+            const double jik = Js[(size_t)k*m+i]; if (jik==0.0) continue;
+            Jtr[i]+=jik*Rs[k];
+            for (int j=0;j<m;++j) JtJ[(size_t)i*m+j]+=jik*Js[(size_t)k*m+j];
+        }
+
+        const double cnt = (double)m;
+        const double F_old = 0.5*cnt*merit*merit;
+        std::vector<double> Adamp((size_t)m*m), bdamp(m);
+        bool step_taken=false, bail=false;
+        double merit_try=merit, arc_try=arc;
+        std::vector<double> Utry; double Mtry=Mdot;
+        std::vector<double> Rtry;
+
+        while (true) {
+            bool solved=false;
+            for (int tries=0; tries<12 && !solved; ++tries) {
+                Adamp=JtJ;
+                for (int i=0;i<m;++i) Adamp[(size_t)i*m+i]+=lm_mu*std::max(JtJ[(size_t)i*m+i],1e-300);
+                for (int i=0;i<m;++i) bdamp[i]=-Jtr[i];
+                if (dense_solve(Adamp,bdamp,m)) { solved=true; break; }
+                lm_mu=std::min(lm_mu*10.0,kMuMax);
+                if (lm_mu>=kMuMax) break;
+            }
+            if (!solved) { bail=true; break; }
+
+            double pred=0.0;
+            for (int i=0;i<m;++i){ const double Dii=std::max(JtJ[(size_t)i*m+i],1e-300);
+                                   pred+=lm_mu*Dii*bdamp[i]*bdamp[i]-bdamp[i]*Jtr[i]; }
+            pred*=0.5;
+
+            // Unscale the step: dW[col] = cs[col]·y[col].
+            std::vector<double> dW(m,0.0);
+            for (int col=0; col<m; ++col) dW[col]=bdamp[col]*cs[col];
+
+            // Trust-region cap on Σ,T_c (cols off 0,3) and Ṁ (col n).
+            double lam=1.0;
+            auto capvar=[&](double u,double d){ if(u!=0.0&&d!=0.0){ const double f=std::abs(d/u); if(f*lam>kStepCap) lam=kStepCap/f; } };
+            for (int i=0;i<N;++i){ capvar(U[4*i+0],dW[4*i+0]); capvar(U[4*i+3],dW[4*i+3]); }
+            capvar(Mdot,dW[n]);
+
+            bool physical=false; double F_new=F_old;
+            for (int ls=0; ls<40; ++ls) {
+                Utry.assign(U.begin(),U.end());
+                for (int i=0;i<n;++i) Utry[i]+=lam*dW[i];
+                Mtry = Mdot + lam*dW[n];
+                physical=true;
+                for (int i=0;i<N&&physical;++i){ const double S=Utry[4*i+0],V=Utry[4*i+1],T=Utry[4*i+3];
+                    if (S<=0.0||T<=0.0||std::abs(V)>=1.0) physical=false; }
+                if (physical){ const double rs=Utry[4*N+1]; if(!(rs>in.r_in&&rs<in.r_out)) physical=false; }
+                if (physical && !(Mtry>0.0)) physical=false;     // Ṁ>0
+                if (physical){
+                    merit_try=eval_merit(Utry,Mtry,Rtry,arc_try);
+                    F_new=0.5*cnt*merit_try*merit_try; break;
+                }
+                lam*=0.5;
+            }
+
+            const double act = physical ? (F_old-F_new) : -1.0;
+            const double rho = act/std::max(pred,1e-300);
+            if (rho>0.0) {
+                const double t=2.0*rho-1.0;
+                lm_mu=std::max(lm_mu*std::max(1.0/3.0,1.0-t*t*t),kMuMin);
+                lm_nu=2.0; step_taken=true; break;
+            }
+            if (lm_mu>=kMuMax){ bail=true; break; }
+            lm_mu=std::min(lm_mu*lm_nu,kMuMax); lm_nu*=2.0;
+        }
+
+        if (bail || !step_taken) break;
+
+        // Max relative step over the augmented unknowns (for the convergence test).
+        double maxrel=0.0;
+        for (int i=0;i<n;++i) maxrel=std::max(maxrel,std::abs(Utry[i]-U[i])/std::max(std::abs(U[i]),1e-300));
+        maxrel=std::max(maxrel,std::abs(Mtry-Mdot)/std::max(std::abs(Mdot),1e-300));
+
+        U.swap(Utry); Mdot=Mtry; Rfull.swap(Rtry); merit=merit_try; arc=arc_try;
+        res.iters=it+1;
+
+        // De-glitch any Σ-outlier the step introduced (same source fix as the inner solve).
+        { const int nrep=deglitch_sigma_outliers(in, U);
+          if (nrep>0){ merit=eval_merit(U,Mdot,Rfull,arc); } }
+
+        if (kDiag && (it<5 || it%20==0))
+            std::printf("[ARC-CORR] it=%d lam-merit=%.3e arc=%.3e maxrel=%.2e mu=%.1e\n",
+                        it, merit, arc, maxrel, lm_mu);
+
+        // Convergence: merit floored AND arclength row satisfied AND validity gate
+        // (require_N1=true — the augmented corrector DOES regularize 𝒩₁).
+        const bool merit_ok = (merit < kMeritFloor);
+        const bool arc_ok   = (std::abs(arc) < 1e-2);
+        const bool step_ok  = (maxrel < std::max(in.tol, 5e-3));
+        if (merit_ok && arc_ok && step_ok) {
+            const ValidityResult v = slim_validity_gate(in_with_mdot(in, Mdot), op, U, /*require_N1=*/true);
+            if (v.all(/*require_N1=*/true)) {
+                res.converged=true; res.merit=merit; res.arc_resid=arc; break;
+            }
+        }
+    }
+    res.merit=merit; res.arc_resid=arc;
+    return res;
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -2991,5 +3380,325 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
         }
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: pseudo-arclength continuation driver — trace the branch ACROSS the fold.
+// ---------------------------------------------------------------------------
+// Converge a sub-fold anchor (a, f_Edd≈0.10) via the PROVEN existing path
+// (solve_slim_disk_radial's spin-walk + Ṁ-ladder), promote Ṁ to a continuation
+// unknown, build the initial tangent, then arclength-step UP with the predictor-
+// corrector (Task 3).  Δs grows on easy convergence, shrinks on failure, honest
+// fallback on underflow.  The branch may dip in Ṁ through the unstable segment
+// (Ṁ̇<0) then climb onto the high-Ṁ slim branch (Ṁ̇>0 again) — we track the fold and
+// record every accepted point.  GATE: cross f_Edd=0.11, reach toward f_Edd≈0.9.
+SlimArclengthResult solve_slim_disk_arclength(const SlimDiskInputs& in,
+                                              const OpacityLUTs& opacity) {
+    using namespace constants;
+    const bool kDiag = std::getenv("SLIM_DIAG") != nullptr;
+    const int N = std::max(in.n_nodes, 4);
+    const int n = 4 * N + 2;
+    const int m = n + 1;
+    SlimArclengthResult result;
+
+    // Install the safety budget for the WHOLE continuation (RAII-cleared).
+    SolveBudget budget;
+    if (in.budget_inner_iter_cap > 0) budget.inner_iter_cap = in.budget_inner_iter_cap;
+    if (in.budget_wall_seconds   > 0) budget.wall_cap_s     = in.budget_wall_seconds;
+    struct BudgetGuard { ~BudgetGuard() { g_budget = nullptr; } } budget_guard;
+    g_budget = &budget;
+
+    // Ṁ_Edd (textbook 10 L_Edd/c²).
+    const double M_cgs = in.mass * in.r_g * c_cgs * c_cgs / G_cgs;
+    const double kappa_es = 0.34;
+    const double L_Edd = 4.0 * std::numbers::pi * G_cgs * M_cgs * c_cgs / kappa_es;
+    const double Mdot_Edd = 10.0 * L_Edd / (c_cgs * c_cgs);
+    auto f_of = [&](double md){ return md / Mdot_Edd; };
+
+    // ---- Anchor: converge a sub-fold point at f_Edd≈0.10. ----
+    // Use the PROVEN direct path (cold-seed + solve_single_am at (a, f_Edd=0.10) —
+    // the same route the warm-start sweep uses to converge a=0.9), which keeps the
+    // EXACT converged state vector U (no lossy profile round-trip).  For high spin
+    // (a beyond the cold-seed basin) we spin-walk the anchor up from a=0 at f_Edd=0.10
+    // via warm_reproject_spin (the existing Phase-B homotopy), so the anchor itself
+    // is in-basin before continuation begins.
+    const double f_anchor = 0.10;
+    SlimDiskInputs in_anchor = in;
+    in_anchor.mdot = f_anchor * Mdot_Edd;
+    in_anchor.max_iters = std::max(in.max_iters, 800);
+    if (kDiag) std::printf("[ARC] anchor: solve (a=%.4f, f_Edd=%.3f)\n", in.spin, f_anchor);
+
+    std::vector<double> U;
+    constexpr double kSpinThresh = 0.05;
+
+    // FAST ANCHOR: at the thin f_Edd=0.10 rung the sonic eigenvalue is ℓ_in≈ℓ_K(ISCO)
+    // (the disk is nearly Novikov-Thorne), so a SINGLE relax_structure at that ℓ_in
+    // typically lands on the regular branch with 𝒩₁(r_s)≈0 already (the existing
+    // solver's "DIRECT-ACCEPT").  Trying it FIRST skips the expensive multi-window ℓ_in
+    // bracket scan (dozens of full relaxes) for the common case; we fall back to the
+    // full bracket only if the direct relax fails the FULL validity gate.
+    auto try_direct_anchor = [&](const SlimDiskInputs& ina, std::vector<double>& Uout) -> bool {
+        using namespace slim_detail;
+        const double r_isco = isco_prograde(ina.mass, ina.spin);
+        const double ell_in = ell_kepler(ina.mass, ina.spin, r_isco);
+        std::vector<double> Uw = build_thin_disk_seed(ina, opacity);
+        if (!relax_structure(ina, opacity, ell_in, Uw)) return false;
+        const ValidityResult v = slim_validity_gate(ina, opacity, Uw, /*require_N1=*/true);
+        if (!v.all(/*require_N1=*/true)) return false;
+        Uout.swap(Uw);
+        if (kDiag) std::printf("[ARC] FAST anchor: direct ell_in=%.5f converged (r_s=%.4f, skipped bracket)\n",
+                               ell_in, Uout[4*N+1]);
+        return true;
+    };
+
+    if (in.spin <= 0.9) {
+        // Try the fast direct anchor first; fall back to the full bracket if it misses.
+        if (!try_direct_anchor(in_anchor, U)) {
+            if (budget.check()) { if (kDiag) std::printf("[ARC] anchor budget tripped -> fallback\n"); return result; }
+            if (kDiag) std::printf("[ARC] FAST anchor missed -> full bracket\n");
+            U = build_thin_disk_seed(in_anchor, opacity);
+            if (!solve_single_am(in_anchor, opacity, U, /*require_N1=*/false)) {
+                if (budget.check()) { if (kDiag) std::printf("[ARC] anchor budget tripped -> fallback\n"); return result; }
+                if (kDiag) std::printf("[ARC] anchor (cold-seed) FAILED -> honest fallback\n");
+                return result;
+            }
+        }
+    } else {
+        // Spin-walk the anchor up from a=0 at f_Edd=0.10 (Phase-B homotopy).
+        const double base_ladder[] = {0.0, 0.2, 0.4, 0.6, 0.75, 0.85, 0.90};
+        std::vector<double> spin_ladder;
+        for (double a : base_ladder) { if (a >= in.spin) break; spin_ladder.push_back(a); }
+        spin_ladder.push_back(in.spin);
+        SlimDiskInputs in0 = in_anchor; in0.spin = spin_ladder[0];
+        std::vector<double> U_prev = build_thin_disk_seed(in0, opacity);
+        if (!solve_single_am(in0, opacity, U_prev, /*require_N1=*/false)) {
+            if (kDiag) std::printf("[ARC] anchor a=0 base FAILED -> fallback\n"); return result;
+        }
+        SlimDiskInputs in_prev = in0; bool walk_ok = true;
+        for (size_t s = 1; s < spin_ladder.size() && walk_ok; ++s) {
+            SlimDiskInputs in_k = in_anchor; in_k.spin = spin_ladder[s];
+            double step = spin_ladder[s] - in_prev.spin; bool done = false;
+            while (!done) {
+                if (budget.check()) return result;
+                SlimDiskInputs in_try = in_anchor; in_try.spin = in_prev.spin + step;
+                std::vector<double> U_k = warm_reproject_spin(U_prev, in_prev, in_try, opacity);
+                if (solve_single_am(in_try, opacity, U_k, /*require_N1=*/false)) {
+                    U_prev = U_k; in_prev = in_try; done = (in_try.spin >= spin_ladder[s] - 1e-12);
+                    if (!done) { step = spin_ladder[s] - in_prev.spin; }
+                } else {
+                    step *= 0.5;
+                    if (step < 1e-3) { walk_ok = false; }
+                }
+            }
+        }
+        if (!walk_ok) { if (kDiag) std::printf("[ARC] anchor spin-walk stuck -> fallback\n"); return result; }
+        U = U_prev;
+    }
+    (void)kSpinThresh;
+
+    double Mdot = in_anchor.mdot;
+    // Anchor profile (for branch-point 0 record + the returned top seed).
+    SlimDiskRadial anchor; unpack_profile(in_anchor, opacity, U, anchor);
+    anchor.converged = true; anchor.ell_in = U[4*N+0]; anchor.r_sonic = U[4*N+1];
+    { std::vector<double> Rf; slim_radial_residual(U, in_anchor, opacity, Rf);
+      anchor.final_residual = slim_scaled_residual_norm(U, Rf, in_anchor); }
+
+    // Physics-summary of a converged (U, Ṁ) into a branch point.
+    auto record_point = [&](const std::vector<double>& Uw, double Mw, double ds,
+                            double mdot_dot, double merit) -> SlimArclengthPoint {
+        using namespace slim_detail;
+        SlimArclengthPoint pt;
+        pt.f_Edd = f_of(Mw); pt.mdot = Mw; pt.r_sonic = Uw[4*N+1]; pt.ell_in = Uw[4*N+0];
+        pt.merit = merit; pt.arc_step = ds;
+        pt.Mdot_dot_sign = (mdot_dot > 0) ? 1 : (mdot_dot < 0 ? -1 : 0);
+        SlimDiskRadial prof; unpack_profile(in_with_mdot(in, Mw), opacity, Uw, prof);
+        bool first = true;
+        for (size_t i = 0; i < prof.r.size(); ++i) {
+            const double r = prof.r[i];
+            const double Hr = prof.H[i] / (r * in.r_g);
+            pt.max_Hr = std::max(pt.max_Hr, Hr);
+            pt.peak_Sigma = std::max(pt.peak_Sigma, prof.Sigma[i]);
+            const OneZoneState oz = one_zone_closure(std::max(prof.Sigma[i],kSigmaFloor),
+                                                     std::max(prof.Tc[i],kTFloor), r, in, opacity);
+            const double beta = oz.p_gas / std::max(oz.p_mid, 1e-300);
+            if (first) { pt.beta_min=pt.beta_max=beta; pt.fadv_min=pt.fadv_max=prof.f_adv[i]; first=false; }
+            else { pt.beta_min=std::min(pt.beta_min,beta); pt.beta_max=std::max(pt.beta_max,beta);
+                   pt.fadv_min=std::min(pt.fadv_min,prof.f_adv[i]); pt.fadv_max=std::max(pt.fadv_max,prof.f_adv[i]); }
+        }
+        return pt;
+    };
+
+    // Record the anchor as branch point 0 (tangent sign unknown yet -> +1 seed).
+    result.branch.push_back(record_point(U, Mdot, 0.0, +1.0, anchor.final_residual));
+    result.max_f_Edd = f_of(Mdot);
+    result.top = anchor;
+
+    // ---- Initial tangent: seed direction increases Ṁ. ----
+    std::vector<double> t_prev(m, 0.0); t_prev[n] = 1.0;   // bias toward +Ṁ
+    std::vector<double> tangent;
+    if (!slim_arclength_tangent(U, in_with_mdot(in, Mdot), opacity, t_prev, tangent)) {
+        if (kDiag) std::printf("[ARC] initial tangent degenerate -> fallback\n");
+        return result;
+    }
+    // Orient the very first tangent so Ṁ̇ > 0 (climb up the branch from the anchor).
+    if (tangent[n] < 0.0) for (double& v : tangent) v = -v;
+    t_prev = tangent;
+    if (kDiag) std::printf("[ARC] initial tangent: Mdot_dot=%+.4e (f_Edd_dot=%+.4e)\n",
+                           tangent[n], tangent[n]/Mdot_Edd);
+
+    // ---- Predictor-corrector loop with arclength step control. ----
+    // ds is the DIMENSIONLESS scaled arclength step (the tangent is unit-normed in the
+    // Ṁ-balanced scaled metric Σ(t_i/w_i)²=1, so a raw step ΔW_i = ds·t_i advances the
+    // scaled coordinate by exactly ds).  Start SMALL — a large coordinated step in all
+    // ~4N state DOF at once is a big nonlinear jump that overshoots the local model and
+    // lets the corrector fall onto a DIFFERENT branch (observed: ds=0.1 overshoots and
+    // the corrector jumps to the low-Ṁ branch).  Grow gently on easy convergence,
+    // shrink on failure or on a BRANCH-JUMP (Ṁ reversed vs the predictor direction);
+    // honest fallback on underflow.
+    double ds = 2e-2;                  // scaled arclength step (dimensionless)
+    const double ds_floor = 1e-5;
+    const double ds_ceil  = 0.3;
+    const double f_target = 0.9;       // aim for f_Edd≈0.9 on the high-Ṁ branch
+    const int    kMaxSteps = 600;
+    const int    kCorrIters = 300;
+    // Overshoot cap: reject a corrected point whose |Δf_Edd| per step is implausibly
+    // large (a wild jump to a far-away branch, not a smooth continuation step).  We do
+    // NOT reject Ṁ-DECREASING steps — the post-fold unstable segment genuinely runs to
+    // lower Ṁ, and the trajectory-based tangent orientation follows it correctly.
+    const double kMaxDfEdd = 0.06;
+
+    int prev_sign = (tangent[n] > 0) ? 1 : -1;
+    int steps_done = 0;
+
+    for (int step = 0; step < kMaxSteps; ++step) {
+        if (budget.check()) { if (kDiag) std::printf("[ARC] budget tripped -> stop\n"); break; }
+
+        // Base-point weights for the Keller metric (same as the tangent's normalization).
+        std::vector<double> w0; slim_arclength_weights(U, Mdot, N, w0);
+
+        // Predictor: W_pred = (U0,Mdot0) + ds·tangent  (raw step; ds is the scaled length).
+        const std::vector<double> U0 = U;
+        const double Mdot0 = Mdot;
+        const double Mdot_pred_intended = Mdot0 + ds * tangent[n];  // predictor target Ṁ
+        std::vector<double> Upred = U;
+        for (int i = 0; i < n; ++i) Upred[i] = U0[i] + ds * tangent[i];
+        double Mdot_pred = Mdot_pred_intended;
+        // Keep the predictor physical (clamp Σ,T_c>0, Ṁ>0) before the corrector.
+        for (int i = 0; i < N; ++i) {
+            Upred[4*i+0] = std::max(Upred[4*i+0], kSigmaFloor);
+            Upred[4*i+3] = std::max(Upred[4*i+3], kTFloor);
+        }
+        if (!(Mdot_pred > 0.0)) Mdot_pred = 0.5 * Mdot0;
+
+        std::vector<double> Ucorr = Upred;
+        double Mcorr = Mdot_pred;
+        ArclengthCorrectorResult cr = arclength_corrector(
+            in, opacity, U0, Mdot0, tangent, w0, ds, Ucorr, Mcorr, kCorrIters);
+
+        // Overshoot guard only: reject a wild |Δf_Edd| jump (far-away branch).  A
+        // near-zero or Ṁ-DECREASING step is ALLOWED — the arclength method is expected
+        // to ride the branch through the (near-vertical) fold and down the unstable
+        // segment; rejecting Ṁ-decreasing steps would forbid exactly the fold traversal
+        // we are trying to perform.  Also reject a corrector that BARELY moved the point
+        // (it snapped back to the base — ds too small to escape the current basin): grow
+        // ds instead of shrinking, so the predictor jumps far enough to the next point.
+        const double dM_actual   = Mcorr - Mdot0;
+        const double df          = f_of(Mcorr) - f_of(Mdot0);
+        const double move_rel    = std::abs(dM_actual) / std::max(std::abs(Mdot0),1e-300);
+        const bool overshoot = (std::abs(df) > kMaxDfEdd);
+        const bool snapped   = cr.converged && (move_rel < 1e-7);   // corrector returned to base
+
+        if (!cr.converged || overshoot) {
+            ds *= 0.5;
+            if (kDiag) std::printf("[ARC] step %d %s (merit=%.3e arc=%.3e df=%.4f) -> shrink ds=%.3e\n",
+                                   step, !cr.converged ? "corrector FAILED" : "OVERSHOOT",
+                                   cr.merit, cr.arc_resid, df, ds);
+            if (ds < ds_floor) {
+                if (kDiag) std::printf("[ARC] ds underflow (<%.2e) -> stop (honest)\n", ds_floor);
+                break;
+            }
+            continue;
+        }
+        if (snapped) {
+            ds = std::min(ds * 2.0, ds_ceil);
+            if (kDiag) std::printf("[ARC] step %d SNAP-BACK (move_rel=%.2e) -> grow ds=%.3e\n",
+                                   step, move_rel, ds);
+            if (ds >= ds_ceil) {
+                if (kDiag) std::printf("[ARC] ds hit ceiling while snapping back -> stall (honest stop)\n");
+                break;   // can't escape the current point even at max step: honest stop
+            }
+            continue;
+        }
+
+        // Accepted.  Compute the NEW tangent at the corrected point.  ORIENT it by the
+        // PHYSICAL Ṁ-step direction we just took (sign of dM_actual = Mcorr−Mdot0), not
+        // by the full scaled prev·new dot — the state carries most of the scaled metric,
+        // so a dot-based orientation lets structural rotation flip Ṁ̇ spuriously and
+        // stall the climb.  Tying the orientation to the actual Ṁ trajectory makes the
+        // continuation follow the branch's Ṁ direction; at a GENUINE fold dM_actual
+        // changes sign on its own (Ṁ starts decreasing) and the tangent follows it
+        // around the turning point.  Fall back to the prev·new dot only if the step's
+        // Ṁ move is negligibly small (then dM_actual sign is noise).
+        std::vector<double> new_tan;
+        bool have_new = slim_arclength_tangent(Ucorr, in_with_mdot(in, Mcorr), opacity, t_prev, new_tan);
+        if (have_new) {
+            const double dM_actual2 = Mcorr - Mdot0;
+            const double dM_rel = std::abs(dM_actual2) / std::max(std::abs(Mdot0), 1e-300);
+            if (dM_rel > 1e-6) {
+                // Orient new_tan[n] to match the physical step direction.
+                if ((new_tan[n] > 0) != (dM_actual2 > 0)) for (double& v : new_tan) v = -v;
+            } else {
+                // Ṁ barely moved: keep continuity via the (scaled) prev·new dot.
+                std::vector<double> w0d; slim_arclength_weights(Ucorr, Mcorr, N, w0d);
+                double dot = 0.0; for (int i=0;i<m;++i) dot += (tangent[i]/w0d[i])*(new_tan[i]/w0d[i]);
+                if (dot < 0.0) for (double& v : new_tan) v = -v;
+            }
+            tangent = new_tan; t_prev = new_tan;
+        } else {
+            if (kDiag) std::printf("[ARC] step %d: tangent degenerate at accepted point -> stop\n", step);
+        }
+        const int new_sign = (tangent[n] > 0) ? 1 : (tangent[n] < 0 ? -1 : 0);
+        if (new_sign != 0 && new_sign != prev_sign) {
+            result.crossed_fold = true;
+            if (kDiag) std::printf("[ARC] *** FOLD: Mdot_dot sign flip %d -> %d at f_Edd=%.4f ***\n",
+                                   prev_sign, new_sign, f_of(Mcorr));
+        }
+        if (new_sign != 0) prev_sign = new_sign;
+
+        U.swap(Ucorr); Mdot = Mcorr;
+        SlimArclengthPoint pt = record_point(U, Mdot, ds, tangent[n], cr.merit);
+        result.branch.push_back(pt);
+        result.ok = true;
+        ++steps_done;
+
+        if (f_of(Mdot) >= 0.11) result.crossed_011 = true;
+        if (f_of(Mdot) > result.max_f_Edd) {
+            result.max_f_Edd = f_of(Mdot);
+            unpack_profile(in_with_mdot(in, Mdot), opacity, U, result.top);
+            result.top.converged = true;
+            result.top.ell_in = U[4*N+0]; result.top.r_sonic = U[4*N+1];
+            std::vector<double> Rf; slim_radial_residual(U, in_with_mdot(in,Mdot), opacity, Rf);
+            result.top.final_residual = slim_scaled_residual_norm(U, Rf, in_with_mdot(in,Mdot));
+        }
+
+        if (kDiag)
+            std::printf("[ARC] step %d ACCEPT f_Edd=%.4f r_s=%.4f H/r=%.3f beta=[%.2e,%.2e] "
+                        "f_adv=[%.2e,%.2e] Mdot_dot_sign=%d merit=%.3e ds=%.3e\n",
+                        step, pt.f_Edd, pt.r_sonic, pt.max_Hr, pt.beta_min, pt.beta_max,
+                        pt.fadv_min, pt.fadv_max, pt.Mdot_dot_sign, pt.merit, ds);
+
+        // Reached the high-Ṁ target on the UPPER branch (Ṁ̇>0 again past the fold).
+        if (f_of(Mdot) >= f_target && prev_sign > 0) {
+            if (kDiag) std::printf("[ARC] reached f_target=%.2f on upper branch -> done\n", f_target);
+            break;
+        }
+        // Grow Δs on easy convergence (few corrector iters), bounded.
+        if (cr.iters < 30) ds = std::min(ds * 1.2, ds_ceil);
+    }
+
+    if (kDiag)
+        std::printf("[ARC] DONE: %d accepted steps, max_f_Edd=%.4f, crossed_011=%d, crossed_fold=%d\n",
+                    steps_done, result.max_f_Edd, (int)result.crossed_011, (int)result.crossed_fold);
+    return result;
 }
 } // namespace grrt

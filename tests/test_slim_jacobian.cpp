@@ -378,6 +378,132 @@ static void test_kerr_mech_jac() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Unit test: ∂R/∂Ṁ column (Task 1, arclength continuation).
+// ---------------------------------------------------------------------------
+// slim_R_Mdot_column is a central FD of the residual over in.mdot.  Checks:
+//   • every entry is finite,
+//   • the mass rows [0..N) equal exactly −1 (R[i]=mdot_node−Ṁ ⇒ ∂/∂Ṁ=−1; the FD
+//     of a term linear in Ṁ is exact to round-off),
+//   • the energy rows [3N-1..4N-2) are nonzero (the Q_vis/Q_adv Ṁ-prefactors),
+//   • it MATCHES an independent central FD of slim_radial_residual over Ṁ at a
+//     coarser step (self-consistency of the column).
+static void test_R_Mdot_column(const OpacityLUTs& op) {
+    std::printf("\n########## R_Mdot column unit test (Task 1) ##########\n");
+    int local_fail = 0;
+    struct Pt { double a, f_Edd; const char* n; };
+    Pt pts[] = { {0.9, 0.10, "a=0.9 f_Edd=0.10"},
+                 {0.9, 0.02, "a=0.9 f_Edd=0.02"} };
+    const int N = 20;
+    for (auto& p : pts) {
+        SlimDiskInputs in = make_inputs(p.a, p.f_Edd, N);
+        std::vector<double> U = build_thin_disk_seed(in, op);
+        const int n = (int)U.size();
+        std::vector<double> Rm;
+        slim_R_Mdot_column(U, in, op, Rm);
+
+        // (a) finite everywhere.
+        bool finite = true;
+        for (double v : Rm) if (!std::isfinite(v)) finite = false;
+        // (b) mass rows == −1 to round-off.
+        double mass_maxerr = 0.0;
+        for (int i = 0; i < N; ++i) mass_maxerr = std::max(mass_maxerr, std::abs(Rm[i] + 1.0));
+        // (c) energy rows nonzero (at least one above a relative floor of the column).
+        double col_max = 0.0; for (double v : Rm) col_max = std::max(col_max, std::abs(v));
+        double ene_max = 0.0;
+        for (int i = 3*N-1; i < 4*N-2; ++i) ene_max = std::max(ene_max, std::abs(Rm[i]));
+        // (d) cross-check vs an independent coarser central FD over Ṁ.
+        const double h2 = 1e-4 * std::abs(in.mdot);
+        SlimDiskInputs ip = in, im = in; ip.mdot += h2; im.mdot -= h2;
+        std::vector<double> Rp2, Rm2; slim_radial_residual(U, ip, op, Rp2);
+        slim_radial_residual(U, im, op, Rm2);
+        double xcheck_rel = 0.0;
+        for (int r = 0; r < n; ++r) {
+            const double fd = (Rp2[r] - Rm2[r]) / (2.0 * h2);
+            const double rel = std::abs(Rm[r] - fd) / (std::abs(fd) + 1e-6 * std::max(col_max, 1e-300));
+            xcheck_rel = std::max(xcheck_rel, rel);
+        }
+        std::printf("  %-20s finite=%d  mass_maxerr=%.2e  ene_max=%.3e  xcheck_rel=%.2e\n",
+                    p.n, (int)finite, mass_maxerr, ene_max, xcheck_rel);
+        if (!finite)                 { std::printf("    <<FAIL: non-finite entry\n"); ++local_fail; }
+        if (!(mass_maxerr < 1e-9))   { std::printf("    <<FAIL: mass rows != -1 (err %.2e)\n", mass_maxerr); ++local_fail; }
+        if (!(ene_max > 1e-300))     { std::printf("    <<FAIL: energy rows all zero\n"); ++local_fail; }
+        if (!(xcheck_rel < 1e-3))    { std::printf("    <<FAIL: column != FD of residual (rel %.2e)\n", xcheck_rel); ++local_fail; }
+    }
+    if (local_fail == 0) std::printf("  PASS (finite, mass=-1, energy nonzero, matches FD)\n");
+    failures += local_fail;
+}
+
+// ---------------------------------------------------------------------------
+// Unit test: bordered augmented tangent (Task 2, arclength continuation).
+// ---------------------------------------------------------------------------
+// slim_arclength_tangent solves the bordered system for the null vector of
+// [J | R_Mdot].  The defining property — independent of whether U is converged —
+// is that the returned tangent satisfies J·U̇ + R_Mdot·Ṁ̇ ≈ 0 (the tangent lies in
+// the null space of the bordered residual Jacobian) and is unit-normed.  We check
+// that null residual at the seed state (a self-consistent linear-algebra check that
+// validates the bordered solve + the J / R_Mdot blocks together), at a couple of
+// operating points.  (The probe additionally checks it at a CONVERGED sub-fold
+// point and reports Ṁ̇, per the plan.)
+static void test_arclength_tangent(const OpacityLUTs& op) {
+    std::printf("\n########## arclength tangent unit test (Task 2) ##########\n");
+    int local_fail = 0;
+    struct Pt { double a, f_Edd; const char* n; };
+    Pt pts[] = { {0.9, 0.10, "a=0.9 f_Edd=0.10"},
+                 {0.9, 0.02, "a=0.9 f_Edd=0.02"} };
+    const int N = 20;
+    for (auto& p : pts) {
+        SlimDiskInputs in = make_inputs(p.a, p.f_Edd, N);
+        std::vector<double> U = build_thin_disk_seed(in, op);
+        const int n = (int)U.size();
+        const int m = n + 1;
+
+        // Seed direction: increase Ṁ (last component dominant).
+        std::vector<double> t_prev(m, 0.0); t_prev[n] = 1.0;
+        std::vector<double> t;
+        const bool ok = slim_arclength_tangent(U, in, op, t_prev, t);
+
+        // Null residual ‖J·U̇ + R_Mdot·Ṁ̇‖ (scaled by the group scales, the same space
+        // the solver works in), relative to ‖J‖-ish column magnitude.
+        std::vector<double> J, R_Mdot;
+        slim_analytic_jacobian(U, in, op, J);
+        slim_R_Mdot_column(U, in, op, R_Mdot);
+        std::vector<double> cs, rs_inv; scaling_vectors(U, in, N, cs, rs_inv);
+        double nrm_res = 0.0, nrm_ref = 0.0;
+        const double Mdot_dot = t[n];
+        // The tangent t is the RAW null vector: J·U̇ + R_Mdot·Ṁ̇ = 0 in raw space.
+        // Row-scale only (rs_inv) for a dimensionless relative magnitude.
+        for (int row = 0; row < n; ++row) {
+            double jv = 0.0, ref = 0.0;
+            for (int col = 0; col < n; ++col) {
+                const double term = J[(size_t)row*n+col] * t[col];   // raw J·U̇
+                jv  += term; ref += std::abs(term);
+            }
+            jv  += R_Mdot[row] * Mdot_dot;        // raw R_Mdot·Ṁ̇
+            ref += std::abs(R_Mdot[row] * Mdot_dot);
+            jv  *= rs_inv[row]; ref *= rs_inv[row];
+            nrm_res += jv * jv; nrm_ref += ref * ref;
+        }
+        nrm_res = std::sqrt(nrm_res); nrm_ref = std::sqrt(nrm_ref) + 1e-300;
+        const double rel = nrm_res / nrm_ref;
+        // The tangent is unit-normed in the SCALED metric Σ(t_i/w_i)²=1, with the state
+        // weights INFLATED by √n (so the aggregate state norm balances the single Ṁ DOF
+        // — see slim_arclength_weights); Ṁ weight = |in.mdot| (no inflation).
+        double tn = 0.0;
+        const double sw = 20.0 * std::sqrt((double)n);
+        for (int i = 0; i < m; ++i) { const double wi = (i<n) ? cs[i]*sw : std::max(std::abs(in.mdot),1e-300);
+                                      const double s = t[i]/wi; tn += s*s; }
+        tn = std::sqrt(tn);
+        std::printf("  %-20s ok=%d  ‖t‖_w=%.6f  Mdot_dot=%+.4e  null_resid_rel=%.3e\n",
+                    p.n, (int)ok, tn, ok ? Mdot_dot : 0.0, rel);
+        if (!ok)                       { std::printf("    <<FAIL: tangent solve failed\n"); ++local_fail; }
+        if (!(std::abs(tn-1.0) < 1e-9)){ std::printf("    <<FAIL: tangent not scaled-unit-normed\n"); ++local_fail; }
+        if (!(rel < 1e-6))             { std::printf("    <<FAIL: null residual %.3e too large\n", rel); ++local_fail; }
+    }
+    if (local_fail == 0) std::printf("  PASS (unit-normed, J·U̇+R_Mdot·Ṁ̇≈0)\n");
+    failures += local_fail;
+}
+
 static void test_closure_jac(const OpacityLUTs& op) {
     std::printf("\n########## one_zone_closure_jac unit test ##########\n");
     SlimDiskInputs in = make_inputs(0.9, 0.1, 20);
@@ -405,6 +531,8 @@ int main() {
 
     jactest::test_closure_jac(op);
     jactest::test_kerr_mech_jac();
+    jactest::test_R_Mdot_column(op);
+    jactest::test_arclength_tangent(op);
 
     const int N = 20;
     const double tol    = 1e-6;   // per-column scaled 2-norm gate (non-r_s columns)

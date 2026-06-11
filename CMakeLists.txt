@@ -202,6 +202,13 @@ target_include_directories(slim-coldseed-sweep PRIVATE include/ ${CMAKE_BINARY_D
 add_executable(slim-warmstart-sweep tools/slim_warmstart_sweep.cpp)
 target_include_directories(slim-warmstart-sweep PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# Pseudo-arclength continuation probe (Tasks 1-4): traces the slim-disk branch
+# THROUGH the f_Edd≈0.11 fold.  Includes the slim/opacity .cpp directly to reach
+# internal helpers (slim_arclength_tangent, arclength_corrector); does NOT link grrt.
+# Safe to delete along with tools/slim_arclength_probe.cpp.
+add_executable(slim-arclength-probe tools/slim_arclength_probe.cpp)
+target_include_directories(slim-arclength-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
 # TEMPORARY full-target probe (a=0.998, f_Edd≈0.9). Links grrt. Safe to delete
 # along with tools/slim_full_target_probe.cpp.
 add_executable(slim-full-target-probe tools/slim_full_target_probe.cpp)

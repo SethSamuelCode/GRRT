@@ -186,5 +186,49 @@ GRRT_EXPORT void slim_radial_residual(const std::vector<double>& U,
 /// (see docs/superpowers/references/disk-physics-formulas.md §22).
 GRRT_EXPORT SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in,
                                                   const OpacityLUTs& opacity);
+
+/// One accepted point on the pseudo-arclength continuation branch.  Recorded by
+/// solve_slim_disk_arclength as it traces the (Σ,V)/mass branch THROUGH the
+/// f_Edd≈0.11 turning point.  f_Edd = Ṁ/Ṁ_Edd (textbook 10 L_Edd/c²); Mdot_dot_sign
+/// is the sign of the continuation tangent's Ṁ̇ component — it FLIPS at the fold.
+struct SlimArclengthPoint {
+    double f_Edd = 0.0;       ///< Eddington fraction Ṁ/Ṁ_Edd at this point
+    double mdot = 0.0;        ///< Ṁ [g/s]
+    double r_sonic = 0.0;     ///< sonic radius [M]
+    double ell_in = 0.0;      ///< inner specific angular momentum eigenvalue
+    double max_Hr = 0.0;      ///< max H/r over the disk
+    double beta_min = 0.0;    ///< min gas-pressure fraction p_gas/p_mid (β→0 = slim)
+    double beta_max = 0.0;    ///< max β
+    double fadv_min = 0.0;    ///< min advected fraction Q_adv/Q_rad
+    double fadv_max = 0.0;    ///< max f_adv
+    double peak_Sigma = 0.0;  ///< peak surface density [g/cm^2] (the Σ branch)
+    double merit = 0.0;       ///< final augmented scaled merit
+    double arc_step = 0.0;    ///< the arclength step Δs that produced this point
+    int    Mdot_dot_sign = 0; ///< sign of the tangent Ṁ̇ (flips at the fold)
+};
+
+/// Pseudo-arclength continuation result: the full traced branch plus the
+/// highest-f_Edd accepted profile.
+struct SlimArclengthResult {
+    std::vector<SlimArclengthPoint> branch;  ///< every accepted continuation point
+    SlimDiskRadial top;        ///< the highest-f_Edd accepted profile (converged)
+    double max_f_Edd = 0.0;    ///< highest f_Edd reached on the branch
+    bool   crossed_fold = false; ///< did Ṁ̇ flip sign anywhere (fold detected)?
+    bool   crossed_011 = false;  ///< did the trace cross f_Edd=0.11 (beat the ceiling)?
+    bool   ok = false;         ///< at least one point past the anchor was accepted
+};
+
+/// Keller pseudo-arclength continuation of the slim-disk branch (Tasks 1-4).
+///
+/// Converges a sub-fold anchor (a from in.spin, the requested Ṁ used as a target;
+/// the anchor is taken at f_Edd≈0.10 the existing way), computes the initial
+/// continuation tangent, then arclength-steps UP, tracing the (Σ,V)/mass branch
+/// AROUND the f_Edd≈0.11 turning point that simple Ṁ-marching cannot cross.  The
+/// continuation unknown is Ṁ; each step is a predictor (tangent) + an augmented
+/// Newton corrector on {R=0, Keller arclength row=0} using the EXACT analytic
+/// Jacobian.  Records every accepted point; the branch shows the fold (where Ṁ̇
+/// flips sign) and the deep-slim physics (H/r, β, f_adv) at the top.
+GRRT_EXPORT SlimArclengthResult solve_slim_disk_arclength(const SlimDiskInputs& in,
+                                                          const OpacityLUTs& opacity);
 } // namespace grrt
 #endif
