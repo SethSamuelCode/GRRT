@@ -613,10 +613,11 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
         const double sqrtDelta = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r), 0.0));
         const double sqrtA     = std::sqrt(std::max(kerr_A(in.mass, in.spin, r), 0.0));
         // Relativistic Q_vis (Group 4 form), Γ≈1 at the thin seed.
-        // Length divisor is the LOCAL radius r_cm = r·r_g (S11 Eqs 13/23: A^½Δ^½/r⁴),
-        // matching Gbalance — NOT the constant r_g.
+        // Geometric factor A^½/(Δ^½r²) (S09 Eq 6 × Eq 4; §23 corrected 2026-06-12):
+        // dimensionless part A^½/(Δ^½r); the length divisor is the LOCAL radius
+        // r_cm = r·r_g, matching Gbalance — NOT the constant r_g.
         const double r_cm      = r * in.r_g;                                     // [cm]
-        const double geomfac3  = sqrtA * sqrtDelta / (r * r * r);               // dimensionless
+        const double geomfac3  = sqrtA / (std::max(sqrtDelta, 1e-30) * r);      // dimensionless
         const double dl_cgs    = (ellK[i] - ell_in) * in.r_g * c_cgs;           // [cm²/s]
         const double Qvis = -(in.mdot / (2.0 * std::numbers::pi)) * dl_cgs * dOmega_dr
                           * (geomfac3 / r_cm);                                   // [erg/cm²/s]
@@ -664,10 +665,10 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
             const double Sig_ = sigma_for_Tc(Tc_);
             Sig_out = Sig_;
             const NodeEval ev = eval_node(in, op, r, Sig_, V_for_sigma(Sig_), ellK[i], Tc_);
-            const double geomfac_e = ev.mech.sqrtA * ev.mech.sqrtDelta / (r * r * r);
+            const double geomfac_e = ev.mech.sqrtA / (std::max(ev.mech.sqrtDelta, 1e-30) * r);
             const double dl_e = (ellK[i] - ell_in) * in.r_g * c_cgs;
             const double Qvis_e = -(in.mdot / (2.0 * std::numbers::pi)) * dl_e * dOmega_dr_node
-                                * ev.Gamma * (geomfac_e / r_cm);   // local r_cm = r·r_g (S11 13/23)
+                                * ev.Gamma * (geomfac_e / r_cm);   // A^½Γ/(Δ^½r²), local r_cm (S09 Eq6×Eq4)
             const double kR = op.lookup_kappa_ross(ev.oz.rho_mid, Tc_)
                             + op.lookup_kappa_es(ev.oz.rho_mid, Tc_);
             const double Qrad_e = 64.0 * sigma_SB * Tc_ * Tc_ * Tc_ * Tc_
@@ -952,7 +953,7 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
 
     // -----------------------------------------------------------------------
     // Group 4: energy ODE Q_vis = Q_rad + Q_adv (N-1 trapezoidal rows, §23).
-    //   Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Δ^½Γ/r⁴)
+    //   Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Γ/(Δ^½r²))   (S09 Eq 6 × Eq 4)
     //   Q_rad = 64 σ T_c⁴/(3 κ_R Σ)
     //   Q_adv = -(Ṁ/2π r²)(P/Σ)[(Γ₁-1)dlnP/dlnr - Γ₁ dlnΣ/dlnr]
     // Evaluate the residual at the interval midpoint trapezoidally: R = (G_i+G_{i+1})/2
@@ -967,16 +968,21 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
         // dΩ/dr in CGS: Ω geometric → 1/s via c/r_g; r geometric → cm via r_g.
         const double dOmega_geom = (b.mech.Omega - a.mech.Omega) / (b.r - a.r); // [1/M²]
         const double dOmega_dr = dOmega_geom * (c_cgs / in.r_g) / in.r_g;        // [1/s/cm]
-        // Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Δ^½Γ/r⁴)  [erg/cm²/s]   (S11 Eqs 13/23)
+        // Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Γ/(Δ^½r²))  [erg/cm²/s]
+        //   = the S09 Eq 6 heating −αP(AΓ²/r³)dΩ/dr with αP eliminated via the
+        //   angular-momentum law (S09 Eq 4 = S11 Eq 23); §23 (corrected 2026-06-12:
+        //   the old A^½Δ^½/r⁴ mis-composition was wrong by Δ/r² — suppressed the
+        //   inner-disk heating and tilted the NT reduction across radii).
         // Dimensional bookkeeping (all quantities below are in CGS unless noted):
         //   In geometric units Q_vis ~ M⁻²; Ṁ·(ℓ-ℓ_in)·dΩ/dr ~ M⁻¹, so the geometric
-        //   factor must carry M⁻¹: A^½Δ^½/r⁴ (A^½~M², Δ^½~M, r⁴~M⁴).
-        //   geomfac ≡ A^½Δ^½/r³ is DIMENSIONLESS; the remaining 1/r in CGS is the
+        //   factor must carry M⁻¹: A^½/(Δ^½r²) (A^½~M², Δ^½~M, r²~M²).
+        //   geomfac ≡ A^½/(Δ^½r) is DIMENSIONLESS; the remaining 1/r in CGS is the
         //   LOCAL radius r_cm = r·r_g [cm], NOT the constant r_g (using the constant
         //   r_g inflates Q_vis by exactly r in M units and breaks the NT reduction):
         //     [g/s] × [cm²/s] × [1/(s·cm)] × (1/r_cm)[1/cm] = g/s³ = erg/cm²/s.  ✓
         // Assembly: use geomfac/r_cm as the net geometric factor.
-        const double geomfac = a.mech.sqrtA * a.mech.sqrtDelta / (a.r * a.r * a.r); // dimensionless (A^{1/2}~M^2, Delta^{1/2}~M, /r^3~1/M^3)
+        const double geomfac = a.mech.sqrtA
+                             / (std::max(a.mech.sqrtDelta, 1e-30) * a.r);  // dimensionless (A^{1/2}~M^2, /(Delta^{1/2}~M · r~M))
         // (Ṁ/2π)(ℓ-ℓ_in): ℓ geometric → cm²/s via r_g·c.
         const double dl_cgs = (a.ell - ell_in) * in.r_g * c_cgs;                    // [cm²/s]
         const double Qvis = -(Mdot / (2.0 * std::numbers::pi)) * dl_cgs * dOmega_dr
@@ -1493,10 +1499,11 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         const double r_cm = a.r * in.r_g;
         const double dr = b.r - a.r;
         const double convOm = (c_cgs/in.r_g)/in.r_g;
-        const double geomfac = a.mech.sqrtA * a.mech.sqrtDelta / (a.r*a.r*a.r);
+        const double geomfac = a.mech.sqrtA / (std::max(a.mech.sqrtDelta, 1e-30) * a.r);
         const double dl_cgs = (a.ell - ell_in) * in.r_g * c_cgs;
         const double dOmega_dr = (b.mech.Omega - a.mech.Omega)/dr * convOm;
-        // Qvis = −K·dl_cgs·dOmega_dr·Γ_a·(geomfac/r_cm),  K=Mdot/2π.
+        // Qvis = −K·dl_cgs·dOmega_dr·Γ_a·(geomfac/r_cm),  K=Mdot/2π,
+        // geomfac = A^½/(Δ^½r) (S09 Eq 6 × Eq 4; §23 corrected 2026-06-12).
         // (Local r_cm = a.r·r_g, matching Gbalance; r is not a state variable, so
         //  this is a pure prefactor — no extra derivative terms.)
         const double K = Mdot/twopi;
@@ -3428,7 +3435,14 @@ SlimArclengthResult solve_slim_disk_arclength(const SlimDiskInputs& in,
     // (a beyond the cold-seed basin) we spin-walk the anchor up from a=0 at f_Edd=0.10
     // via warm_reproject_spin (the existing Phase-B homotopy), so the anchor itself
     // is in-basin before continuation begins.
-    const double f_anchor = 0.10;
+    // Anchor f_Edd: 0.10 by default; env-overridable (SLIM_ARC_ANCHOR_F) for
+    // diagnostics — after the 2026-06-12 §23 Q_vis metric-factor correction the
+    // cold-seed fold sits below 0.05 at a=0.9, so probes anchor at ~0.02.
+    const double f_anchor = [&] {
+        const char* e = std::getenv("SLIM_ARC_ANCHOR_F");
+        const double v = e ? std::atof(e) : 0.0;
+        return (v > 0.0 && v < 1.0) ? v : 0.10;
+    }();
     SlimDiskInputs in_anchor = in;
     in_anchor.mdot = f_anchor * Mdot_Edd;
     in_anchor.max_iters = std::max(in.max_iters, 800);

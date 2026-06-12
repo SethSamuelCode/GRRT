@@ -259,3 +259,13 @@ if(GRRT_ENABLE_CUDA)
     target_link_libraries(grrt-cuda-test PRIVATE CUDA::cudart)
     set_target_properties(grrt-cuda-test PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
+
+# TEMPORARY single-entry Jacobian FD step-scan (classifies the post-Qvis-fix
+# marginal FD-gate failure).  Safe to delete along with tools/slim_jacentry_scan.cpp.
+add_executable(slim-jacentry-scan tools/slim_jacentry_scan.cpp)
+target_include_directories(slim-jacentry-scan PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# TEMPORARY near-Eddington profile dump + mesh check (post-Qvis-fix re-test).
+# Safe to delete along with tools/slim_edd09_dump.cpp.
+add_executable(slim-edd09-dump tools/slim_edd09_dump.cpp)
+target_include_directories(slim-edd09-dump PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)

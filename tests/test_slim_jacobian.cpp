@@ -247,9 +247,16 @@ static void run_point(const OpacityLUTs& op, const char* name,
     // grid-stretch column uses a larger step (its FD reference is noisy — the grid
     // re-spacing is the FD Jacobian's least-accurate column, which is precisely what
     // the analytic r_s column fixes).
+    // rel_step 1e-4 → 3e-5 (2026-06-12): after the §23 Q_vis metric-factor fix the
+    // gas-dominated seed's sonic L'Hôpital row gained enough Tc[0]-curvature that the
+    // Richardson reference's O(h⁴) remainder at h=1e-4·Tc[0] was 1.3e-6 — above the
+    // 1e-6 gate.  A single-entry step scan (tools/slim_jacentry_scan.cpp) shows the
+    // CD converging O(h²) to the ANALYTIC value (exact to 1e-9 at h_rel=1e-7), so the
+    // reference, not the analytic Jacobian, was the inaccurate side; 3e-5 puts the
+    // O(h⁴) remainder ~120× lower while round-off cancellation stays ≪ the gates.
     const std::vector<char> row_mask = make_row_mask(N, ported);
     const Mismatch m = compare(Ja, U, in, op, n, /*rs_col=*/4 * N + 1,
-                               /*rel_step=*/1e-4, /*rs_rel_step=*/2e-3, row_mask);
+                               /*rel_step=*/3e-5, /*rs_rel_step=*/2e-3, row_mask);
 
     if (m.wc_nors >= 0)
         std::printf("  worst non-r_s column 2-norm mismatch: rel=%.3e at col=%s (worst entry row=%d)\n",

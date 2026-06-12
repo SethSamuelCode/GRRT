@@ -258,7 +258,7 @@ static NTState nt_state(const SlimDiskInputs& in, const OpacityLUTs& op, double 
 // src/slim_disk_radial.cpp; FD across two NT states at r*(1 -+ delta)).
 // ---------------------------------------------------------------------------
 struct SlimTerms {
-    double Qvis_code = 0.0;   // geomfac / r_cm = /(r r_g) (the code's assembly, S11 13/23)
+    double Qvis_code = 0.0;   // geomfac / r_cm = /(r r_g) (the code's assembly, S09 Eq6×Eq4)
     double Qvis_old  = 0.0;   // geomfac / r_g             (PRE-FIX buggy assembly; before/after ref)
     double Qrad = 0.0, Qadv = 0.0;
     double dl_cgs = 0.0, dOmega_dr = 0.0, geomfac = 0.0, dlnP = 0.0, dlnS = 0.0;
@@ -285,11 +285,11 @@ static SlimTerms slim_terms_on(const SlimDiskInputs& in, const OpacityLUTs& op,
 
     const double sqrtD = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r), 0.0));
     const double sqrtA = std::sqrt(std::max(kerr_A(in.mass, in.spin, r), 0.0));
-    t.geomfac = sqrtA * sqrtD / (r*r*r);                                  // dimensionless
+    t.geomfac = sqrtA / (std::max(sqrtD, 1e-30) * r);                     // dimensionless, A^½/(Δ^½r) (S09 Eq6×Eq4)
     t.dl_cgs  = (mid.ellK - ell_in) * in.r_g * c_cgs;                     // [cm^2/s]
     const double Gamma = 1.0 / std::sqrt(1.0 - mid.V * mid.V);
 
-    // Q_vis exactly as Gbalance assembles it (geomfac / r_cm — LOCAL radius, S11 13/23):
+    // Q_vis exactly as Gbalance assembles it (geomfac / r_cm — LOCAL radius; S09 Eq6×Eq4):
     t.Qvis_code = -(in.mdot / (2.0 * std::numbers::pi)) * t.dl_cgs * t.dOmega_dr
                 * Gamma * (t.geomfac / r_cm);
     // PRE-FIX assembly (constant r_g divisor) kept as the before/after reference:
@@ -393,7 +393,7 @@ int main() {
         std::printf("dOmega/dr (geom)  = %.6e [1/M^2] -> CGS %.6e [1/s/cm]\n",
                     t.dOmega_dr / ((c_cgs/in.r_g)/in.r_g), t.dOmega_dr);
         std::printf("sqrtA=%.6e [M^2]  sqrtD=%.6e [M]  r^3=%.6e [M^3]\n", sqrtA, sqrtD, r*r*r);
-        std::printf("geomfac A^.5D^.5/r^3 = %.6f  (dimensionless; ->1 as r->inf)\n", t.geomfac);
+        std::printf("geomfac A^.5/(D^.5 r) = %.6f  (dimensionless; ->1 as r->inf)\n", t.geomfac);
         std::printf("CODE  divisor r_cm = %.4e cm -> Qvis_code = %.6e erg/cm^2/s\n", r_cm, t.Qvis_code);
         std::printf("OLD   divisor r_g  = %.4e cm -> Qvis_old  = %.6e erg/cm^2/s (pre-fix)\n", in.r_g, t.Qvis_old);
         std::printf("F_PT(one face)    = %.6e   F_NT(total) = %.6e   2*F_SS73 = %.6e\n",

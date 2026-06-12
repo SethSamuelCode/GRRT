@@ -240,8 +240,15 @@ dln V/dln r = (𝒩₁/𝒟₀)·(1−V²)
 
 **Sonic-point regularity (S09 Eq 10; S11 Eq 34):** at `r_s`, BOTH `𝒟₀(r_s)=0` AND `𝒩₁(r_s)=0`. Eigenvalue closed = `ℓ_in`; `r_s` is *found* (not prescribed) and lies **inside the ISCO** at high `Ṁ`. At `r_s`: `|V|=c_s`.
 
-**Viscous heating (S11 Eqs 13/23):** `Q_vis = −(Ṁ/2π)·(ℓ−ℓ_in)·(dΩ/dr)·(A^½ Δ^½ Γ / r⁴)`. `Γ=1/√(1−V²)` (Lorentz factor). Both faces. `Q_vis>0`.
-*Dimensional check (geometric units):* `Q_vis ~ M⁻²`; `Ṁ·(ℓ−ℓ_in)·dΩ/dr ~ M·M·M⁻² = M⁻¹`; so the geometric factor must carry `M⁻¹ = A^½Δ^½/r⁴` (`A^½~M², Δ^½~M, r⁴~M⁴`). In CGS assembly the missing `[1/cm]` is the **LOCAL** radius `r_cm = r·r_g`, NOT the constant `r_g` — dividing by the constant `r_g` (i.e. using `/r³`) inflates `Q_vis` by exactly `r` (in M units) and breaks the §22 thin-disk superset check above (`Q_vis/F_NT → r`, not 1, as `Ṁ→0`).
+**Viscous heating (S09 Eq 6 composed with S09 Eq 4 = S11 Eq 23):**
+```
+Q_vis = −αP·(A Γ²/r³)·(dΩ/dr)                              (S09 Eq 6 — the primary form)
+      = −(Ṁ/2π)·(ℓ−ℓ_in)·(dΩ/dr)·( A^½ Γ / (Δ^½ r²) )      (composed via (3): αP = (Ṁ/2π)(ℓ−ℓ_in)·r/(A^½Δ^½Γ))
+```
+`dΩ/dr` is the derivative of the **LOCAL** orbital `Ω(ℓ) = u^φ/u^t` (S09 Eq 6), **NOT** Keplerian — the Keplerian `√(M/r³)` appears only in S11's Eq-13 *vertical* flux-generation, which is the quarantined `𝒟/𝒞` convention (see the §22 convention note); it is not the radial heating law. `Γ` sits in the **NUMERATOR** (net `Γ¹` = `Γ²` from the shear in Eq 6 × `Γ⁻¹` from inverting the torque law (3)). Both faces. `Q_vis>0`.
+⚠ **Metric factor corrected 2026-06-12:** the previous transcription `A^½Δ^½Γ/r⁴` was a mis-composition of Eqs 6×4, wrong by `Δ/r²` (a=0.9: 0.42 at r=3, 0.81 at r=10, 0.96 at r=50). Both forms share the Newtonian limit (`→1/r`) and dimension (`A^½/(Δ^½r²) ~ M²/(M·M²) = M⁻¹`), so the r=50 NT gate barely saw it — but the old form suppressed inner-disk heating up to ~2.4× and tilted `Q_vis/F_NT` across radii (0.39→1.06 over r=3..50 on the exact NT state; corrected: ≈0.91–1.13, flat; the residual flat ≈+10% vs Page-Thorne is *consistent with* (inferred, not independently verified) the slim model's neglected radiative angular-momentum flux — the `2Fℒ` term PT keeps and S09 Eq 4 drops — it declines slowly toward 1 with r and is NOT the r-dependent signature of a transcription error).
+⚠ **Γ definition (FLAGGED, deferred):** S11 (text after Eq 23) defines `Γ² = 1/(1−V²) + ℒ²r²/A` (radial×azimuthal Lorentz factor); S09 only says "γ is the Lorentz factor" without a formula. The code uses the radial-only `Γ = 1/√(1−V²)` in BOTH the torque law (3) and `Q_vis` — internally consistent, but missing the azimuthal `γ_φ` part (≈+1% at r=50, ≈+10–25% inside r≲6 at a=0.9). A fix must change (3), `Q_vis`, and the analytic Jacobian TOGETHER (`Γ` gains an ℓ-dependence, `∂Γ/∂ℓ = ℓr²/(A·Γ)`); deferred — beyond the 2026-06-12 Q_vis-only correction.
+*Dimensional check (geometric units):* `Q_vis ~ M⁻²`; `Ṁ·(ℓ−ℓ_in)·dΩ/dr ~ M·M·M⁻² = M⁻¹`; the geometric factor `A^½/(Δ^½r²)` carries the `M⁻¹` (`A^½~M², Δ^½~M, r²~M²`). In CGS assembly the `[1/cm]` is the **LOCAL** radius `r_cm = r·r_g`, NOT the constant `r_g` — dividing by the constant `r_g` inflates `Q_vis` by exactly `r` (in M units) and breaks the §22 thin-disk superset check above (the 2026-06-11 fix; still applies).
 
 **One-zone radiative cooling (S11 [arXiv:1108.0396] Eq 3.19; both faces):**
 ```

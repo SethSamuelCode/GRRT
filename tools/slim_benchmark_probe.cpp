@@ -118,14 +118,14 @@ static std::vector<NodeTherm> therm_of(const SlimDiskInputs& in, const OpacityLU
                           / (3.0 * std::max(kR, 1e-300) * std::max(Sig, kSigmaFloor));
         // Slim's OWN Q_vis (Group-4 heating, CGS) — identical assembly to the residual
         // Gbalance: Q_vis = -(Mdot/2pi)(ell-ell_in)(dOmega/dr)(A^½Δ^½Γ/r³)/r_cm
-        // (LOCAL r_cm = r·r_g divisor, i.e. A^½Δ^½Γ/r⁴ in geometric units; S11 13/23).
+        // (LOCAL r_cm = r·r_g divisor, i.e. A^½Γ/(Δ^½r²) in geometric units; S09 Eq6×Eq4).
         const double Om_i = omega_from_ell(in.mass,in.spin,r,out.r[i]>0?U[4*i+2]:0.0);
         const double Om_j = omega_from_ell(in.mass,in.spin,out.r[j],U[4*j+2]);
         const double dOmega_geom = (Om_j - Om_i) / (out.r[j] - r);          // [1/M^2]
         const double dOmega_dr = dOmega_geom * (c_cgs / in.r_g) / in.r_g;   // [1/s/cm]
         const double sqrtA = std::sqrt(std::max(kerr_A(in.mass,in.spin,r),0.0));
         const double sqrtD = std::sqrt(std::max(kerr_delta(in.mass,in.spin,r),0.0));
-        const double geomfac = sqrtA*sqrtD/(r*r*r);
+        const double geomfac = sqrtA/(std::max(sqrtD,1e-30)*r);  // A^½/(Δ^½r) (S09 Eq6×Eq4, §23 corrected)
         const double Gam = 1.0/std::sqrt(1.0 - std::min(out.V[i]*out.V[i],0.999999));
         const double dl_cgs = (U[4*i+2] - U[4*N+0]) * in.r_g * c_cgs;
         const double Qvis = -(Mdot/(2.0*std::numbers::pi)) * dl_cgs * dOmega_dr
