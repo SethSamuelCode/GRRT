@@ -310,9 +310,12 @@ static SlimTerms slim_terms_on(const SlimDiskInputs& in, const OpacityLUTs& op,
     const OneZoneState oz_hi = one_zone_closure(Shi_, Thi, hi.r, in, op);
     t.dlnP = (std::log(oz_hi.P) - std::log(oz_lo.P)) / (std::log(hi.r) - std::log(lo.r));
     t.dlnS = (std::log(Shi_)    - std::log(Slo_))    / (std::log(hi.r) - std::log(lo.r));
+    // S11 Eq 29 one-zone bracket [η₃·dlnP − (1+η₃)·dlnΣ], η₃ = 1/(Γ₁−1) = 3/2
+    // (flag #1 correction 2026-06-12; was the inverted [(Γ₁−1)dlnP − Γ₁dlnΣ]).
+    const double eta3 = 1.0 / (kGamma1 - 1.0);
     t.Qadv = -(in.mdot / (2.0 * std::numbers::pi * r_cm * r_cm))
            * (oz.P / Sig)
-           * ((kGamma1 - 1.0) * t.dlnP - kGamma1 * t.dlnS);
+           * (eta3 * t.dlnP - (1.0 + eta3) * t.dlnS);
     return t;
 }
 

@@ -40,7 +40,7 @@ struct SlimDiskRadial {
     std::vector<double> Omega;   ///< orbital angular velocity [1/s]
     std::vector<double> Tc;      ///< midplane temperature [K]
     std::vector<double> H;       ///< scale height [cm]
-    std::vector<double> f_adv;   ///< advected fraction Q_adv/Q_vis
+    std::vector<double> f_adv;   ///< advected fraction f_adv ≡ Q_adv/Q_rad (Sądowski; NOT Narayan-Yi Q_adv/Q_vis)
     double ell_in = 0.0;         ///< inner specific angular momentum (eigenvalue)
     double r_sonic = 0.0;        ///< sonic radius [M]
     bool   converged = false;

@@ -236,7 +236,7 @@ The expanded, error-prone terms the Phase-1 transonic radial residual needs (§2
        + Ω_⊥²·(η₄/η₃)·dln η₄/dln r
 dln V/dln r = (𝒩₁/𝒟₀)·(1−V²)
 ```
-`Γ̃₁ = 1 + 1/η₃` (effective adiabatic index; one-zone `η₃→Γ₁−1` ⇒ `Γ̃₁→Γ₁`). `𝒜` = the gravitational/centrifugal term (S09 Eq 3: the `(Ω−Ω_K⁺)(Ω−Ω_K⁻)/(1−Ω̃²R̃²)` combo, `Ω̃=Ω−ω`, `ω=2Mar/A`, `R̃=A/(r²Δ^½)`). `η₃,η₄` = vertical weight functions (one-zone constants).
+`Γ̃₁ = 1 + 1/η₃` (effective adiabatic index). ⚠ **`η₃ ≡ E/P`** (S11 Eq 8: vertically-integrated internal energy over pressure) — one-zone monatomic gas `η₃ = 1/(Γ₁−1) = 3/2` (so `Γ̃₁ = 1+1/η₃ = Γ₁ = 5/3`). **NOT `η₃ = Γ₁−1`** (the inverse; that slip propagated into the §23 `Q_adv` bracket — corrected 2026-06-12, flag #1). [Radiation-dominated `η₃→3`, `Γ̃₁→4/3` is the deferred state-dependent refinement #11.] `𝒜` = the gravitational/centrifugal term (S09 Eq 3: the `(Ω−Ω_K⁺)(Ω−Ω_K⁻)/(1−Ω̃²R̃²)` combo, `Ω̃=Ω−ω`, `ω=2Mar/A`, `R̃=A/(r²Δ^½)`). `η₃,η₄` = vertical weight functions (one-zone constants).
 
 **Sonic-point regularity (S09 Eq 10; S11 Eq 34):** at `r_s`, BOTH `𝒟₀(r_s)=0` AND `𝒩₁(r_s)=0`. Eigenvalue closed = `ℓ_in`; `r_s` is *found* (not prescribed) and lies **inside the ISCO** at high `Ṁ`. At `r_s`: `|V|=c_s`.
 
@@ -258,9 +258,11 @@ Q_rad = 64·σ·T_c⁴ / (3·κ_R·Σ)        κ_R = Rosseland mean (es + Kramer
 
 **Advective cooling (S11 Eq 29, one-zone):**
 ```
-Q_adv = −(Ṁ/2πr²)·(P/Σ)·[ (Γ₁−1)·dln P/dln r − Γ₁·dln Σ/dln r ]     ( ≡ (Ṁ/2πr²)·T·dS/dr )
+Q_adv = −(Ṁ/2πr²)·(P/Σ)·[ η₃·dln P/dln r − (1+η₃)·dln Σ/dln r ]     ( ≡ −(Ṁ/2πr²)·T·dS/dln r )
+        η₃ = 1/(Γ₁−1) = 3/2  (one-zone gas);   for Γ₁=5/3 the bracket is [ 1.5·dlnP − 2.5·dlnΣ ]
 ```
 A *cooling* term (carries heat inward). `Q_vis = Q_rad + Q_adv`.
+⚠ **Bracket corrected 2026-06-12 (flag #1, EVIDENCE).** The previous `[ (Γ₁−1)·dlnP − Γ₁·dlnΣ ]` = `[ 0.667·dlnP − 1.667·dlnΣ ]` used the **inverted** `η₃ = Γ₁−1` (see the §23 `η₃` note above). The correct one-zone form is `[ η₃·dlnP − (1+η₃)·dlnΣ ]` with `η₃ = 1/(Γ₁−1)`, verified two independent ways: (a) the entropy identity `T dS = d(E/Σ) + P d(1/Σ)` with `E = η₃P` ⇒ `T dS/dln r = (P/Σ)[η₃ dlnP − (1+η₃)dlnΣ]`; (b) ideal-gas `s = c_v ln(P ρ^{−Γ})`, `c_v = 1/(Γ−1)` ⇒ `(P/Σ)(1/(Γ−1))[dlnP − Γ dlnΣ]` = same bracket. **Consistency check:** with the `(2πr²/Ṁη₃)` normalization in `𝒩₁`, the corrected bracket collapses to exactly S11 Eq 32's advection term `−(P/Σ)[dlnP − Γ̃₁·dlnΣ]/c²` (since `(1+η₃)/η₃ = 1+1/η₃ = Γ̃₁`); the old bracket gave `−(P/Σ)[0.44·dlnP − 1.11·dlnΣ]`, internally inconsistent with `𝒟₀ = V² − Γ̃₁ P/Σ`. The bug is **invisible to both gates** (NT-reduction runs at `Ṁ→0` where `Q_adv→0`; the FD-Jacobian gate is satisfied because the analytic Jacobian implements the same wrong bracket consistently) — the derivation is the proof. It corrupts the energy rows, `𝒩₁`, the `ℓ_in`/`r_s` eigenvalue, and `f_adv`. Fixed at all residual + extraction + analytic-Jacobian sites together (`kAdvP = η₃`, `kAdvS = 1+η₃`).
 
 **`f_adv` convention (LOCKED — Sądowski, trap #11):** `f_adv ≡ Q_adv/Q_rad`; radiated fraction `= 1/(1+f_adv)`; `Q_rad = Q_vis/(1+f_adv)`; `f_adv=0` ⇒ Novikov-Thorne. (NOT Narayan-Yi `Q_adv/Q_vis`.)
 

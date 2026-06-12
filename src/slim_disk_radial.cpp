@@ -368,8 +368,12 @@ using slim_detail::isco_prograde;
 
 // Fixed Phase-1 adiabatic indices (documented simplification).
 constexpr double kGamma1 = 5.0 / 3.0;          // ideal monatomic gas
-constexpr double kEta3   = 1.0 / (kGamma1 - 1.0); // = 1.5
+constexpr double kEta3   = 1.0 / (kGamma1 - 1.0); // η₃ ≡ E/P = 1/(Γ₁−1) = 1.5 (S11 Eq 8, one-zone gas)
 constexpr double kGtilde1 = 1.0 + 1.0 / kEta3;  // = Γ̃₁ = 5/3
+// Q_adv entropy-bracket coefficients (S11 Eq 29, one-zone): [η₃·dlnP − (1+η₃)·dlnΣ].
+// η₃ = 1/(Γ₁−1) = 3/2 (NOT Γ₁−1; that inversion was flag #1, corrected 2026-06-12).
+constexpr double kAdvP = kEta3;        // dlnP coefficient = η₃     (= 1.5)
+constexpr double kAdvS = 1.0 + kEta3;  // dlnΣ coefficient = 1 + η₃ (= 2.5)
 
 // State guards for transient Newton iterates.
 constexpr double kSigmaFloor = 1e-30;
@@ -898,11 +902,11 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
         const NodeEval& b = e[j];
         const double dlnP = dln(a.oz.P, b.oz.P, a.r, b.r);
         const double dlnS = dln(a.Sigma, b.Sigma, a.r, b.r);
-        // Q_adv (S11 Eq 29, CGS) = -(Ṁ/2π r_cm²)(P/Σ)[(Γ₁-1)dlnP - Γ₁ dlnΣ]
+        // Q_adv (S11 Eq 29, CGS) = -(Ṁ/2π r_cm²)(P/Σ)[η₃ dlnP - (1+η₃) dlnΣ], η₃=1/(Γ₁-1)
         const double r_cm = a.r * in.r_g;
         const double Qadv = -(Mdot / (2.0 * std::numbers::pi * r_cm * r_cm))
                           * (a.oz.P / a.Sigma)
-                          * ((kGamma1 - 1.0) * dlnP - kGamma1 * dlnS);   // [erg/cm²/s]
+                          * (kAdvP * dlnP - kAdvS * dlnS);   // [erg/cm²/s]
         // (2π r²/(Ṁ η₃))·Q_adv, rendered geometric/dimensionless:
         //   2π r_cm²/(Ṁ[g/s] η₃) [s·cm²/g] · Q_adv[erg/cm²/s=g/s³] = [cm²/s²];  /c² → dimensionless
         const double term = (2.0 * std::numbers::pi * r_cm * r_cm / (Mdot * kEta3)) * Qadv;
@@ -955,7 +959,7 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
     // Group 4: energy ODE Q_vis = Q_rad + Q_adv (N-1 trapezoidal rows, §23).
     //   Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Γ/(Δ^½r²))   (S09 Eq 6 × Eq 4)
     //   Q_rad = 64 σ T_c⁴/(3 κ_R Σ)
-    //   Q_adv = -(Ṁ/2π r²)(P/Σ)[(Γ₁-1)dlnP/dlnr - Γ₁ dlnΣ/dlnr]
+    //   Q_adv = -(Ṁ/2π r²)(P/Σ)[η₃ dlnP/dlnr - (1+η₃) dlnΣ/dlnr], η₃=1/(Γ₁-1)=3/2
     // Evaluate the residual at the interval midpoint trapezoidally: R = (G_i+G_{i+1})/2
     // where G = Q_vis - Q_rad - Q_adv, with dΩ/dr, dlnP, dlnΣ as FD across i,i+1.
     // All CGS [erg/cm²/s].
@@ -997,7 +1001,7 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
         const double dlnS = dln(a.Sigma, b.Sigma, a.r, b.r);
         const double Qadv = -(Mdot / (2.0 * std::numbers::pi * r_cm * r_cm))
                           * (a.oz.P / a.Sigma)
-                          * ((kGamma1 - 1.0) * dlnP - kGamma1 * dlnS);               // [erg/cm²/s]
+                          * (kAdvP * dlnP - kAdvS * dlnS);               // [erg/cm²/s]
         return Qvis - Qrad - Qadv;
     };
 
@@ -1322,7 +1326,7 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
     };
 
     // ---- Qadv_geom(i,j) value + gradient (the §23 (2πr²/Ṁη₃)Q_adv, dimensionless) ----
-    // Qadv_geom = K_q · (P_i/Σ_i) · [(Γ₁−1)dlnP − Γ₁ dlnΣ] ,
+    // Qadv_geom = K_q · (P_i/Σ_i) · [η₃ dlnP − (1+η₃) dlnΣ] ,
     //   K_q = (2π r_cm²/(Ṁ η₃))·(−Ṁ/(2π r_cm²))/c² = −1/(η₃ c²)   (r_cm cancels)
     // Depends on P_i,Σ_i (closure of node i) and on P_j,Σ_j via the dlnP,dlnΣ stencils.
     // grad arrays: g_i[4]={Σ,V,ell,Tc} for node i, g_j[4] for node j; only Σ,Tc enter.
@@ -1333,7 +1337,7 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         const double Pa = a.oz.P, Sa = a.Sigma, Pb = b.oz.P, Sb = b.Sigma;
         const double dlnP = dln_val(Pa, Pb, i, j);
         const double dlnS = dln_val(Sa, Sb, i, j);
-        const double bracket = (kGamma1 - 1.0) * dlnP - kGamma1 * dlnS;
+        const double bracket = kAdvP * dlnP - kAdvS * dlnS;
         const double PoverS = Pa / Sa;
         const double Kq = -1.0 / (kEta3 * c_cgs * c_cgs);
         val = Kq * PoverS * bracket;
@@ -1346,13 +1350,13 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         const double dP_dPi = -1.0/(Pa*dlnr), dP_dPj = 1.0/(Pb*dlnr);
         const double dS_dSi = -1.0/(Sa*dlnr), dS_dSj = 1.0/(Sb*dlnr);
         // node i contributions
-        const double dbr_dSi = (kGamma1-1.0)*dP_dPi*nj[i].ozj.dP[0] - kGamma1*dS_dSi*nj[i].dSig;
-        const double dbr_dTi = (kGamma1-1.0)*dP_dPi*nj[i].ozj.dP[1];
+        const double dbr_dSi = kAdvP*dP_dPi*nj[i].ozj.dP[0] - kAdvS*dS_dSi*nj[i].dSig;
+        const double dbr_dTi = kAdvP*dP_dPi*nj[i].ozj.dP[1];
         gi[0] = Kq * (dPoverS_dSi*nj[i].dSig*bracket + PoverS*dbr_dSi);   // Σ_i
         gi[3] = Kq * (dPoverS_dTi*nj[i].dTce*bracket + PoverS*dbr_dTi);   // Tc_i
         // node j contributions (only through the stencils dlnP,dlnΣ)
-        const double dbr_dSj = (kGamma1-1.0)*dP_dPj*nj[j].ozj.dP[0] - kGamma1*dS_dSj*nj[j].dSig;
-        const double dbr_dTj = (kGamma1-1.0)*dP_dPj*nj[j].ozj.dP[1];
+        const double dbr_dSj = kAdvP*dP_dPj*nj[j].ozj.dP[0] - kAdvS*dS_dSj*nj[j].dSig;
+        const double dbr_dTj = kAdvP*dP_dPj*nj[j].ozj.dP[1];
         gj[0] = Kq * PoverS * dbr_dSj;   // Σ_j
         gj[3] = Kq * PoverS * dbr_dTj;   // Tc_j
     };
@@ -1528,10 +1532,10 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         const double dQrad_dT = Qrad * ( 4.0/Ta  - (dkR_drho*drho_dT + dkR_dT)/kRs );
         gi[0] += -dQrad_dS * nj[i].dSig;   // G = ... − Qrad
         gi[3] += -dQrad_dT * nj[i].dTce;
-        // Qadv = −(Mdot/2π r_cm²)(P/Σ)[(Γ₁−1)dlnP − Γ₁ dlnΣ]  (CGS, NOT /c²).
+        // Qadv = −(Mdot/2π r_cm²)(P/Σ)[η₃ dlnP − (1+η₃) dlnΣ]  (CGS, NOT /c²).
         const double Pa = a.oz.P, Pb = b.oz.P, Sb = b.Sigma;
         const double dlnP = dln_val(Pa,Pb,i,j), dlnS = dln_val(Sa,Sb,i,j);
-        const double bracket = (kGamma1-1.0)*dlnP - kGamma1*dlnS;
+        const double bracket = kAdvP*dlnP - kAdvS*dlnS;
         const double Kc = -(Mdot/(twopi*r_cm*r_cm));
         const double PoverS = Pa/Sa;
         const double dlnr = std::log(r[j]) - std::log(r[i]);
@@ -1539,10 +1543,10 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         const double dPoverS_dT = nj[i].ozj.dP[1]/Sa;
         const double dP_dPi=-1.0/(Pa*dlnr), dP_dPj=1.0/(Pb*dlnr);
         const double dS_dSi=-1.0/(Sa*dlnr), dS_dSj=1.0/(Sb*dlnr);
-        const double dbr_dSi=(kGamma1-1.0)*dP_dPi*nj[i].ozj.dP[0]-kGamma1*dS_dSi*nj[i].dSig;
-        const double dbr_dTi=(kGamma1-1.0)*dP_dPi*nj[i].ozj.dP[1];
-        const double dbr_dSj=(kGamma1-1.0)*dP_dPj*nj[j].ozj.dP[0]-kGamma1*dS_dSj*nj[j].dSig;
-        const double dbr_dTj=(kGamma1-1.0)*dP_dPj*nj[j].ozj.dP[1];
+        const double dbr_dSi=kAdvP*dP_dPi*nj[i].ozj.dP[0]-kAdvS*dS_dSi*nj[i].dSig;
+        const double dbr_dTi=kAdvP*dP_dPi*nj[i].ozj.dP[1];
+        const double dbr_dSj=kAdvP*dP_dPj*nj[j].ozj.dP[0]-kAdvS*dS_dSj*nj[j].dSig;
+        const double dbr_dTj=kAdvP*dP_dPj*nj[j].ozj.dP[1];
         const double dQadv_dSi = Kc*(dPoverS_dS*nj[i].dSig*bracket + PoverS*dbr_dSi);
         const double dQadv_dTi = Kc*(dPoverS_dT*nj[i].dTce*bracket + PoverS*dbr_dTi);
         const double dQadv_dSj = Kc*PoverS*dbr_dSj;
@@ -2570,7 +2574,7 @@ static void unpack_profile(const SlimDiskInputs& in, const OpacityLUTs& opacity,
         const double r_cm = r * in.r_g;
         const double Qadv = -(Mdot / (2.0 * std::numbers::pi * r_cm * r_cm))
                           * (oz.P / std::max(Sig, kSigmaFloor))
-                          * ((kGamma1 - 1.0) * dlnP - kGamma1 * dlnS);    // [erg/cm²/s]
+                          * (kAdvP * dlnP - kAdvS * dlnS);    // [erg/cm²/s]
         const double rho_mid = oz.rho_mid;
         const double kR = opacity.lookup_kappa_ross(rho_mid, Tc) + opacity.lookup_kappa_es(rho_mid, Tc);
         const double Qrad = 64.0 * sigma_SB * Tc*Tc*Tc*Tc

@@ -6,7 +6,38 @@
 
 ## 0. THE NEXT TASK (the resume action)
 
-**Have `fable` AUDIT EVERY EQUATION in the slim-disk solver against EXTERNAL PRIMARY SOURCES, and re-verify our first principles.** Opus originally verified the §22/§23 formulas and did a good job — but `fable` has since found **two transcription errors opus missed** (see §3), so an independent line-by-line re-audit is warranted to catch any remaining slips before we trust high-Eddington results.
+**✅ AUDIT DONE (2026-06-12).** `fable` audited every §19–§23 equation vs the primary sources. Result: foundation sound (20+ equations CONFIRMED, incl. both prior Q_vis fixes), **one NEW transcription bug found + FIXED** (flag #1, Q_adv bracket — see §3), plus root-cause doc typo (#2), header comment (#3), doc gloss (#4). Both gates green post-fix (FD-Jacobian 0 failures; NT-reduction flat 0.91–1.13, unmoved). **NEXT: (a) commit the flag-#1 fix (message below / from chat); (b) implement refinements #11 (state-dependent η₃/Γ̃₁) then #12 (full azimuthal Γ) in `disk-approach-a-refinements.md` — the prioritized near-Eddington accuracy fixes; (c) re-measure the fold and attempt f_Edd≈0.9.** A NEW gate is still owed: an entropy-form probe asserting Q_adv = −(Ṁ/2πr²)·T·dS/dlnr at MODERATE Ṁ (both existing gates are blind to Q_adv).
+
+**Commit message (flag #1):**
+```
+fix(slim-disk): correct §23 Q_adv entropy bracket [(Γ₁−1)dlnP−Γ₁dlnΣ] → [η₃dlnP−(1+η₃)dlnΣ], η₃=1/(Γ₁−1) (S11 Eq 29)
+
+fable's equation audit found the one-zone advective-cooling bracket used the
+INVERTED energy moment η₃=Γ₁−1 (=2/3) instead of η₃≡E/P=1/(Γ₁−1) (=3/2). Root
+cause: a doc typo at §23 ("one-zone η₃→Γ₁−1") that propagated into the code.
+Verified two independent ways: entropy identity TdS=d(E/Σ)+Pd(1/Σ) with E=η₃P, and
+ideal-gas s=c_v ln(Pρ^−Γ), c_v=1/(Γ−1) — both give [η₃dlnP−(1+η₃)dlnΣ]=[1.5dlnP−2.5dlnΣ].
+With the /η₃ normalization the 𝒩₁ advection term then collapses to exactly S11
+Eq 32's −(P/Σ)[dlnP−Γ̃₁dlnΣ] (since (1+η₃)/η₃=Γ̃₁); the old bracket gave
+−(P/Σ)[0.44dlnP−1.11dlnΣ], internally inconsistent with 𝒟₀=V²−Γ̃₁P/Σ.
+
+Q_adv was ~2.4–5× too small (slope-dependent) and wrong-shaped — it corrupts the
+energy rows, 𝒩₁, the ℓ_in/r_s eigenvalue, and f_adv. INVISIBLE to both gates
+(NT-reduction runs at Ṁ→0 where Q_adv→0; FD-Jacobian was satisfied because the
+analytic Jacobian implemented the same wrong bracket) — the derivation is the proof.
+Doc-first (§23 bracket + η₃ definition + TdS gloss). Code: named kAdvP=η₃,
+kAdvS=1+η₃; 13 bracket sites (residual 909/1004, extraction 2577, analytic Jacobian
+1340/1353-1359/1538/1546-1549) + the nt-term-probe inline copy. Also: header f_adv
+comment Q_adv/Q_vis→Q_adv/Q_rad (#3). Gates: test-slim-jacobian 0 failures;
+slim-nt-term-probe Q_vis/F_NT flat 0.91–1.13 (unmoved, as expected). Refinements
+#11 (state-dependent η₃→3 at β→0) and #12 (azimuthal Γ) documented as the next
+near-Eddington fixes.
+```
+
+---
+
+### (original audit brief, for reference)
+**Have `fable` AUDIT EVERY EQUATION in the slim-disk solver against EXTERNAL PRIMARY SOURCES, and re-verify our first principles.** Opus originally verified the §22/§23 formulas and did a good job — but `fable` has since found **transcription errors opus missed** (see §3), so an independent line-by-line re-audit is warranted to catch any remaining slips before we trust high-Eddington results.
 
 - **Scope:** every term in `slim_radial_residual` (`src/slim_disk_radial.cpp`) and every formula in `docs/superpowers/references/disk-physics-formulas.md` §19–§23 — mass conservation, angular momentum, radial-momentum transonic ODE (`𝒩₁/𝒟₀`, `𝒜`, regularity), energy (`Q_vis`, `Q_rad`, `Q_adv`, `f_adv`), the one-zone vertical closure, the Kerr factors (`A`, `Δ`, `Ω_K`, `𝒞`, `ℋ`, `Ω_⊥²`, `Ω(ℓ)`), the outer BCs, the seed, the opacity (Rosseland mean, H⁻, Saha), `L_Edd`/`Ṁ_Edd`.
 - **Method (require for each equation):** (1) quote the source equation it derives from (S09 [arXiv:0906.0355], S11 [arXiv:1006.4309 / A&A 527 A17], Abramowicz & Fragile 2013 Living Rev., Bardeen-Press-Teukolsky 1972, Page-Thorne 1974, Novikov-Thorne 1973, Shakura-Sunyaev 1973); (2) a **dimensional check** (geometric units `G=c=1`, `M` the scale; CGS via `r_g`); (3) a **limit check** (reduce to Novikov-Thorne / Newtonian as `Ṁ→0`, `a→0`, large `r`); (4) confirm the CODE matches the verified formula at every call site. Output: for each equation, CONFIRMED or a flagged transcription/derivation error with the source evidence and the fix (doc-first).
