@@ -209,6 +209,36 @@ target_include_directories(slim-warmstart-sweep PRIVATE include/ ${CMAKE_BINARY_
 add_executable(slim-arclength-probe tools/slim_arclength_probe.cpp)
 target_include_directories(slim-arclength-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# TEMPORARY slim-branch SEED probe: tests whether a thick/advective/high-Σ upper-
+# branch seed converges directly (or by continuation) at high f_Edd, sidestepping
+# the f_Edd≈0.11 fold.  Includes the slim/opacity .cpp directly (probe pattern) to
+# reach internal helpers.  Safe to delete along with tools/slim_slimseed_probe.cpp.
+add_executable(slim-slimseed-probe tools/slim_slimseed_probe.cpp)
+target_include_directories(slim-slimseed-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# TEMPORARY slim-branch VALIDATION probe: reproduces + dumps the near-Eddington
+# slim solution (soundness), sweeps the slim-seed basin (robustness), and maps the
+# upper branch across f_Edd / spin.  Includes the slim/opacity .cpp directly (probe
+# pattern).  Safe to delete along with tools/slim_slimseed_validate.cpp.
+add_executable(slim-slimseed-validate tools/slim_slimseed_validate.cpp)
+target_include_directories(slim-slimseed-validate PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# TEMPORARY benchmark probe: benchmarks the near-Eddington slim solution against
+# ground truth (NT reduction at low f_Edd, slim-theory expectations at f_Edd=0.9,
+# f_adv sign check, resolution test, thick-inner/thin-outer seed).  Includes the
+# slim/opacity .cpp directly (probe pattern).  Safe to delete along with
+# tools/slim_benchmark_probe.cpp.
+add_executable(slim-benchmark-probe tools/slim_benchmark_probe.cpp)
+target_include_directories(slim-benchmark-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# TEMPORARY NT-term probe: evaluates the slim §23 energy terms (Q_vis/Q_rad/Q_adv)
+# on the EXACT Novikov-Thorne state (Page-Thorne flux + alpha-relation Sigma + grey
+# midplane T_c) to pinpoint which term breaks the slim->NT reduction at large r.
+# No solver runs (pure term evaluation).  Includes the slim/opacity .cpp directly
+# (probe pattern).  Safe to delete along with tools/slim_nt_term_probe.cpp.
+add_executable(slim-nt-term-probe tools/slim_nt_term_probe.cpp)
+target_include_directories(slim-nt-term-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
 # TEMPORARY full-target probe (a=0.998, f_Edd≈0.9). Links grrt. Safe to delete
 # along with tools/slim_full_target_probe.cpp.
 add_executable(slim-full-target-probe tools/slim_full_target_probe.cpp)

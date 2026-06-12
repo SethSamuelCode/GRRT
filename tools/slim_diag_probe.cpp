@@ -425,7 +425,7 @@ static EnTerms energy_terms_at(const std::vector<double>& U, const SlimDiskInput
     const double geomfac = a.mech.sqrtA * a.mech.sqrtDelta / (a.r * a.r * a.r);
     const double dl_cgs = (a.ell - ell_in) * in.r_g * c_cgs;
     const double Qvis = -(Mdot / (2.0 * std::numbers::pi)) * dl_cgs * dOmega_dr
-                      * a.Gamma * (geomfac / in.r_g);
+                      * a.Gamma * (geomfac / r_cm);   // LOCAL r_cm divisor (S11 13/23), matches Gbalance
     const double rho_mid = a.oz.rho_mid;
     const double kR = op.lookup_kappa_ross(rho_mid, a.Tc) + op.lookup_kappa_es(rho_mid, a.Tc);
     const double Qrad = 64.0 * sigma_SB * a.Tc*a.Tc*a.Tc*a.Tc / (3.0 * std::max(kR,1e-300) * a.Sigma);

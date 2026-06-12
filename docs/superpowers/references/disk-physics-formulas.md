@@ -240,7 +240,8 @@ dln V/dln r = (𝒩₁/𝒟₀)·(1−V²)
 
 **Sonic-point regularity (S09 Eq 10; S11 Eq 34):** at `r_s`, BOTH `𝒟₀(r_s)=0` AND `𝒩₁(r_s)=0`. Eigenvalue closed = `ℓ_in`; `r_s` is *found* (not prescribed) and lies **inside the ISCO** at high `Ṁ`. At `r_s`: `|V|=c_s`.
 
-**Viscous heating (S11 Eqs 13/23):** `Q_vis = −(Ṁ/2π)·(ℓ−ℓ_in)·(dΩ/dr)·(A^½ Δ^½ Γ / r³)`. `Γ=1/√(1−V²)` (Lorentz factor). Both faces. `Q_vis>0`.
+**Viscous heating (S11 Eqs 13/23):** `Q_vis = −(Ṁ/2π)·(ℓ−ℓ_in)·(dΩ/dr)·(A^½ Δ^½ Γ / r⁴)`. `Γ=1/√(1−V²)` (Lorentz factor). Both faces. `Q_vis>0`.
+*Dimensional check (geometric units):* `Q_vis ~ M⁻²`; `Ṁ·(ℓ−ℓ_in)·dΩ/dr ~ M·M·M⁻² = M⁻¹`; so the geometric factor must carry `M⁻¹ = A^½Δ^½/r⁴` (`A^½~M², Δ^½~M, r⁴~M⁴`). In CGS assembly the missing `[1/cm]` is the **LOCAL** radius `r_cm = r·r_g`, NOT the constant `r_g` — dividing by the constant `r_g` (i.e. using `/r³`) inflates `Q_vis` by exactly `r` (in M units) and breaks the §22 thin-disk superset check above (`Q_vis/F_NT → r`, not 1, as `Ṁ→0`).
 
 **One-zone radiative cooling (S11 [arXiv:1108.0396] Eq 3.19; both faces):**
 ```

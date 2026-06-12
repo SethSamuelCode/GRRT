@@ -613,10 +613,13 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
         const double sqrtDelta = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r), 0.0));
         const double sqrtA     = std::sqrt(std::max(kerr_A(in.mass, in.spin, r), 0.0));
         // Relativistic Q_vis (Group 4 form), Γ≈1 at the thin seed.
+        // Length divisor is the LOCAL radius r_cm = r·r_g (S11 Eqs 13/23: A^½Δ^½/r⁴),
+        // matching Gbalance — NOT the constant r_g.
+        const double r_cm      = r * in.r_g;                                     // [cm]
         const double geomfac3  = sqrtA * sqrtDelta / (r * r * r);               // dimensionless
         const double dl_cgs    = (ellK[i] - ell_in) * in.r_g * c_cgs;           // [cm²/s]
         const double Qvis = -(in.mdot / (2.0 * std::numbers::pi)) * dl_cgs * dOmega_dr
-                          * (geomfac3 / in.r_g);                                 // [erg/cm²/s]
+                          * (geomfac3 / r_cm);                                   // [erg/cm²/s]
         const double Qvis_pos = std::max(Qvis, 0.0);                            // ≥0 (heating)
         // Angular-momentum P_target (Group 2, Γ≈1):
         //   (Ṁ/2π)·dl_cgs = (A^½Δ^½/r)·r_g²·α·P  ⇒  P = LHS / [(A^½Δ^½/r)·r_g²·α].
@@ -664,7 +667,7 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
             const double geomfac_e = ev.mech.sqrtA * ev.mech.sqrtDelta / (r * r * r);
             const double dl_e = (ellK[i] - ell_in) * in.r_g * c_cgs;
             const double Qvis_e = -(in.mdot / (2.0 * std::numbers::pi)) * dl_e * dOmega_dr_node
-                                * ev.Gamma * (geomfac_e / in.r_g);
+                                * ev.Gamma * (geomfac_e / r_cm);   // local r_cm = r·r_g (S11 13/23)
             const double kR = op.lookup_kappa_ross(ev.oz.rho_mid, Tc_)
                             + op.lookup_kappa_es(ev.oz.rho_mid, Tc_);
             const double Qrad_e = 64.0 * sigma_SB * Tc_ * Tc_ * Tc_ * Tc_
@@ -949,7 +952,7 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
 
     // -----------------------------------------------------------------------
     // Group 4: energy ODE Q_vis = Q_rad + Q_adv (N-1 trapezoidal rows, §23).
-    //   Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Δ^½Γ/r³)
+    //   Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Δ^½Γ/r⁴)
     //   Q_rad = 64 σ T_c⁴/(3 κ_R Σ)
     //   Q_adv = -(Ṁ/2π r²)(P/Σ)[(Γ₁-1)dlnP/dlnr - Γ₁ dlnΣ/dlnr]
     // Evaluate the residual at the interval midpoint trapezoidally: R = (G_i+G_{i+1})/2
@@ -964,19 +967,20 @@ void slim_radial_residual(const std::vector<double>& U, const SlimDiskInputs& in
         // dΩ/dr in CGS: Ω geometric → 1/s via c/r_g; r geometric → cm via r_g.
         const double dOmega_geom = (b.mech.Omega - a.mech.Omega) / (b.r - a.r); // [1/M²]
         const double dOmega_dr = dOmega_geom * (c_cgs / in.r_g) / in.r_g;        // [1/s/cm]
-        // Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Δ^½Γ/r³)  [erg/cm²/s]
+        // Q_vis = -(Ṁ/2π)(ℓ-ℓ_in)(dΩ/dr)(A^½Δ^½Γ/r⁴)  [erg/cm²/s]   (S11 Eqs 13/23)
         // Dimensional bookkeeping (all quantities below are in CGS unless noted):
-        //   A^½~[M²], Δ^½~[M], r³~[M³]  →  geomfac ≡ A^½Δ^½/r³ is DIMENSIONLESS.
-        //   Ṁ [g/s] × dl_cgs [cm²/s] × dOmega_dr [1/(s·cm)] × geomfac [1] × geomfac/r_g
-        //   needs an extra [1/cm] to land at erg/cm²/s = g/s³.
-        //   That [1/cm] comes from dividing the dimensionless geomfac by r_g [cm]:
-        //     [g/s] × [cm²/s] × [1/(s·cm)] × (1/r_g)[1/cm] = g/s³ = erg/cm²/s.  ✓
-        // Assembly: use geomfac/r_g as the net geometric factor.
+        //   In geometric units Q_vis ~ M⁻²; Ṁ·(ℓ-ℓ_in)·dΩ/dr ~ M⁻¹, so the geometric
+        //   factor must carry M⁻¹: A^½Δ^½/r⁴ (A^½~M², Δ^½~M, r⁴~M⁴).
+        //   geomfac ≡ A^½Δ^½/r³ is DIMENSIONLESS; the remaining 1/r in CGS is the
+        //   LOCAL radius r_cm = r·r_g [cm], NOT the constant r_g (using the constant
+        //   r_g inflates Q_vis by exactly r in M units and breaks the NT reduction):
+        //     [g/s] × [cm²/s] × [1/(s·cm)] × (1/r_cm)[1/cm] = g/s³ = erg/cm²/s.  ✓
+        // Assembly: use geomfac/r_cm as the net geometric factor.
         const double geomfac = a.mech.sqrtA * a.mech.sqrtDelta / (a.r * a.r * a.r); // dimensionless (A^{1/2}~M^2, Delta^{1/2}~M, /r^3~1/M^3)
         // (Ṁ/2π)(ℓ-ℓ_in): ℓ geometric → cm²/s via r_g·c.
         const double dl_cgs = (a.ell - ell_in) * in.r_g * c_cgs;                    // [cm²/s]
         const double Qvis = -(Mdot / (2.0 * std::numbers::pi)) * dl_cgs * dOmega_dr
-                          * a.Gamma * (geomfac / in.r_g);  // [g/s]*[cm²/s]*[1/(s·cm)]*[1/cm] = erg/cm²/s
+                          * a.Gamma * (geomfac / r_cm);  // [g/s]*[cm²/s]*[1/(s·cm)]*[1/cm] = erg/cm²/s
         // Q_rad:
         const double rho_mid = a.oz.rho_mid;
         const double kR = op.lookup_kappa_ross(rho_mid, a.Tc) + op.lookup_kappa_es(rho_mid, a.Tc);
@@ -1492,9 +1496,11 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         const double geomfac = a.mech.sqrtA * a.mech.sqrtDelta / (a.r*a.r*a.r);
         const double dl_cgs = (a.ell - ell_in) * in.r_g * c_cgs;
         const double dOmega_dr = (b.mech.Omega - a.mech.Omega)/dr * convOm;
-        // Qvis = −K·dl_cgs·dOmega_dr·Γ_a·(geomfac/r_g),  K=Mdot/2π.
+        // Qvis = −K·dl_cgs·dOmega_dr·Γ_a·(geomfac/r_cm),  K=Mdot/2π.
+        // (Local r_cm = a.r·r_g, matching Gbalance; r is not a state variable, so
+        //  this is a pure prefactor — no extra derivative terms.)
         const double K = Mdot/twopi;
-        const double Qvis_pref = -K * (geomfac/in.r_g);
+        const double Qvis_pref = -K * (geomfac/r_cm);
         // ∂/∂ℓ_a: dl_cgs ∝ ℓ_a  AND Ω_a in dOmega_dr.
         const double dOm_a_dla = domega_dell(in.mass,in.spin,a.r,a.mech.Omega);
         const double dOm_b_dlb = domega_dell(in.mass,in.spin,b.r,b.mech.Omega);
