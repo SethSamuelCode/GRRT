@@ -40,6 +40,7 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <string>
 
 using namespace grrt;
 using namespace grrt::slim_detail;
@@ -227,6 +228,39 @@ static void print_seed_physics(const char* tag, const SlimDiskInputs& in,
                 ph.pkSig, ph.pkTc, ph.r_s, ph.ell_in, (int)ph.any_Vpos, (int)ph.any_Signeg);
 }
 
+// Full radial profile dump of a state U (VERIFICATION DIAGNOSTIC).  Prints the
+// converged solution node-by-node: r, Σ, T_c, H/r, V (inflow<0), c_s, Mach=|V|/c_s,
+// ℓ, ℓ_K, ℓ/ℓ_K, β=p_gas/p_mid, p_rad/p_gas, f_adv.  Plus the scalars r_sonic, ℓ_in.
+static void dump_profile(const char* tag, const SlimDiskInputs& in,
+                         const OpacityLUTs& op, const std::vector<double>& U) {
+    using namespace constants;
+    const int N = std::max(in.n_nodes, 4);
+    SlimDiskRadial out;
+    unpack_profile(in, op, U, out);
+    std::printf("\n=== PROFILE DUMP [%s]  r_sonic=%.5f  ell_in=%.6f  (r_isco=%.5f) ===\n",
+                tag, U[4*N+1], U[4*N+0], isco_prograde(in.mass, in.spin));
+    std::printf("  %-3s %-9s %-11s %-10s %-8s %-11s %-9s %-9s %-9s %-7s %-9s %-9s %-10s\n",
+                "i","r[M]","Sigma","Tc[K]","H/r","V","c_s","Mach","ell","l/lK","beta","prad/pg","f_adv");
+    for (int i = 0; i < N; ++i) {
+        const double r   = out.r[i];
+        const double Sig = std::max(out.Sigma[i], kSigmaFloor);
+        const double Tc  = std::max(out.Tc[i], kTFloor);
+        const double Hr  = out.H[i] / (r * in.r_g);
+        const double V   = out.V[i];
+        const OneZoneState oz = one_zone_closure(Sig, Tc, r, in, op);
+        const double cs2 = kGtilde1 * (oz.P / Sig) / (c_cgs * c_cgs);   // dimensionless (V/c units)
+        const double cs  = std::sqrt(std::max(cs2, 0.0));
+        const double mach = (cs > 0.0) ? std::fabs(V) / cs : 0.0;
+        const double ell  = U[4*i+2];
+        const double ellK = ell_kepler(in.mass, in.spin, r);
+        const double beta = oz.p_gas / std::max(oz.p_mid, 1e-300);
+        const double pratio = oz.p_rad / std::max(oz.p_gas, 1e-300);
+        std::printf("  %-3d %-9.4f %-11.4e %-11.4e %-8.4f %-11.3e %-9.3e %-9.4f %-9.5f %-7.4f %-9.3e %-9.3e %-+10.3e\n",
+                    i, r, Sig, Tc, Hr, V, cs, mach, ell, ell/std::max(ellK,1e-300), beta, pratio, out.f_adv[i]);
+    }
+    std::fflush(stdout);
+}
+
 // Attempt a solve from a given seed U; returns converged flag and leaves U in the
 // (possibly partially-relaxed) state.  Prints gate detail + physics + group mags.
 static bool try_solve(const SlimDiskInputs& in, const OpacityLUTs& op,
@@ -254,6 +288,7 @@ static bool try_solve(const SlimDiskInputs& in, const OpacityLUTs& op,
                 (int)v.reg_N1_ok, v.N1_scaled, (int)v.rs_ok, v.r_s, v.r_isco,
                 (int)v.smooth_ok, v.sigma_max_jump);
     print_seed_physics("phys", in, op, U);
+    if (conv) dump_profile(tag, in, op, U);
     std::fflush(stdout);
     return conv;
 }
@@ -351,8 +386,47 @@ static void experiment_continue(const OpacityLUTs& op, double a, double wall_s) 
     std::printf("\n# EXP-2 RESULT (a=%.3f): highest f_Edd reached on upper branch = %.3f\n", a, highest);
 }
 
+// ---------------------------------------------------------------------------
+// VERIFICATION: run ONLY the claimed-converged variant (H/r=0.45, sig=8, Tc=5e6)
+// at f_Edd=0.9, a=0.9, with a generous wall so it actually converges, then dump
+// the full converged radial profile.
+// ---------------------------------------------------------------------------
+static void experiment_verify(const OpacityLUTs& op, double a, double f_Edd, double wall_s) {
+    const int N = 48;
+    std::printf("\n############################################################\n");
+    std::printf("#  VERIFY: claimed-converged variant  a=%.3f  f_Edd=%.3f  N=%d\n", a, f_Edd, N);
+    std::printf("#         H/r=0.45 sig_mult=8.0 Tc_floor=5e6  wall=%.0fs\n", wall_s);
+    std::printf("############################################################\n");
+    SlimDiskInputs in = make_inputs(a, f_Edd, N, wall_s);
+    std::vector<double> U = build_slim_branch_seed(in, op, 0.45, 8.0, 5e6);
+    print_seed_physics("SEED", in, op, U);
+    const bool conv = try_solve(in, op, U, "VERIFY_Hr0.45_s8", wall_s);
+    std::printf("\n# VERIFY RESULT: conv=%d at f_Edd=%.3f a=%.3f\n", (int)conv, f_Edd, a);
+    std::fflush(stdout);
+}
+
+// ---------------------------------------------------------------------------
+// PRINCIPLED slim seed: directly exercise build_slim_disk_seed (the production
+// Sądowski-style seed) at a given (a, f_Edd), dump the SEED shape + the converged
+// profile, and check the anti-torus invariants.
+// ---------------------------------------------------------------------------
+static bool experiment_principled(const OpacityLUTs& op, double a, double f_Edd, double wall_s) {
+    const int N = 48;
+    std::printf("\n############################################################\n");
+    std::printf("#  PRINCIPLED slim seed (build_slim_disk_seed)  a=%.3f  f_Edd=%.3f  N=%d\n", a, f_Edd, N);
+    std::printf("############################################################\n");
+    SlimDiskInputs in = make_inputs(a, f_Edd, N, wall_s);
+    std::vector<double> U = build_slim_disk_seed(in, op);
+    print_seed_physics("SEED", in, op, U);
+    dump_profile("SEED", in, op, U);
+    char tag[48]; std::snprintf(tag, sizeof tag, "principled_f%.2f", f_Edd);
+    const bool conv = try_solve(in, op, U, tag, wall_s);
+    std::printf("\n# PRINCIPLED RESULT: conv=%d at f_Edd=%.3f a=%.3f\n", (int)conv, f_Edd, a);
+    std::fflush(stdout);
+    return conv;
+}
+
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
     auto op = build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
 
     const double a = 0.9;
@@ -360,11 +434,24 @@ int main(int argc, char** argv) {
 
     std::printf("Mdot_Edd(a=%.3f) scale reference: %.4e g/s\n", a, mdot_edd_of(a));
 
-    // 1) Direct slim seed at f_Edd≈0.9.
-    experiment_direct(op, a, 0.90, wall);
+    const std::string mode = (argc > 1) ? std::string(argv[1]) : std::string("principled");
 
-    // 2) Seed the slim branch at moderate f_Edd and continue up.
-    experiment_continue(op, a, wall);
+    if (mode == "principled") {
+        // Ladder of f_Edd with the principled seed (default).  argv[2..] override the
+        // f_Edd list; argv[3] overrides spin a.
+        std::vector<double> fedds = {0.20, 0.40, 0.60, 0.90};
+        double aa = a;
+        if (argc > 2) { fedds.clear(); for (int i = 2; i < argc; ++i) fedds.push_back(std::atof(argv[i])); }
+        for (double f : fedds) experiment_principled(op, aa, f, /*wall=*/600.0);
+    } else if (mode == "principled998") {
+        for (double f : {0.20, 0.60, 0.90}) experiment_principled(op, 0.998, f, /*wall=*/600.0);
+    } else if (mode == "verify") {
+        experiment_verify(op, a, 0.90, /*wall=*/600.0);
+    } else if (mode == "full") {
+        experiment_verify(op, a, 0.90, /*wall=*/600.0);
+        experiment_direct(op, a, 0.90, wall);
+        experiment_continue(op, a, wall);
+    }
 
     std::printf("\n[probe] done.\n");
     return 0;

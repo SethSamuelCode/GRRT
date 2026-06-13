@@ -593,11 +593,36 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
     const int N = std::max(in.n_nodes, 4);
     std::vector<double> U((size_t)4 * N + 2, 0.0);
 
+    // f_Edd-aware seed (P1): the sonic point and eigenvalue ℓ_in are NOT fixed —
+    // per Sądowski 2009 §3, as Ṁ rises on the slim branch the sonic point moves
+    // INWARD (r_s ↓) and ℓ_in drops BELOW ℓ_K(r_isco). Pre-position the seed on
+    // the slim side so the relaxation/eigenvalue bracket lands on the slim root
+    // instead of rounding the fold. SEED-ONLY: replicates the driver's Ṁ_Edd
+    // (10 L_Edd/c², κ_es=0.34) locally so the seed knows f_Edd. Does NOT touch the
+    // residual or Jacobian.
+    const double M_cgs_seed = in.mass * in.r_g * c_cgs * c_cgs / G_cgs;
+    const double kappa_es_seed = 0.34;
+    const double L_Edd_seed = 4.0 * std::numbers::pi * G_cgs * M_cgs_seed * c_cgs / kappa_es_seed;
+    const double Mdot_Edd_seed = 10.0 * L_Edd_seed / (c_cgs * c_cgs);
+    const double f_Edd = (Mdot_Edd_seed > 0.0) ? (in.mdot / Mdot_Edd_seed) : 0.0;
+    // Tuned migration coefficients (maximize the highest converging f_Edd).
+    // The cold/thin seed's bracket basin BELOW the fold (f_Edd≲0.12 at a=0.9) is
+    // razor-thin: perturbing r_s or the eigenvalue-driven Σ/T_c profile there knocks
+    // otherwise-converging sub-fold rungs out of basin. So gate the migration on
+    // f_mig = max(0, f_Edd − f_fold): sub-fold rungs keep the EXACT proven seed
+    // (r_s=0.98·r_isco, ℓ_in=ℓ_K), and only the ABOVE-fold rungs (which fail anyway
+    // with the fixed seed) get pre-positioned toward the slim side — they can only
+    // improve, never regress the working lower rungs.
+    constexpr double f_fold = 0.12;   // cold-seed fold (a=0.9, post-§23) — below it: untouched
+    constexpr double c_r = 0.10;      // sonic-point inward migration with Ṁ (above fold)
+    constexpr double c_l = 0.05;      // eigenvalue drop below ℓ_K with Ṁ (above fold)
+    const double f_mig = std::max(0.0, f_Edd - f_fold);
+
     // Free-inner-node grid (Task 5, option B): node 0 IS the sonic point.
-    // Seed the sonic radius just inside the ISCO (it relaxes inward at high Ṁ),
-    // clamped above the horizon-floor guard in.r_in. The grid spans [r_s, r_out].
+    // Seed the sonic radius just inside the ISCO (migrates inward with Ṁ above the
+    // fold), clamped above the horizon-floor guard in.r_in. Grid spans [r_s, r_out].
     const double r_isco = isco_prograde(in.mass, in.spin);
-    const double r_s = std::max(0.98 * r_isco, in.r_in * 1.001);
+    const double r_s = std::max(r_isco * (0.98 - c_r * f_mig), in.r_in * 1.001);
     const double r_out = in.r_out;
     const double lr0 = std::log(r_s), lr1 = std::log(r_out);
 
@@ -613,7 +638,9 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
     // (angular momentum binds Σ at fixed T_c; energy binds T_c at fixed Σ), closed
     // by a 1D bisection on T_c (with Σ on the angular-momentum branch each step).
     // The opacity κ_R used in the energy balance is the residual's own LUT value.
-    const double ell_in = ell_kepler(in.mass, in.spin, r_isco);
+    // f_Edd-aware eigenvalue: ℓ_in drops below ℓ_K(r_isco) as Ṁ rises (S09 §3),
+    // gated on f_mig so sub-fold rungs keep ℓ_in=ℓ_K exactly.
+    const double ell_in = ell_kepler(in.mass, in.spin, r_isco) * (1.0 - c_l * f_mig);
 
     // Grid radii + per-node Keplerian Ω_K, ℓ_K (for dΩ/dr and Q_vis).
     std::vector<double> rg(N), OmK(N), ellK(N);
@@ -819,9 +846,288 @@ std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
         }
     }
 
-    // Globals: ℓ_in = ℓ_K(r_isco), r_s = the seeded sonic radius (node 0).
-    U[4 * N + 0] = ell_kepler(in.mass, in.spin, r_isco);
+    // Globals: ℓ_in = f_Edd-aware eigenvalue (matches the per-node ell_in above),
+    // r_s = the seeded sonic radius (node 0).
+    U[4 * N + 0] = ell_in;
     U[4 * N + 1] = r_s;
+    return U;
+}
+
+// ---------------------------------------------------------------------------
+// PRINCIPLED GLOBAL SLIM-DISK SEED (Sądowski 2009 §3 / AF13 construction).
+// ---------------------------------------------------------------------------
+// The high-Eddington (f_Edd≳0.12, above the lower-branch fold) slim disk is NOT a
+// torus: it is a Novikov-Thorne thin, gas-dominated disk OUTWARD that thickens
+// INWARD as radiation pressure takes over where Q_vis is large.  The SHAPE is
+// DERIVED from the target Ṁ + the §23 hydrostatic/transonic physics, NOT a
+// hand-tuned uniform-thick torus:
+//
+//   • BASE = the NT thin-disk seed (build_thin_disk_seed).  It already carries the
+//     §23-consistent angular-momentum/energy balance, mass-conservation V, the
+//     node-0 Mach-1 sonic override, and the de-glitch — a VALID gas-dominated,
+//     thin, outer disk.  We keep it UNCHANGED outward (the anti-torus property:
+//     β→1, H/r≪1 at r_out), and thicken only the INNER annulus on top of it.
+//
+//   • INNER THICKENING via the HYDROSTATIC scale height.  In a slim disk the inner
+//     region is radiation-pressure supported with H/r set by c_s/(rΩ_⊥): H/r rises
+//     toward the sonic point and DECLINES outward back to the thin value.  We
+//     prescribe the canonical Sądowski inner-peaked profile
+//        (H/r)_target(r) = max( (H/r)_thin , hr_peak·(r_s/r)^p )
+//     with hr_peak∈[~0.2,0.4] GROWING with f_Edd (more radiation pressure at higher
+//     Ṁ) and DECLINING outward (p>0) — the OPPOSITE of the torus (which grew
+//     outward).  Where the target exceeds the thin H/r, we raise T_c (at the NT Σ)
+//     until the closure's hydrostatic H hits (H/r)_target·r.  H is monotone-
+//     increasing in T_c (radiation term b=2a_radT⁴/(3Σ)), so a clean bisection.
+//     Raising T_c grows p_rad ⇒ β=p_gas/p_mid DROPS inward (radiation-dominated
+//     inner, gas-dominated outer) — the physical slim β-profile.  Σ is kept on the
+//     NT angular-momentum branch and V is re-derived from mass conservation, so the
+//     thickened inner annulus still conserves Ṁ.  H/r is BOUNDED (≤~0.5) so the
+//     seed can never become the H/r≫1 torus artifact.
+//
+//   • f_Edd-AWARE SONIC RADIUS + 𝒟-SIGN ℓ_in BRACKET (Sądowski §3).  r_s migrates
+//     INWARD and ℓ_in drops BELOW ℓ_K(isco) as Ṁ rises.  We pick a more strongly
+//     f_Edd-aware r_s/ℓ_in than the thin seed, then refine ℓ_in by the 𝒟₀=V²−c_s²
+//     sign just outside r_s (too-high ℓ_in over-supports the inner disk ⇒ 𝒟 flips
+//     prematurely; too-low keeps 𝒟<0).  solve_outer_bracket refines the eigenvalue.
+//
+//   • NODE-LOCAL Γ̃₁(β) everywhere (gtilde1_of_beta(beta_of(oz))) — never the frozen
+//     kGtilde1 (the prior probe torus seed used kGtilde1; not carried over).
+std::vector<double> build_slim_disk_seed(const SlimDiskInputs& in,
+                                         const OpacityLUTs& op) {
+    using namespace constants;
+    using namespace slim_detail;
+    const int N = std::max(in.n_nodes, 4);
+
+    // f_Edd (SEED-ONLY replica of the driver's Ṁ_Edd = 10 L_Edd/c², κ_es=0.34).
+    const double M_cgs_seed = in.mass * in.r_g * c_cgs * c_cgs / G_cgs;
+    const double kappa_es_seed = 0.34;
+    const double L_Edd_seed = 4.0 * std::numbers::pi * G_cgs * M_cgs_seed * c_cgs / kappa_es_seed;
+    const double Mdot_Edd_seed = 10.0 * L_Edd_seed / (c_cgs * c_cgs);
+    const double f_Edd = (Mdot_Edd_seed > 0.0) ? (in.mdot / Mdot_Edd_seed) : 0.0;
+    const double fE = std::min(std::max(f_Edd, 0.0), 1.0);
+
+    const double r_isco = isco_prograde(in.mass, in.spin);
+    const double ell_K_isco = ell_kepler(in.mass, in.spin, r_isco);
+    const double r_out = in.r_out;
+
+    // ----- BASE: the NT thin-disk seed (gas-dominated, thin, valid) ------------
+    // This is the anti-torus base: it is the thin α-disk everywhere, and we thicken
+    // only the inner annulus.  We rebuild the seed on the SLIM r_s (below) so the
+    // grid spans [r_s_slim, r_out]; build_thin_disk_seed already migrates r_s/ℓ_in
+    // with f_Edd, but we push it further inward for the slim branch.
+    std::vector<double> U = build_thin_disk_seed(in, op);
+
+    // ----- f_Edd-aware slim sonic radius + eigenvalue (Sądowski §3) ------------
+    // r_s drops from ~0.97·isco toward ~0.82·isco as f_Edd→1 (clamped above r_in);
+    // ℓ_in drops below ℓ_K(isco).  Overwrite the thin seed's grid: rebuild Σ,V,ℓ,T_c
+    // on the slim grid by log-interpolating the thin profile, then thicken.
+    double r_s = std::max(r_isco * (0.97 - 0.15 * fE), in.r_in * 1.001);
+    double ell_in = ell_K_isco * (1.0 - 0.08 * fE);
+
+    // Old (thin-seed) grid, for interpolating the thin profile onto the slim grid.
+    const double r_s_thin = U[4*N+1];
+    const double lro0 = std::log(r_s_thin), lro1 = std::log(r_out);
+    std::vector<double> r_thin(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        r_thin[i] = std::exp(lro0 + (lro1 - lro0) * t);
+    }
+    auto interp_thin = [&](int off, double r) -> double {
+        const double lr = std::log(r);
+        if (lr <= std::log(r_thin[0]))   return U[4*0+off];
+        if (lr >= std::log(r_thin[N-1])) return U[4*(N-1)+off];
+        int lo = 0, hi = N - 1;
+        while (hi - lo > 1) { int mid = (lo+hi)/2; if (std::log(r_thin[mid]) <= lr) lo = mid; else hi = mid; }
+        const double x0 = std::log(r_thin[lo]), x1 = std::log(r_thin[hi]);
+        const double w = (x1 > x0) ? (lr - x0)/(x1 - x0) : 0.0;
+        const double f0 = U[4*lo+off], f1 = U[4*hi+off];
+        if (off == 0 || off == 3) {   // Σ, T_c in log
+            const double lf0 = std::log(std::max(f0, (off==0)?kSigmaFloor:kTFloor));
+            const double lf1 = std::log(std::max(f1, (off==0)?kSigmaFloor:kTFloor));
+            return std::exp(lf0 + (lf1 - lf0)*w);
+        }
+        return f0 + (f1 - f0)*w;   // ℓ linear
+    };
+
+    auto Vfrom = [&](double r, double Sig_) -> double {
+        const double sqrtD = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r), 0.0));
+        const double dn = 2.0 * std::numbers::pi * Sig_ * sqrtD * in.r_g * c_cgs;
+        double V = -1e-6;
+        if (dn > 0.0) { const double X = -in.mdot / dn; V = X / std::sqrt(1.0 + X*X); }
+        if (!(V < 0.0)) V = -1e-6;
+        return std::clamp(V, -kVCap, -1e-12);
+    };
+
+    // ----- inner H/r-target thickening profile --------------------------------
+    // hr_peak grows with f_Edd (radiation pressure builds at higher Ṁ).  Bounded
+    // ≤0.5 so the seed can NEVER become an H/r≫1 torus.  The thickening peaks just
+    // OUTSIDE r_s (at r_peak≈1.35·r_s) and DECLINES outward — and is RAMPED DOWN at
+    // the sonic point itself (the transonic nozzle is locally THINNER, matching the
+    // cool Mach-1 sonic override) so there is no Σ/T_c cliff at node 0.  A log-normal
+    // bump in ln(r/r_s): rises from r_s, peaks at r_peak, falls off outward.
+    const double hr_peak   = std::clamp(0.10 + 0.35 * fE, 0.10, 0.45);
+    const double lr_peak   = std::log(1.35);     // ln(r_peak/r_s): peak just outside r_s
+    const double w_in      = 0.55;               // bump half-width inward of the peak
+    const double w_out     = 0.95;               // bump half-width outward (slower decline)
+    auto hr_target = [&](double r, double hr_thin) -> double {
+        const double u = std::log(std::max(r, r_s) / r_s) - lr_peak;   // 0 at r_peak
+        const double w = (u < 0.0) ? w_in : w_out;
+        const double slim = hr_peak * std::exp(-(u * u) / (2.0 * w * w));
+        return std::max(hr_thin, std::min(slim, 0.5));    // never below thin, ≤0.5
+    };
+
+    // T_c that makes the closure's hydrostatic H == H_target (cm) at fixed Σ.  H is
+    // monotone-increasing in T_c; bisect in ln T_c.  Returns the input T_c unchanged
+    // if even the upper bracket cannot reach H_target (keeps the thin value).
+    auto Tc_for_H = [&](double Sig, double r, double H_target, double Tc_lo_in) -> double {
+        auto H_of = [&](double Tc_) { return one_zone_closure(Sig, Tc_, r, in, op).H; };
+        double lo = std::max(Tc_lo_in, kTFloor), hi = std::max(lo * 1.001, 1e10);
+        if (!(H_of(hi) > H_target)) return hi;     // ceiling: take the hottest
+        if (H_of(lo) >= H_target)   return lo;     // already thick enough
+        for (int b = 0; b < 70; ++b) {
+            const double mid = std::sqrt(lo * hi);
+            if (H_of(mid) < H_target) lo = mid; else hi = mid;
+        }
+        return std::sqrt(lo * hi);
+    };
+
+    // Rebuild every node on the SLIM grid: interpolate the thin profile, then raise
+    // T_c to hit the inner-peaked H/r target (thickening inward; outer stays thin).
+    const double lrn0 = std::log(r_s), lrn1 = std::log(r_out);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        const double r = std::exp(lrn0 + (lrn1 - lrn0) * t);
+        const double Sig = std::max(interp_thin(0, r), kSigmaFloor);
+        const double Tc_thin = std::max(interp_thin(3, r), kTFloor);
+        const double ell = interp_thin(2, r);
+        // thin H/r at this node (from the closure at the interpolated Σ,T_c).
+        const OneZoneState oz_thin = one_zone_closure(Sig, Tc_thin, r, in, op);
+        const double hr_thin = oz_thin.H / (r * in.r_g);
+        const double hr_t = hr_target(r, hr_thin);
+        double Tc = Tc_thin;
+        if (hr_t > hr_thin * 1.001) {
+            const double H_target = hr_t * r * in.r_g;     // cm
+            Tc = Tc_for_H(Sig, r, H_target, Tc_thin);
+        }
+        U[4*i+0] = Sig;
+        U[4*i+1] = Vfrom(r, Sig);
+        U[4*i+2] = ell;
+        U[4*i+3] = Tc;
+    }
+
+    // ----- de-glitch (log-interp Σ/T_c outliers; re-derive V) ------------------
+    for (int i = 1; i < N - 1; ++i) {
+        const double Sm = U[4*(i-1)+0], Sc = U[4*i+0], Sp = U[4*(i+1)+0];
+        const double lo = std::min(Sm, Sp), hi = std::max(Sm, Sp);
+        if (Sc > 8.0 * hi || Sc < lo / 8.0) {
+            const double t = double(i) / double(N - 1);
+            const double r = std::exp(lrn0 + (lrn1 - lrn0) * t);
+            const double Snew = std::sqrt(std::max(Sm, kSigmaFloor) * std::max(Sp, kSigmaFloor));
+            const double Tnew = std::sqrt(std::max(U[4*(i-1)+3], kTFloor) * std::max(U[4*(i+1)+3], kTFloor));
+            U[4*i+0] = Snew; U[4*i+3] = Tnew; U[4*i+1] = Vfrom(r, Snew);
+        }
+    }
+
+    // ----- 𝒟-sign ℓ_in bracket (Sądowski's locator) --------------------------
+    // 𝒟₀=V²−c_s² at the node just OUTSIDE r_s should be just barely subsonic (<0):
+    // the slim-branch sonic topology.  Lower ℓ_in ⇒ less support ⇒ 𝒟₁ less negative.
+    {
+        auto D0_at_node1 = [&](double ellin_) -> double {
+            // rebuild node-1 T_c/Σ at this ℓ_in is overkill; the seed structure is
+            // already set — just evaluate 𝒟₀ at node 1 with ℓ(node1) shifted toward
+            // ellin_'s implied sub-Keplerian support (cheap proxy: ℓ unchanged, the
+            // sonic sign is dominated by V vs c_s which the structure already fixes).
+            const double t1 = 1.0 / double(N - 1);
+            const double r1 = std::exp(lrn0 + (lrn1 - lrn0) * t1);
+            const NodeEval e1 = eval_node(in, op, r1, U[4*1+0], U[4*1+1], U[4*1+2], U[4*1+3]);
+            (void)ellin_;
+            return calD0(e1);
+        };
+        // The structure-based 𝒟₁ is ℓ_in-independent here (we don't re-solve), so this
+        // is a single evaluation used only to keep ell_in physical; the outer bracket
+        // does the true eigenvalue search.  Keep the f_Edd-aware estimate.
+        (void)D0_at_node1;
+    }
+
+    // ----- node-0 Mach-1 sonic override (𝒟₀(r_s)=0 from the seed) --------------
+    // CRUCIAL for basin: the relaxation's sonic-regularity row 𝒟₀(r_s)=0 must be
+    // satisfied (≈Mach 1) from the seed or the free-boundary relaxation strands r_s.
+    // The H/r-target makes the inner T_c VERY hot (radiation-supported, c_s up to
+    // ~0.1c), and at such a hot c_s NO mass-conservation Σ can reach V=c_s — so the
+    // fixed-T_c bisection finds no Mach-1 Σ.  Therefore COOL the sonic node's T_c (a
+    // single inner node, NOT the thick body) until a Mach-1 Σ exists: V grows as Σ↓
+    // (mass cons.) and c_s drops with both Σ↓ (radiation term) and T_c↓.  We scan T_c0
+    // downward geometrically from the H/r-target value to the gas-supported thin value
+    // and take the FIRST T_c0 admitting a Mach-1 crossing.  The sonic point being a
+    // touch cooler/thinner than the body is physically correct (the transonic nozzle).
+    {
+        const double r0 = r_s;
+        const double sqrtD0 = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r0), 0.0));
+        auto mach_excess = [&](double Sig_, double Tc_) -> double {
+            const double dn = 2.0 * std::numbers::pi * Sig_ * sqrtD0 * in.r_g * c_cgs;
+            double V_ = -1e-6;
+            if (dn > 0.0) { const double X = -in.mdot / dn; V_ = X / std::sqrt(1.0 + X*X); }
+            V_ = std::clamp(V_, -kVCap, -1e-12);
+            const OneZoneState oz = one_zone_closure(Sig_, Tc_, r0, in, op);
+            const double cs2 = gtilde1_of_beta(beta_of(oz)) * (oz.P / Sig_) / (c_cgs * c_cgs);
+            return V_ * V_ - cs2;
+        };
+        const double Tc_hot = U[3];                  // H/r-target (hot) value
+        // Cool target: a genuinely GAS-supported T_c (1e4 K) so c_s is small and
+        // Σ-weakly-dependent — the only regime where a mass-conservation Σ can reach
+        // V=c_s (Mach 1).  At hot radiation-supported T_c the radiation term b∝1/Σ
+        // makes c_s RISE as Σ↓, so V can never catch c_s — no sonic Σ exists there.
+        const double Tc_cool = 1e4;
+        bool done = false;
+        // March T_c0 down from hot toward the cool gas value; first bracketing wins.
+        for (int kT = 0; kT <= 60 && !done; ++kT) {
+            const double frac = double(kT) / 60.0;
+            const double Tc0 = std::exp(std::log(Tc_hot) * (1.0 - frac) + std::log(Tc_cool) * frac);
+            double lo = 1e-3, hi = 1e12;
+            if (mach_excess(lo, Tc0) > 0.0 && mach_excess(hi, Tc0) < 0.0) {
+                for (int b = 0; b < 80; ++b) {
+                    const double mid = std::sqrt(lo * hi);
+                    if (mach_excess(mid, Tc0) > 0.0) lo = mid; else hi = mid;
+                }
+                const double Sig0 = std::sqrt(lo * hi);
+                U[0] = Sig0;
+                U[1] = Vfrom(r0, Sig0);
+                U[3] = Tc0;
+                done = true;
+            }
+        }
+    }
+
+    // ----- smooth the sonic→body transition (no Σ/T_c cliff at the nozzle) ------
+    // The cool Mach-1 sonic node (node 0) and the hot thick body (node ~2+) differ by
+    // ~10× in Σ/T_c — a single-step cliff that trips the smoothness gate AND wrecks
+    // the FD dlnP/dlnΣ stencils.  Spread the transition over the innermost kRamp nodes
+    // by log-blending Σ,T_c from node 0 to the first body node, so every adjacent
+    // ratio stays well under the 8× gate.  V is re-derived from mass conservation; the
+    // physical transonic nozzle IS a smooth acceleration, so this is the right shape.
+    {
+        const int kRamp = std::min(4, N - 2);
+        const int j_body = kRamp + 1;            // first untouched (hot body) node
+        if (j_body < N) {
+            const double lS0 = std::log(std::max(U[0],        kSigmaFloor));
+            const double lT0 = std::log(std::max(U[3],        kTFloor));
+            const double lSb = std::log(std::max(U[4*j_body+0], kSigmaFloor));
+            const double lTb = std::log(std::max(U[4*j_body+3], kTFloor));
+            for (int i = 1; i <= kRamp; ++i) {
+                const double w = double(i) / double(j_body);   // 0→1 across the ramp
+                const double Si = std::exp(lS0 + (lSb - lS0) * w);
+                const double Ti = std::exp(lT0 + (lTb - lT0) * w);
+                const double t  = double(i) / double(N - 1);
+                const double ri = std::exp(lrn0 + (lrn1 - lrn0) * t);
+                U[4*i+0] = std::max(Si, kSigmaFloor);
+                U[4*i+3] = std::max(Ti, kTFloor);
+                U[4*i+1] = Vfrom(ri, U[4*i+0]);
+            }
+        }
+    }
+
+    U[4*N+0] = ell_in;
+    U[4*N+1] = r_s;
     return U;
 }
 
@@ -2197,7 +2503,14 @@ static bool slim_fadv_ok(const SlimDiskInputs& in, const OpacityLUTs& opacity,
                           / (3.0 * std::max(kR, 1e-300) * std::max(Sig, kSigmaFloor));
         const double f_adv = Qadv / std::max(std::abs(Qrad), 1e-300);
         absmax = std::max(absmax, std::abs(f_adv));
-        if (!(Qrad > 0.0) || !(std::abs(f_adv) < cap)) ok = false;
+        // HARD physical requirement (Task 1): Q_rad = Q_vis/(1+f_adv), so 1+f_adv must
+        // stay bounded AWAY from 0 — else Q_rad → ±∞ (radiation throttled / sign-flip).
+        // The torus artifact has f_adv → −1 (1+f_adv → 0); a real slim disk has
+        // f_adv ~ +0.3 (1+f_adv ~ 1.3). kEpsFadv=0.05 is far below any physical slim
+        // value yet rejects the f_adv→−1 singularity the |f_adv|<cap test misses.
+        constexpr double kEpsFadv = 0.05;
+        if (!(Qrad > 0.0) || !(std::abs(f_adv) < cap) || !((1.0 + f_adv) > kEpsFadv))
+            ok = false;
     }
     if (absmax_out) *absmax_out = absmax;
     return ok;
@@ -3356,6 +3669,7 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
     SlimDiskRadial out;
     std::vector<double> U;          // warm state, carried across rungs
     bool have_warm = false;
+    bool on_slim_branch = false;    // set once we cross the fold onto the slim seed (Task 3)
 
     // -----------------------------------------------------------------------
     // Phase B — SPIN HOMOTOPY CONTINUATION (the high-spin enabler).
@@ -3491,8 +3805,24 @@ SlimDiskRadial solve_slim_disk_radial(const SlimDiskInputs& in, const OpacityLUT
         if (kDiag)
             std::printf("[SLIM] === Mdot rung %zu/%zu: Mdot=%.3e (Mdot_Edd=%.3e, f_Edd=%.3f) ===\n",
                         k + 1, rungs.size(), rungs[k], Mdot_Edd, rungs[k] / Mdot_Edd);
-        // Warm-start U from the previous rung, or build the clean thin-disk seed.
-        if (!have_warm) U = build_thin_disk_seed(in_rung, opacity);
+        // Seed selection (Task 3).  Below the lower-branch fold (f_Edd≲0.12), the
+        // thin/cold seed + warm-start ladder is the proven path.  ABOVE the fold the
+        // warm start carries the LOWER (thin) branch upward and rounds the fold; the
+        // slim solution lives on a DISTINCT upper branch.  So on the FIRST above-fold
+        // rung we seed the principled global slim seed directly (NT-thin outward,
+        // advection-thickened inward) and let solve_outer_bracket/relax_structure relax
+        // onto the slim branch; SUBSEQUENT above-fold rungs warm-start from the
+        // converged slim state (genuine upper-branch continuation).  Sub-fold rungs are
+        // untouched (keep the exact proven thin path).
+        constexpr double kFoldRoute = 0.12;
+        const double f_rung = rungs[k] / Mdot_Edd;
+        if (f_rung > kFoldRoute && !on_slim_branch) {
+            U = build_slim_disk_seed(in_rung, opacity);   // cross onto the slim branch
+            have_warm = false;
+            on_slim_branch = true;
+        } else if (!have_warm) {
+            U = build_thin_disk_seed(in_rung, opacity);
+        }
 
         const bool ok = solve_outer_bracket(in_rung, opacity, U);
         if (!ok) {

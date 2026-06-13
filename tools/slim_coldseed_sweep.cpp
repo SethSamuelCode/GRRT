@@ -188,7 +188,9 @@ int main(int argc, char** argv) {
     auto op = build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
 
     int N = 48;
+    if (const char* e = std::getenv("SLIM_SWEEP_N")) { const int v = std::atoi(e); if (v >= 4) N = v; }
     double wall_s = 120.0;
+    if (const char* e = std::getenv("SLIM_SWEEP_WALL")) { const double v = std::atof(e); if (v > 0) wall_s = v; }
     const double a = 0.9;
 
     // Default f_Edd sweep; can override via CLI args (e.g. for a bisection step).

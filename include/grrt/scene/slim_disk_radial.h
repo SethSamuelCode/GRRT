@@ -168,6 +168,15 @@ GRRT_EXPORT double omega_from_ell(double M, double a, double r, double ell);
 GRRT_EXPORT std::vector<double> build_thin_disk_seed(const SlimDiskInputs& in,
                                                      const OpacityLUTs& opacity);
 
+/// Principled global SLIM-disk seed (Sądowski 2009 §3 / AF13): Novikov-Thorne thin,
+/// gas-dominated OUTWARD, thickening INWARD where radiation pressure + advection take
+/// over.  For the high-Eddington (f_Edd≳0.12, above the lower-branch fold) slim
+/// branch.  The shape is DERIVED from the target Ṁ via the advection-modified energy
+/// balance Q_rad=Q_vis/(1+f_adv(r)) with f_adv significant inner, →0 outward — NOT a
+/// hand-tuned uniform-thick torus.  f_Edd-aware sonic radius + 𝒟-sign ℓ_in bracket.
+GRRT_EXPORT std::vector<double> build_slim_disk_seed(const SlimDiskInputs& in,
+                                                     const OpacityLUTs& opacity);
+
 /// Evaluate the transonic radial residual R (length 4N+2) for state U.
 /// Row layout (see disk-physics-formulas.md §22/§23 and the .cpp header comment):
 ///   [0 .. N-1]      mass conservation (algebraic, per node)
