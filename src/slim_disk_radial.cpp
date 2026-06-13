@@ -2148,6 +2148,62 @@ static int deglitch_sigma_outliers(const SlimDiskInputs& in, std::vector<double>
 }
 
 // ---------------------------------------------------------------------------
+// f_adv blow-up check, shared by the validity gate and the corrector line search.
+// Recomputes the advection fraction f_adv = Qadv/Qrad node-by-node from the SAME
+// closure path as unpack_profile (one_zone_closure + node-pair dlnP/dlnS).  Returns
+// true iff EVERY node has Qrad>0 (radiation not throttled to ~0) AND |f_adv|<cap.
+// This rejects the SPURIOUS arclength root whose advection fraction explodes
+// (observed f_adv≈−1130) without rejecting the genuine slim branch (f_adv~O(1)).
+// `absmax_out` (optional) receives max|f_adv| over the nodes for diagnostics.
+static bool slim_fadv_ok(const SlimDiskInputs& in, const OpacityLUTs& opacity,
+                         const std::vector<double>& U, double cap,
+                         double* absmax_out = nullptr) {
+    using namespace constants;
+    using namespace slim_detail;
+    const int N = std::max(in.n_nodes, 4);
+    std::vector<double> rgrid(N);
+    {
+        const double lr0 = std::log(in.r_in), lr1 = std::log(in.r_out);
+        for (int i = 0; i < N; ++i) {
+            const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+            rgrid[i] = std::exp(lr0 + (lr1 - lr0) * t);
+        }
+    }
+    const double Mdot_s = in.mdot;
+    auto dln = [&](double f_lo, double f_hi, double r_lo, double r_hi) {
+        return (std::log(std::max(f_hi, 1e-300)) - std::log(std::max(f_lo, 1e-300)))
+             / (std::log(r_hi) - std::log(r_lo));
+    };
+    bool ok = true;
+    double absmax = 0.0;
+    for (int i = 0; i < N; ++i) {
+        const double r   = rgrid[i];
+        const double Sig = U[4*i+0], Tc = U[4*i+3];
+        const OneZoneState oz = one_zone_closure(std::max(Sig, kSigmaFloor),
+                                                 std::max(Tc, kTFloor), r, in, opacity);
+        const int j = (i + 1 < N) ? i + 1 : i - 1;
+        const OneZoneState ozj = one_zone_closure(std::max(U[4*j+0], kSigmaFloor),
+                                                  std::max(U[4*j+3], kTFloor), rgrid[j], in, opacity);
+        const double dlnP = dln(oz.P, ozj.P, r, rgrid[j]);
+        const double dlnS = dln(Sig,  U[4*j+0], r, rgrid[j]);
+        const double r_cm = r * in.r_g;
+        const double eta3_e = eta3_of_beta(beta_of(oz));
+        const double Qadv = -(Mdot_s / (2.0 * std::numbers::pi * r_cm * r_cm))
+                          * (oz.P / std::max(Sig, kSigmaFloor))
+                          * (eta3_e * dlnP - (1.0 + eta3_e) * dlnS);
+        const double rho_mid = oz.rho_mid;
+        const double kR = opacity.lookup_kappa_ross(rho_mid, Tc) + opacity.lookup_kappa_es(rho_mid, Tc);
+        const double Qrad = 64.0 * sigma_SB * Tc*Tc*Tc*Tc
+                          / (3.0 * std::max(kR, 1e-300) * std::max(Sig, kSigmaFloor));
+        const double f_adv = Qadv / std::max(std::abs(Qrad), 1e-300);
+        absmax = std::max(absmax, std::abs(f_adv));
+        if (!(Qrad > 0.0) || !(std::abs(f_adv) < cap)) ok = false;
+    }
+    if (absmax_out) *absmax_out = absmax;
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
 // Physical-validity gate (Task 2): "converged" must mean PHYSICALLY VALID at the
 // achievable FD precision, not merely "the scaled merit got small".  Because the
 // FD Jacobian limits the merit floor to ~1e-3 (the bc_ell matched-slope row and the
@@ -2169,11 +2225,11 @@ static int deglitch_sigma_outliers(const SlimDiskInputs& in, std::vector<double>
 // bracket gate; the inner gate leaves it to the outer loop).
 struct ValidityResult {
     bool mass_ok = false, sign_ok = false, reg_D0_ok = false, reg_N1_ok = false,
-         rs_ok = false, smooth_ok = false;
+         rs_ok = false, smooth_ok = false, fadv_ok = false;
     double mass_maxrel = 0.0, D0_scaled = 0.0, N1_scaled = 0.0, sigma_max_jump = 0.0;
-    double r_s = 0.0, r_isco = 0.0;
+    double r_s = 0.0, r_isco = 0.0, fadv_absmax = 0.0;
     bool all(bool require_N1) const {
-        return mass_ok && sign_ok && reg_D0_ok && rs_ok && smooth_ok
+        return mass_ok && sign_ok && reg_D0_ok && rs_ok && smooth_ok && fadv_ok
             && (!require_N1 || reg_N1_ok);
     }
 };
@@ -2230,6 +2286,16 @@ static ValidityResult slim_validity_gate(const SlimDiskInputs& in,
         v.sigma_max_jump = std::max(v.sigma_max_jump, ratio);
         if (!(ratio < kSigJump)) v.smooth_ok = false;
     }
+    // f_adv physical validity (BLOW-UP gate, NOT a tight band).  The pseudo-arclength
+    // corrector can converge a SPURIOUS root whose advection fraction explodes
+    // (observed f_adv≈−1130): Qrad collapses toward zero so f_adv=Qadv/Qrad diverges.
+    // We reject ONLY that blow-up signature — require Qrad>0 (not throttled to ~0) at
+    // every node AND |f_adv|<kFadvCap.  The slim branch is advection-DOMINATED with
+    // f_adv~O(1), so the cap is GENEROUS (50): O(1) physical states pass cleanly while
+    // the −1130 garbage is rejected.  f_adv is computed from the SAME closure path as
+    // unpack_profile (Qadv/Qrad via one_zone_closure + the node-pair dlnP/dlnS).
+    constexpr double kFadvCap = 50.0;    // |f_adv| blow-up cap (generous: slim is f_adv~O(1))
+    v.fadv_ok = slim_fadv_ok(in, opacity, U, kFadvCap, &v.fadv_absmax);
     return v;
 }
 
@@ -3162,10 +3228,17 @@ static ArclengthCorrectorResult arclength_corrector(
                 for (int i=0;i<n;++i) Utry[i]+=lam*dW[i];
                 Mtry = Mdot + lam*dW[n];
                 physical=true;
+                // Σ>0, T_c>0, |V|<1 AND V<0 (genuine INFLOW) at every node.  Requiring
+                // V<0 (not just |V|<1) blocks outflow/standstill nodes that the spurious
+                // root admits — slim-disk inflow is strictly V<0.
                 for (int i=0;i<N&&physical;++i){ const double S=Utry[4*i+0],V=Utry[4*i+1],T=Utry[4*i+3];
-                    if (S<=0.0||T<=0.0||std::abs(V)>=1.0) physical=false; }
+                    if (S<=0.0||T<=0.0||!(V<0.0)) physical=false; }
                 if (physical){ const double rs=Utry[4*N+1]; if(!(rs>in.r_in&&rs<in.r_out)) physical=false; }
                 if (physical && !(Mtry>0.0)) physical=false;     // Ṁ>0
+                // Reject the f_adv BLOW-UP root (Qrad→0 ⇒ f_adv≈−1130): require Qrad>0 and
+                // |f_adv|<50 at every node, using the SAME closure path as unpack_profile.
+                if (physical){ SlimDiskInputs inw=in; inw.mdot=Mtry;
+                    if (!slim_fadv_ok(inw, op, Utry, 50.0)) physical=false; }
                 if (physical){
                     merit_try=eval_merit(Utry,Mtry,Rtry,arc_try);
                     F_new=0.5*cnt*merit_try*merit_try; break;
@@ -3645,6 +3718,17 @@ SlimArclengthResult solve_slim_disk_arclength(const SlimDiskInputs& in,
     if (kDiag) std::printf("[ARC] initial tangent: Mdot_dot=%+.4e (f_Edd_dot=%+.4e)\n",
                            tangent[n], tangent[n]/Mdot_Edd);
 
+    // SECANT continuity reference.  The freshly-solved tangent's orientation is fixed by
+    // the scaled prev·new dot, but near the fold consecutive tangents rotate by ~90° in
+    // the inflated state subspace so that dot is near zero ⇒ the orientation (hence the
+    // raw Ṁ̇ sign) flips arbitrarily, reversing the predictor each step and stalling the
+    // climb.  The DIRECTION OF TRAVEL along the curve — the secant (W_k − W_{k−1}) between
+    // the last two ACCEPTED points — is far more stable than the tangent's own sign, so we
+    // orient each new tangent to agree with the secant in the scaled metric.  Seed the
+    // "previous accepted point" with the anchor so the first step's secant is well-defined.
+    std::vector<double> U_prevpt = U; double Mdot_prevpt = Mdot;
+    bool have_secant = false;   // becomes true after the first accepted step
+
     // ---- Predictor-corrector loop with arclength step control. ----
     // ds is the DIMENSIONLESS scaled arclength step (the tangent is unit-normed in the
     // Ṁ-balanced scaled metric Σ(t_i/w_i)²=1, so a raw step ΔW_i = ds·t_i advances the
@@ -3656,7 +3740,13 @@ SlimArclengthResult solve_slim_disk_arclength(const SlimDiskInputs& in,
     // honest fallback on underflow.
     double ds = 2e-2;                  // scaled arclength step (dimensionless)
     const double ds_floor = 1e-5;
-    const double ds_ceil  = 0.3;
+    const double ds_ceil  = 0.05;      // lowered from 0.3: a smaller cap keeps each
+                                       // ~4N-DOF predictor step inside the local model,
+                                       // which matters most near the high-curvature fold.
+    const double ds_fold  = 5e-3;      // forced step while inside the fold neighbourhood
+    const int    kFoldShrinkSteps = 6; // # of steps to hold ds≤ds_fold after a fold cue
+    const double kVertFrac = 0.05;     // |Ṁ̇|/|t| below this ⇒ near-vertical (approaching turn)
+    int fold_shrink_steps = 0;         // remaining steps to keep ds clamped to ds_fold
     const double f_target = 0.9;       // aim for f_Edd≈0.9 on the high-Ṁ branch
     const int    kMaxSteps = 600;
     const int    kCorrIters = 300;
@@ -3729,26 +3819,38 @@ SlimArclengthResult solve_slim_disk_arclength(const SlimDiskInputs& in,
             continue;
         }
 
-        // Accepted.  Compute the NEW tangent at the corrected point.  ORIENT it by the
-        // PHYSICAL Ṁ-step direction we just took (sign of dM_actual = Mcorr−Mdot0), not
-        // by the full scaled prev·new dot — the state carries most of the scaled metric,
-        // so a dot-based orientation lets structural rotation flip Ṁ̇ spuriously and
-        // stall the climb.  Tying the orientation to the actual Ṁ trajectory makes the
-        // continuation follow the branch's Ṁ direction; at a GENUINE fold dM_actual
-        // changes sign on its own (Ṁ starts decreasing) and the tangent follows it
-        // around the turning point.  Fall back to the prev·new dot only if the step's
-        // Ṁ move is negligibly small (then dM_actual sign is noise).
+        // Accepted.  Compute the NEW tangent at the corrected point and ORIENT it by the
+        // KELLER tangent-continuity rule: the scaled prev·new dot.  This is the textbook
+        // pseudo-arclength orientation — the tangent VECTOR rotates continuously through
+        // the fold, so requiring (prev·new)_w > 0 keeps the continuation moving the same
+        // way along the curve EVEN AS the Ṁ-component passes through zero at the turning
+        // point.  The earlier sign(dM_actual)=sign(Mcorr−Mdot0) heuristic tied orientation
+        // to the Ṁ-component alone; at a fold dṀ/ds→0 so that sign is pure corrector
+        // noise → the ±1 thrash that bounced the continuation back down the stable branch.
+        // slim_arclength_tangent already applies the same scaled-dot orientation against
+        // t_prev internally, but we re-apply it explicitly here against the LAST accepted
+        // tangent (`tangent`) so the continuity reference is the accepted curve direction,
+        // not the corrector's intermediate t_prev seed.
         std::vector<double> new_tan;
-        bool have_new = slim_arclength_tangent(Ucorr, in_with_mdot(in, Mcorr), opacity, t_prev, new_tan);
+        bool have_new = slim_arclength_tangent(Ucorr, in_with_mdot(in, Mcorr), opacity, tangent, new_tan);
         if (have_new) {
-            const double dM_actual2 = Mcorr - Mdot0;
-            const double dM_rel = std::abs(dM_actual2) / std::max(std::abs(Mdot0), 1e-300);
-            if (dM_rel > 1e-6) {
-                // Orient new_tan[n] to match the physical step direction.
-                if ((new_tan[n] > 0) != (dM_actual2 > 0)) for (double& v : new_tan) v = -v;
+            std::vector<double> w0d; slim_arclength_weights(Ucorr, Mcorr, N, w0d);
+            // Orient by the SECANT (direction of travel) in the scaled metric — robust to
+            // the ~90° tangent rotation through the fold that makes the tangent·tangent dot
+            // ambiguous.  Fall back to the prev-tangent dot only before a secant exists
+            // (the very first accepted step) or if the secant is degenerate (≈0 motion).
+            double sdot = 0.0, snrm = 0.0;
+            if (have_secant) {
+                for (int i = 0; i < n; ++i) {
+                    const double sec = (Ucorr[i] - U_prevpt[i]) / w0d[i];
+                    sdot += sec * (new_tan[i] / w0d[i]); snrm += sec * sec;
+                }
+                const double secM = (Mcorr - Mdot_prevpt) / w0d[n];
+                sdot += secM * (new_tan[n] / w0d[n]); snrm += secM * secM;
+            }
+            if (have_secant && snrm > 1e-300) {
+                if (sdot < 0.0) for (double& v : new_tan) v = -v;
             } else {
-                // Ṁ barely moved: keep continuity via the (scaled) prev·new dot.
-                std::vector<double> w0d; slim_arclength_weights(Ucorr, Mcorr, N, w0d);
                 double dot = 0.0; for (int i=0;i<m;++i) dot += (tangent[i]/w0d[i])*(new_tan[i]/w0d[i]);
                 if (dot < 0.0) for (double& v : new_tan) v = -v;
             }
@@ -3759,11 +3861,24 @@ SlimArclengthResult solve_slim_disk_arclength(const SlimDiskInputs& in,
         const int new_sign = (tangent[n] > 0) ? 1 : (tangent[n] < 0 ? -1 : 0);
         if (new_sign != 0 && new_sign != prev_sign) {
             result.crossed_fold = true;
+            fold_shrink_steps = kFoldShrinkSteps;     // ride the next few steps gently
             if (kDiag) std::printf("[ARC] *** FOLD: Mdot_dot sign flip %d -> %d at f_Edd=%.4f ***\n",
                                    prev_sign, new_sign, f_of(Mcorr));
         }
+        // Near-vertical tangent ⇒ we are APPROACHING the turning point (|Ṁ̇| component
+        // is a tiny fraction of the unit tangent).  Force a small ds so the predictor
+        // does not overshoot the (high-curvature) turn and land on the wrong branch.
+        {
+            std::vector<double> wv; slim_arclength_weights(U, Mdot, N, wv);
+            const double mdot_frac = std::abs(tangent[n]/wv[n]);   // scaled Ṁ component (tangent is unit-normed in w)
+            if (mdot_frac < kVertFrac) fold_shrink_steps = std::max(fold_shrink_steps, kFoldShrinkSteps);
+        }
         if (new_sign != 0) prev_sign = new_sign;
 
+        // Advance the secant reference BEFORE the swap: the point we are LEAVING (the
+        // current accepted U,Mdot == U0,Mdot0) becomes the previous accepted point, so the
+        // next step's secant is (next_accepted − this_accepted) — a clean 1-step secant.
+        U_prevpt = U0; Mdot_prevpt = Mdot0; have_secant = true;
         U.swap(Ucorr); Mdot = Mcorr;
         SlimArclengthPoint pt = record_point(U, Mdot, ds, tangent[n], cr.merit);
         result.branch.push_back(pt);
@@ -3791,8 +3906,16 @@ SlimArclengthResult solve_slim_disk_arclength(const SlimDiskInputs& in,
             if (kDiag) std::printf("[ARC] reached f_target=%.2f on upper branch -> done\n", f_target);
             break;
         }
-        // Grow Δs on easy convergence (few corrector iters), bounded.
-        if (cr.iters < 30) ds = std::min(ds * 1.2, ds_ceil);
+        // Grow Δs on easy convergence (few corrector iters), bounded — but only once we
+        // are clear of the fold neighbourhood.  While fold_shrink_steps is active, clamp
+        // ds to the fold step so the predictor stays inside the local model through the
+        // high-curvature turn.
+        if (fold_shrink_steps > 0) {
+            ds = std::min(ds, ds_fold);
+            --fold_shrink_steps;
+        } else if (cr.iters < 30) {
+            ds = std::min(ds * 1.1, ds_ceil);
+        }
     }
 
     if (kDiag)
