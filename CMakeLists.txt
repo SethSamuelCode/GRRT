@@ -239,6 +239,14 @@ target_include_directories(slim-benchmark-probe PRIVATE include/ ${CMAKE_BINARY_
 add_executable(slim-nt-term-probe tools/slim_nt_term_probe.cpp)
 target_include_directories(slim-nt-term-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# Q_adv entropy-form validation: on a CONVERGED profile, evaluates the §23
+# advective-cooling bracket (flag #1) three independent ways — the solver's frozen
+# η₃=3/2 bracket vs the raw 2D entropy identity (implementation check) vs the true
+# variable η₃(β) (measures refinement #11).  Closes the Q_adv gate-blindness.
+# Includes the slim/opacity .cpp directly.  Safe to delete with the .cpp.
+add_executable(slim-qadv-entropy-probe tools/slim_qadv_entropy_probe.cpp)
+target_include_directories(slim-qadv-entropy-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
 # TEMPORARY full-target probe (a=0.998, f_Edd≈0.9). Links grrt. Safe to delete
 # along with tools/slim_full_target_probe.cpp.
 add_executable(slim-full-target-probe tools/slim_full_target_probe.cpp)

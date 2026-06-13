@@ -230,13 +230,18 @@ The expanded, error-prone terms the Phase-1 transonic radial residual needs (§2
 
 **Transonic `dV/dr = 𝒩/𝒟` (one-zone, S11 Eqs 32-33):**
 ```
-𝒟₀ = V² − Γ̃₁·(P/Σ)                  denominator; = 0 at the sonic point (Mach 1: V²=c_s², c_s²≡Γ̃₁ P/Σ)
+𝒟₀ = V² − Γ̃₁·(P/Σ)                  denominator; = 0 at the sonic point (Mach 1: V²=c_s², c_s²≡Γ̃₁ P/Σ); Γ̃₁ is NODE-LOCAL (state-dependent, refinement #11)
 𝒩₁ = 𝒜 + (2πr²/(Ṁ η₃))·Q_adv
        + (P/Σ)·[ r(r−M)/Δ · Γ̃₁ + dln η₃/dln r ]
        + Ω_⊥²·(η₄/η₃)·dln η₄/dln r
 dln V/dln r = (𝒩₁/𝒟₀)·(1−V²)
 ```
-`Γ̃₁ = 1 + 1/η₃` (effective adiabatic index). ⚠ **`η₃ ≡ E/P`** (S11 Eq 8: vertically-integrated internal energy over pressure) — one-zone monatomic gas `η₃ = 1/(Γ₁−1) = 3/2` (so `Γ̃₁ = 1+1/η₃ = Γ₁ = 5/3`). **NOT `η₃ = Γ₁−1`** (the inverse; that slip propagated into the §23 `Q_adv` bracket — corrected 2026-06-12, flag #1). [Radiation-dominated `η₃→3`, `Γ̃₁→4/3` is the deferred state-dependent refinement #11.] `𝒜` = the gravitational/centrifugal term (S09 Eq 3: the `(Ω−Ω_K⁺)(Ω−Ω_K⁻)/(1−Ω̃²R̃²)` combo, `Ω̃=Ω−ω`, `ω=2Mar/A`, `R̃=A/(r²Δ^½)`). `η₃,η₄` = vertical weight functions (one-zone constants).
+`Γ̃₁ = 1 + 1/η₃` (effective adiabatic index). ⚠ **`η₃ ≡ E/P`** (S11 Eq 8: vertically-integrated internal energy over pressure). **STATE-DEPENDENT LAW (refinement #11, IMPLEMENTED 2026-06-13):** internal energy splits across two reservoirs — gas (`E_gas = (3/2)P_gas`, monatomic) and radiation (`E_rad = aT⁴ = 3P_rad`) — so with `β ≡ p_gas/p_mid` (node-local; p_mid = TOTAL midplane pressure from the closure):
+```
+η₃(β) = 3 − 1.5·β          β=1 (gas) ⇒ η₃=3/2;   β=0 (radiation) ⇒ η₃=3
+Γ̃₁(β) = 1 + 1/η₃          β=1 ⇒ Γ̃₁=5/3;          β=0 ⇒ Γ̃₁=4/3
+```
+The `Q_adv` bracket coefficients (`kAdvP=η₃`, `kAdvS=1+η₃`) and the `(2πr²/Ṁη₃)` normalization are therefore now **node-local** (β-dependent), as is `Γ̃₁` in 𝒟₀ and the 𝒩₁ pressure term. The closure supplies `p_gas`,`p_mid` per node; β is clamped to `[0,1]`. The pure-gas frozen value (`η₃=3/2`, `Γ̃₁=5/3`) is recovered exactly at β=1 — this preserves the flag-#1 Q_adv-bracket correction. **NOT `η₃ = Γ₁−1`** (the inverse; that slip propagated into the §23 `Q_adv` bracket — corrected 2026-06-12, flag #1). `𝒜` = the gravitational/centrifugal term (S09 Eq 3: the `(Ω−Ω_K⁺)(Ω−Ω_K⁻)/(1−Ω̃²R̃²)` combo, `Ω̃=Ω−ω`, `ω=2Mar/A`, `R̃=A/(r²Δ^½)`). `η₃,η₄` = vertical weight functions (one-zone constants).
 
 **Sonic-point regularity (S09 Eq 10; S11 Eq 34):** at `r_s`, BOTH `𝒟₀(r_s)=0` AND `𝒩₁(r_s)=0`. Eigenvalue closed = `ℓ_in`; `r_s` is *found* (not prescribed) and lies **inside the ISCO** at high `Ṁ`. At `r_s`: `|V|=c_s`.
 
@@ -259,7 +264,8 @@ Q_rad = 64·σ·T_c⁴ / (3·κ_R·Σ)        κ_R = Rosseland mean (es + Kramer
 **Advective cooling (S11 Eq 29, one-zone):**
 ```
 Q_adv = −(Ṁ/2πr²)·(P/Σ)·[ η₃·dln P/dln r − (1+η₃)·dln Σ/dln r ]     ( ≡ −(Ṁ/2πr²)·T·dS/dln r )
-        η₃ = 1/(Γ₁−1) = 3/2  (one-zone gas);   for Γ₁=5/3 the bracket is [ 1.5·dlnP − 2.5·dlnΣ ]
+        η₃ = η₃(β) = 3 − 1.5·β  (NODE-LOCAL, refinement #11);  pure-gas β=1 ⇒ [ 1.5·dlnP − 2.5·dlnΣ ], rad β=0 ⇒ [ 3·dlnP − 4·dlnΣ ]
+        bracket coefficients are now node-local: kAdvP=η₃(β), kAdvS=1+η₃(β); the closure supplies p_gas,p_mid for β
 ```
 A *cooling* term (carries heat inward). `Q_vis = Q_rad + Q_adv`.
 ⚠ **Bracket corrected 2026-06-12 (flag #1, EVIDENCE).** The previous `[ (Γ₁−1)·dlnP − Γ₁·dlnΣ ]` = `[ 0.667·dlnP − 1.667·dlnΣ ]` used the **inverted** `η₃ = Γ₁−1` (see the §23 `η₃` note above). The correct one-zone form is `[ η₃·dlnP − (1+η₃)·dlnΣ ]` with `η₃ = 1/(Γ₁−1)`, verified two independent ways: (a) the entropy identity `T dS = d(E/Σ) + P d(1/Σ)` with `E = η₃P` ⇒ `T dS/dln r = (P/Σ)[η₃ dlnP − (1+η₃)dlnΣ]`; (b) ideal-gas `s = c_v ln(P ρ^{−Γ})`, `c_v = 1/(Γ−1)` ⇒ `(P/Σ)(1/(Γ−1))[dlnP − Γ dlnΣ]` = same bracket. **Consistency check:** with the `(2πr²/Ṁη₃)` normalization in `𝒩₁`, the corrected bracket collapses to exactly S11 Eq 32's advection term `−(P/Σ)[dlnP − Γ̃₁·dlnΣ]/c²` (since `(1+η₃)/η₃ = 1+1/η₃ = Γ̃₁`); the old bracket gave `−(P/Σ)[0.44·dlnP − 1.11·dlnΣ]`, internally inconsistent with `𝒟₀ = V² − Γ̃₁ P/Σ`. The bug is **invisible to both gates** (NT-reduction runs at `Ṁ→0` where `Q_adv→0`; the FD-Jacobian gate is satisfied because the analytic Jacobian implements the same wrong bracket consistently) — the derivation is the proof. It corrupts the energy rows, `𝒩₁`, the `ℓ_in`/`r_s` eigenvalue, and `f_adv`. Fixed at all residual + extraction + analytic-Jacobian sites together (`kAdvP = η₃`, `kAdvS = 1+η₃`).
