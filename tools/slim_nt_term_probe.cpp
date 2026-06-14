@@ -260,6 +260,7 @@ static NTState nt_state(const SlimDiskInputs& in, const OpacityLUTs& op, double 
 struct SlimTerms {
     double Qvis_code = 0.0;   // geomfac / r_cm = /(r r_g) (the code's assembly, S09 Eq6×Eq4)
     double Qvis_old  = 0.0;   // geomfac / r_g             (PRE-FIX buggy assembly; before/after ref)
+    double Qvis_azim = 0.0;   // refinement #12: Qvis_code with the FULL Γ²=1/(1−V²)+ℓ²r²/A (vs radial-only)
     double Qrad = 0.0, Qadv = 0.0;
     double dl_cgs = 0.0, dOmega_dr = 0.0, geomfac = 0.0, dlnP = 0.0, dlnS = 0.0;
     double Omega_geom = 0.0;
@@ -295,6 +296,14 @@ static SlimTerms slim_terms_on(const SlimDiskInputs& in, const OpacityLUTs& op,
     // PRE-FIX assembly (constant r_g divisor) kept as the before/after reference:
     t.Qvis_old  = -(in.mdot / (2.0 * std::numbers::pi)) * t.dl_cgs * t.dOmega_dr
                 * Gamma * (t.geomfac / in.r_g);
+    // Refinement #12: full Lorentz factor Γ²=1/(1−V²)+ℓ²r²/A (S11) replacing the
+    // radial-only Γ above. At low Ṁ (V≈0) this is the azimuthal/orbital piece
+    // √(1+ℓ²r²/A). Qvis_azim = Qvis_code·(Γ_full/Γ_radial) — does it move Q_vis/F_NT
+    // toward 1 (genuine missing correction) or away (double-count vs Page-Thorne)?
+    const double A_metric = std::max(sqrtA * sqrtA, 1e-300);                   // = kerr_A [M^4]
+    const double Gamma_full = std::sqrt(1.0 / (1.0 - mid.V * mid.V)
+                            + mid.ellK * mid.ellK * r * r / A_metric);
+    t.Qvis_azim = t.Qvis_code * (Gamma_full / Gamma);
 
     // Q_rad exactly as Gbalance (LUT kappa at the NT midplane state):
     const OneZoneState oz = one_zone_closure(Sig, Tc, r, in, op);
@@ -337,9 +346,9 @@ int main() {
     const double radii[] = {3.0, 6.0, 10.0, 20.0, 35.0, 50.0};
     const double delta = 0.05;
 
-    std::printf("%-6s %-11s %-11s | %-9s %-9s %-9s | %-9s | %-8s %-11s %-11s %-11s %-9s\n",
-                "r[M]", "F_NT", "F_SSx2", "Qvis/F", "Qrad/F", "Qadv/F", "Qv_old/F",
-                "kappaR", "Sigma_NT", "Tc_NT", "Teff_NT", "tau");
+    std::printf("%-6s %-11s | %-9s %-11s %-9s %-9s | %-9s | %-8s %-11s %-11s\n",
+                "r[M]", "F_NT", "Qvis/F", "Qvis_az/F(#12)", "Qrad/F", "Qadv/F", "Qv_old/F",
+                "kappaR", "Sigma_NT", "Tc_NT");
     std::vector<NTState> mids;
     for (double r : radii) {
         NTState lo  = nt_state(in, op, r * (1.0 - delta));
@@ -348,10 +357,10 @@ int main() {
         mids.push_back(mid);
         SlimTerms t = slim_terms_on(in, op, lo, mid, hi, /*use_Tc_slim=*/false);
         const double F = mid.F_tot;
-        std::printf("%-6.1f %-11.4e %-11.4e | %-9.3f %-9.3f %-9.2e | %-9.3f | %-8.3f %-11.4e %-11.4e %-11.4e %-9.3e\n",
-                    r, F, 2.0 * ss73_flux_one_face(in, r),
-                    t.Qvis_code / F, t.Qrad / F, t.Qadv / F, t.Qvis_old / F,
-                    mid.kappaR, mid.Sigma, mid.Tc, mid.Teff, mid.tau);
+        std::printf("%-6.1f %-11.4e | %-9.3f %-11.3f    %-9.3f %-9.2e | %-9.3f | %-8.3f %-11.4e %-11.4e\n",
+                    r, F,
+                    t.Qvis_code / F, t.Qvis_azim / F, t.Qrad / F, t.Qadv / F, t.Qvis_old / F,
+                    mid.kappaR, mid.Sigma, mid.Tc);
     }
 
     // Same table with the SLIM-consistent midplane T_c (Q_rad == F_NT by
