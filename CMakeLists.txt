@@ -277,3 +277,10 @@ target_include_directories(slim-jacentry-scan PRIVATE include/ ${CMAKE_BINARY_DI
 # Safe to delete along with tools/slim_edd09_dump.cpp.
 add_executable(slim-edd09-dump tools/slim_edd09_dump.cpp)
 target_include_directories(slim-edd09-dump PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# TEMPORARY Sądowski-structure residual probe (f_Edd≈0.9 closure diagnostic, Part 2):
+# feed the Sądowski-shape slim seed to OUR residual and read the group magnitudes
+# (small => reachable root; large => closure inadequacy).  Includes the slim/opacity
+# .cpp directly.  Safe to delete along with tools/slim_sadowski_residual_probe.cpp.
+add_executable(slim-sadowski-residual-probe tools/slim_sadowski_residual_probe.cpp)
+target_include_directories(slim-sadowski-residual-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
