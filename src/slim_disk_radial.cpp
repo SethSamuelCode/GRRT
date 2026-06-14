@@ -538,7 +538,7 @@ struct NodeEval {
     double r, Sigma, V, ell, Tc;
     OneZoneState oz;
     NodeMech mech;
-    double Gamma;           // Lorentz factor 1/√(1-V²)
+    double Gamma;           // FULL Lorentz factor Γ²=1/(1−V²)+ℓ²r²/A (#12; radial×azimuthal)
     double P_over_Sigma_geom; // (P/Σ)/c²  [dimensionless, = (c_s/c)²-ish]
     double cs2_geom;        // Γ̃₁·(P/Σ)/c²  (geometric specific c_s²)
 };
@@ -554,7 +554,14 @@ static NodeEval eval_node(const SlimDiskInputs& in, const OpacityLUTs& op,
     e.Tc  = std::max(Tc, kTFloor);
     e.oz  = one_zone_closure(e.Sigma, e.Tc, r, in, op);
     e.mech = node_mech(in, r, ell);
-    e.Gamma = 1.0 / std::sqrt(1.0 - e.V * e.V);
+    // #12: FULL (radial×azimuthal) Lorentz factor Γ² = 1/(1−V²) + ℓ²r²/A  (S11 text
+    // after Eq 23; A = Kerr A = e.mech.A). The azimuthal ℓ²r²/A piece dominates the
+    // inner disk (orbital speed ≫ radial inflow). Used in the torque law (Eq 4) and
+    // Q_vis (Eq 6); the mass law keeps the radial-only 1/√(1−V²) (it is u^r).
+    {
+        const double A = std::max(e.mech.A, 1e-300);
+        e.Gamma = std::sqrt(1.0 / (1.0 - e.V * e.V) + e.ell * e.ell * e.r * e.r / A);
+    }
     // P/Σ has units erg/g = cm²/s²; divide by c² to get the geometric specific
     // pressure that the §23 𝒟₀/𝒩₁ forms (V in units of c) expect.
     const double P_over_Sigma = e.oz.P / e.Sigma;                 // [cm²/s²]
@@ -1591,9 +1598,13 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         const NodeEval& e = nj[i].e;
         const double sqrtD = e.mech.sqrtDelta;
         const double mdot_i = mdot_of_node(in, e.Sigma, e.V, sqrtD);
-        const double Gamma3 = e.Gamma * e.Gamma * e.Gamma;
+        // #12 TRAP: the mass law uses the RADIAL-ONLY Γ_rad=1/√(1−V²) (it is u^r),
+        // so its Jacobian must form Γ_rad³ LOCALLY — e.Gamma is now the full Γ and
+        // would silently corrupt this row.  f(V)=V/√(1−V²) ⇒ f'(V)=Γ_rad³.
+        const double Grad = 1.0 / std::sqrt(1.0 - e.V * e.V);
+        const double Grad3 = Grad * Grad * Grad;
         Jset(i, 4*i+0, (mdot_i / e.Sigma) * nj[i].dSig);
-        Jset(i, 4*i+1, -twopi * in.r_g * c_cgs * e.Sigma * sqrtD * Gamma3 * nj[i].dVe);
+        Jset(i, 4*i+1, -twopi * in.r_g * c_cgs * e.Sigma * sqrtD * Grad3 * nj[i].dVe);
         // ℓ, T_c columns: mass row is independent of them ⇒ 0.
         Jset(i, 4*i+2, 0.0);
         Jset(i, 4*i+3, 0.0);
@@ -1613,12 +1624,19 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         const NodeEval& e = nj[i].e;
         const double geomlen = e.mech.sqrtA * e.mech.sqrtDelta / e.r;
         const double C = geomlen * in.r_g * in.r_g * in.alpha;        // rhs = C·Γ·P
-        const double Gamma3 = e.Gamma * e.Gamma * e.Gamma;
         const int row = N + i;
-        Jset(row, 4*i+0, -C * e.Gamma * nj[i].ozj.dP[0]);             // Σ (via P)
-        Jset(row, 4*i+1, -C * e.oz.P * (e.V * Gamma3) * nj[i].dVe);   // V (via Γ)
-        Jset(row, 4*i+2, (Mdot / twopi) * in.r_g * c_cgs);            // ℓ (via lhs)
-        Jset(row, 4*i+3, -C * e.Gamma * nj[i].ozj.dP[1]);            // T_c (via P)
+        // #12: Γ is the FULL Lorentz factor Γ²=1/(1−V²)+ℓ²r²/A, so it depends on
+        // BOTH V and ℓ.  ∂Γ/∂V = V/((1−V²)²·Γ)  (NOT V·Γ³ — that is radial-only);
+        // ∂Γ/∂ℓ = ℓr²/(A·Γ)  (NEW).  rhs = C·Γ·P ⇒ R=lhs−rhs ⇒ ∂R/∂x = −∂rhs/∂x.
+        const double oneMV2 = 1.0 - e.V * e.V;
+        const double A = std::max(e.mech.A, 1e-300);
+        const double dGamma_dV = e.V / (oneMV2 * oneMV2 * e.Gamma);
+        const double dGamma_dl = e.ell * e.r * e.r / (A * e.Gamma);
+        Jset(row, 4*i+0, -C * e.Gamma * nj[i].ozj.dP[0]);            // Σ (via P)
+        Jset(row, 4*i+1, -C * e.oz.P * dGamma_dV * nj[i].dVe);       // V (via Γ)
+        Jset(row, 4*i+2, (Mdot / twopi) * in.r_g * c_cgs            // ℓ (via lhs)
+                          - C * e.oz.P * dGamma_dl);                 //   + via Γ(ℓ) (#12)
+        Jset(row, 4*i+3, -C * e.Gamma * nj[i].ozj.dP[1]);           // T_c (via P)
     }
 
     // =======================================================================
@@ -1886,14 +1904,21 @@ static void slim_analytic_jacobian(const std::vector<double>& U,
         //  this is a pure prefactor — no extra derivative terms.)
         const double K = Mdot/twopi;
         const double Qvis_pref = -K * (geomfac/r_cm);
-        // ∂/∂ℓ_a: dl_cgs ∝ ℓ_a  AND Ω_a in dOmega_dr.
+        // #12: a.Gamma is the FULL Γ²=1/(1−V²)+ℓ²r²/A — depends on BOTH V_a and ℓ_a.
+        //   ∂Γ/∂V = V/((1−V²)²·Γ)  (NOT V·Γ³);  ∂Γ/∂ℓ = ℓr²/(A·Γ)  (NEW, ℓ_a only).
+        const double oneMV2a = 1.0 - a.V*a.V;
+        const double Aa = std::max(a.mech.A, 1e-300);
+        const double dGa_dV = a.V / (oneMV2a*oneMV2a*a.Gamma);
+        const double dGa_dl = a.ell * a.r * a.r / (Aa * a.Gamma);
+        // ∂/∂ℓ_a: dl_cgs ∝ ℓ_a, Ω_a in dOmega_dr, AND Γ_a (#12).
         const double dOm_a_dla = domega_dell(in.mass,in.spin,a.r,a.mech.Omega);
         const double dOm_b_dlb = domega_dell(in.mass,in.spin,b.r,b.mech.Omega);
         const double ddOmdr_dOma = (-1.0/dr)*convOm, ddOmdr_dOmb = (1.0/dr)*convOm;
         gi[2] += Qvis_pref * ( (in.r_g*c_cgs)*dOmega_dr*a.Gamma
-                              + dl_cgs*(ddOmdr_dOma*dOm_a_dla)*a.Gamma );   // ℓ_a
-        gj[2] += Qvis_pref * ( dl_cgs*(ddOmdr_dOmb*dOm_b_dlb)*a.Gamma );    // ℓ_b
-        gi[1] += Qvis_pref * dl_cgs*dOmega_dr*(a.V*a.Gamma*a.Gamma*a.Gamma)*nj[i].dVe; // V_a via Γ
+                              + dl_cgs*(ddOmdr_dOma*dOm_a_dla)*a.Gamma
+                              + dl_cgs*dOmega_dr*dGa_dl );                   // ℓ_a (#12: via Γ)
+        gj[2] += Qvis_pref * ( dl_cgs*(ddOmdr_dOmb*dOm_b_dlb)*a.Gamma );    // ℓ_b (Γ⊥ℓ_b)
+        gi[1] += Qvis_pref * dl_cgs*dOmega_dr*dGa_dV*nj[i].dVe;             // V_a via Γ (#12)
         g_ellin += Qvis_pref * (-(in.r_g*c_cgs))*dOmega_dr*a.Gamma;          // ℓ_in (dl_cgs)
         // Qrad = 64σ T⁴/(3 κ_R Σ), κ_R=κ_R(ρ(Σ,T),T).
         const double rho = a.oz.rho_mid, Sa = a.Sigma, Ta = a.Tc;
