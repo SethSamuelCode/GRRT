@@ -13,6 +13,7 @@ struct ColumnInputs {
     double shear;        ///< Kerr shear rate |r dΩ/dr| [1/s] (drives viscous heating; exact, not (3/2)Ω)
     double omega_z;      ///< vertical epicyclic frequency Ω_z [1/s] (gravity)
     double alpha;        ///< Shakura-Sunyaev viscosity
+    double f_adv = 0.0;  ///< radial advected fraction Q_adv/Q_rad; reduces flux generation by 1/(1+f_adv) (S11 Eq 13). Default 0 = thin/no reduction.
     double rho_mid_guess;///< midplane density estimate [g/cm^3] (seed; e.g. rho_est)
     int    n_nodes = 150;///< grid points on q ∈ [0,1]
     int    max_iters = 60;

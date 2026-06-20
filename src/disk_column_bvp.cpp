@@ -86,6 +86,7 @@ struct Deriv { double dP, dQ, dT, dz; };
 // pressure (needed by the hydrostatic and viscous-heating terms) by addition.
 Deriv node_deriv(double Pg, double Q, double T, double z,
                  double Sigma0, double alpha, double shear, double omega_z,
+                 double f_adv,
                  const grrt::OpacityLUTs& op) {
     const double rho  = std::max(rho_from_gas(Pg, T), RHO_GHOST_FLOOR);
     const double Ptot = p_total(Pg, T);
@@ -99,7 +100,7 @@ Deriv node_deriv(double Pg, double Q, double T, double z,
     //   dz/dq = Sigma0/(2 rho)              column-mass coordinate (2 = both disc faces)
     d.dz = dz_dq;
     d.dP = (-rho * omega_z * omega_z * z) * dz_dq;   // rhs of d(P_tot)/dz (UNCHANGED form)
-    d.dQ = ( alpha * shear * Ptot) * dz_dq;          // viscous heating: q+ = alpha P_tot |r dΩ/dr|
+    d.dQ = ( alpha * shear * Ptot / (1.0 + f_adv)) * dz_dq;  // S11 Eq 13: q+ = alpha P_tot |r dΩ/dr| / (1+f_adv)
     d.dT = (-3.0 * kR * rho * Q / (16.0 * sigma_SB * T * T * T)) * dz_dq;
     return d;
 }
@@ -121,8 +122,8 @@ static void column_residual(const std::vector<double>& U, const ColumnInputs& in
     R.assign(4*N + 2, 0.0);
     int row = 0;
     for (int i = 0; i < N - 1; ++i) {
-        Deriv di = node_deriv(P(i),   Q(i),   T(i),   z(i),   Sigma0, in.alpha, in.shear, in.omega_z, op);
-        Deriv dj = node_deriv(P(i+1), Q(i+1), T(i+1), z(i+1), Sigma0, in.alpha, in.shear, in.omega_z, op);
+        Deriv di = node_deriv(P(i),   Q(i),   T(i),   z(i),   Sigma0, in.alpha, in.shear, in.omega_z, in.f_adv, op);
+        Deriv dj = node_deriv(P(i+1), Q(i+1), T(i+1), z(i+1), Sigma0, in.alpha, in.shear, in.omega_z, in.f_adv, op);
         // hydrostatic: d(P_tot)/dz = -rho Omega_z^2 z ; LHS is the TOTAL-pressure
         // difference (reconstructed by addition), not the stored gas pressure.
         R[row++] = (p_total(P(i+1),T(i+1)) - p_total(P(i),T(i))) - 0.5*dq*(di.dP + dj.dP);
@@ -275,9 +276,12 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
         // the quotient rule with ∂P_tot/∂Pg=1, ∂P_tot/∂T=dPtot_dT, ∂rho/∂Pg, ∂rho/∂T:
         //   ∂[P_tot/rho]/∂Pg = (1/rho)(1 - P_tot/rho * drho_dP)
         //   ∂[P_tot/rho]/∂T  = (1/rho)(dPtot_dT - P_tot/rho * drho_dT)
-        J.dQ_dP = as * Sigma0 / 2.0 * (1.0 / rho) * (1.0 - (Ptot / rho) * drho_dP);
-        J.dQ_dT = as * Sigma0 / 2.0 * (1.0 / rho) * (dPtot_dT - (Ptot / rho) * drho_dT);
-        J.dQ_dS = as * Ptot / (2.0 * rho);
+        // S11 Eq 13 advection reduction: dQ/dq is scaled by 1/(1+f_adv), a constant in
+        // the state, so each dQ partial divides by the same factor.
+        const double fadv_inv = 1.0 / (1.0 + in.f_adv);
+        J.dQ_dP = fadv_inv * as * Sigma0 / 2.0 * (1.0 / rho) * (1.0 - (Ptot / rho) * drho_dP);
+        J.dQ_dT = fadv_inv * as * Sigma0 / 2.0 * (1.0 / rho) * (dPtot_dT - (Ptot / rho) * drho_dT);
+        J.dQ_dS = fadv_inv * as * Ptot / (2.0 * rho);
         // dT/dq = -3 kappa Q Sigma0 / (32 sigma T^3)   (rho cancels; kappa(rho,T))
         const double T3 = T*T*T;
         J.dT_dQ = -3.0 * kappa * Sigma0 / (32.0 * sigma_SB * T3);

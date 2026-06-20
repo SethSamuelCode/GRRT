@@ -292,6 +292,71 @@ static void test_hot_inner_disk_columns_converge() {
     if (ok < 4) { std::printf("  FAIL: not all hot inner-disk columns converge (solver rad-pressure barrier)\n"); failures++; }
 }
 
+static void test_fadv_reduces_heating() {
+    std::printf("\n=== f_adv reduces per-unit heating generation (S11 Eq 13) ===\n");
+    using namespace grrt::constants;
+    auto lut = grrt::build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
+    grrt::ColumnInputs base{};
+    base.T_eff = 3e5; base.shear = 2e3; base.omega_z = 2e3;
+    base.alpha = 0.1; base.rho_mid_guess = 1.0; base.n_nodes = 160;
+    base.max_iters = 200; base.tol = 1e-8;
+    grrt::ColumnInputs hot = base; hot.f_adv = 0.0;
+    grrt::ColumnInputs adv = base; adv.f_adv = 0.5;   // 1/(1+0.5)=2/3 the generation
+    auto s0 = grrt::solve_column_bvp(hot, lut);
+    auto s1 = grrt::solve_column_bvp(adv, lut);
+    if (!s0.converged || !s1.converged) { std::printf("  FAIL: a column did not converge\n"); failures++; return; }
+    // The surface flux Q(surface)=sigma_SB T_eff^4 is a FIXED boundary condition, so
+    // Q.back() is identical for both columns (it is NOT what f_adv changes). What
+    // f_adv changes is the dissipation needed to DELIVER that flux: the radiated
+    // generation is reduced by 1/(1+f_adv), so the column must dissipate (1+f_adv)x
+    // MORE raw viscous energy ∫ alpha shear P dz to reach the same surface flux.
+    // Equivalently the per-unit RADIATED generation ∫ alpha shear P/(1+f_adv) dz is
+    // unchanged (= Q_surf). We assert BOTH: (a) raw dissipation rises by (1+f_adv),
+    // (b) the f_adv-reduced generation matches the (identical) surface flux.
+    auto raw_dissip = [&](const grrt::ColumnBVPSolution& s){
+        double d = 0.0;
+        for (size_t i = 1; i < s.z.size(); ++i) {
+            const double dz = std::abs(s.z[i] - s.z[i-1]);
+            d += base.alpha * base.shear * 0.5 * (s.P[i] + s.P[i-1]) * dz;
+        }
+        return d;
+    };
+    const double D0 = raw_dissip(s0), D1 = raw_dissip(s1);
+    const double Q_surf = sigma_SB * std::pow(base.T_eff, 4.0);
+    std::printf("  raw int(aSP)dz: f_adv=0 -> %.4e ; f_adv=0.5 -> %.4e ; ratio=%.4f (expect ~1.5=1+f_adv)\n",
+                D0, D1, D1 / D0);
+    std::printf("  reduced generation D1/(1+0.5)=%.4e vs Q_surf=%.4e (per face)\n", D1 / 1.5, Q_surf);
+    // (a) raw dissipation rises by ~(1+f_adv): the column heats more to net the same flux.
+    if (!(D1 > D0)) { std::printf("  FAIL: f_adv did not raise raw dissipation\n"); failures++; }
+    check("raw dissipation ratio = 1+f_adv", D1 / D0, 1.5, 3e-3);
+    // (b) the f_adv-reduced generation still balances the (fixed) surface flux.
+    check("reduced generation = sigma T_eff^4 (per face)", D1 / 1.5, Q_surf, 5e-3);
+}
+
+static void test_analytic_vs_numerical_jacobian_fadv() {
+    std::printf("\n=== analytic Jacobian matches numerical with f_adv=0.5 (cross-check) ===\n");
+    // Same operating point as test_analytic_vs_numerical_jacobian, but with a nonzero
+    // advection-reduction factor: the dQ partials are divided by (1+f_adv), so this
+    // confirms the analytic Jacobian still matches FD after the divide.
+    grrt::ColumnInputs in{}; in.T_eff = 5e4; in.shear = 3e3; in.omega_z = 2e3;
+    in.alpha = 0.1; in.rho_mid_guess = 1e-2; in.n_nodes = 24; in.f_adv = 0.5;
+    auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
+    std::vector<double> Ja, Jn; int n = 0;
+    grrt::column_jacobians_test(in, lut, Ja, Jn, n);
+    std::vector<double> rowmax((size_t)n, 0.0);
+    for (int r = 0; r < n; ++r) for (int c = 0; c < n; ++c)
+        rowmax[r] = std::max(rowmax[r], std::abs(Jn[(size_t)r*n+c]));
+    double max_rel = 0.0; int bad_row=-1, bad_col=-1;
+    for (int r = 0; r < n; ++r) for (int c = 0; c < n; ++c) {
+        const double a = Ja[(size_t)r*n+c], num = Jn[(size_t)r*n+c];
+        const double scale = std::max(std::abs(num), 1e-6 * rowmax[r]);
+        const double rel = std::abs(a - num) / scale;
+        if (rel > max_rel && std::abs(a - num) > 1e-6 * rowmax[r]) { max_rel = rel; bad_row=r; bad_col=c; }
+    }
+    std::printf("  max relative mismatch = %.3e (worst at row %d col %d)\n", max_rel, bad_row, bad_col);
+    if (max_rel > 1e-3) { std::printf("  FAIL: analytic Jacobian disagrees with numerical (f_adv=0.5)\n"); failures++; }
+}
+
 static void test_warm_start_converges_fast() {
     std::printf("\n=== warm start from a converged neighbour converges fast ===\n");
     auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
@@ -338,6 +403,8 @@ int main() {
     test_convergence_sweep();
     test_thickness_increases_with_teff();
     test_hot_inner_disk_columns_converge();
+    test_fadv_reduces_heating();
+    test_analytic_vs_numerical_jacobian_fadv();
     test_warm_start_converges_fast();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
