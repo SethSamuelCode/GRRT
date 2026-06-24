@@ -49,7 +49,7 @@ generate_export_header(grrt
 # Aggressive optimisation (C++ only, not CUDA)
 if(MSVC)
     target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
-        /arch:AVX2 /fp:fast   # SIMD: AVX2 + FMA + relaxed float
+        /arch:AVX2 /fp:precise # SIMD: AVX2; precise (deterministic) FP for the correctness phase — restore /fp:fast once the coupling lands
         /Oi                    # Replace calls with CPU intrinsics
         /Ot                    # Favour speed over code size
         /Ob3                   # Aggressive inlining (VS 2022+)
@@ -58,7 +58,7 @@ if(MSVC)
     target_link_options(grrt PRIVATE $<$<CONFIG:Release>:/LTCG>)   # Link-time code generation
 else()
     target_compile_options(grrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
-        -mavx2 -mfma -ffast-math        # SIMD + relaxed float
+        -mavx2 -mfma -fno-fast-math -ffp-contract=off  # SIMD; precise (deterministic) FP for the correctness phase — restore -ffast-math once the coupling lands
         -march=native                    # Tune for this exact CPU
         -flto                            # Link-time optimisation
         -funroll-loops                   # Unroll small loops
