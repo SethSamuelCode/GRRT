@@ -12,6 +12,10 @@ struct ColumnCoupledInputs {
     double shear, omega_z, alpha, rho_mid_guess;
     int n_nodes = 96; int max_iters = 300; double tol = 1e-8;
     double Teff_guess = 0.0;  ///< warm-start for T_eff (0 ⇒ derive from Tc)
+    bool naive_seed = false;  ///< true ⇒ skip the secant bring-up; seed from a SINGLE
+                              ///< base solve at a grey-relation T_eff guess (no Σ0
+                              ///< root-find) — sits off the coupled root, exercising
+                              ///< the equilibrated Newton from a non-trivial seed.
 };
 struct ColumnClosure {
     double F = 0.0;     ///< emergent flux σT_eff⁴ [erg/cm²/s]

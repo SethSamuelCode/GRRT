@@ -359,6 +359,46 @@ static double estimate_Teff_guess(const ColumnCoupledInputs& in, const OpacityLU
     return std::max(Teff, 1.0);
 }
 
+// Build a NAIVE coupled seed WITHOUT the secant bring-up. The secant in
+// build_coupled_seed root-finds Σ0(T_eff)=Σ_target — i.e. it drives the base solver
+// onto the EXACT coupled root before the coupled Newton even starts, so the coupled
+// Newton has nothing to do. The naive seed instead does a SINGLE base T_eff-driven
+// solve at a grey-relation T_eff GUESS (no Σ0 root-find), then repacks that column
+// with T_eff in U[4N+1]. Because the guessed T_eff is generally wrong, this column's
+// Σ0(T_eff) ≠ Σ_target — it sits genuinely OFF the coupled root, so converging from it
+// exercises the coupled Newton's ability to move T_eff and reshape the column. That is
+// the conditioning gate: it only succeeds if the Ruiz-equilibrated Newton has a usable
+// basin, which the stiff un-equilibrated solve did not. Returns false if even the
+// single base solve at the guess fails (caller then bails — no fabricated column).
+static bool build_naive_coupled_seed(const ColumnCoupledInputs& in, const OpacityLUTs& op,
+                                     std::vector<double>& U) {
+    const int N = in.n_nodes;
+    const double T_eff_guess = (in.Teff_guess > 0.0) ? in.Teff_guess
+                                                     : estimate_Teff_guess(in, op);
+    // ONE base solve at the guessed T_eff (NOT a secant root-find on Σ0=Σ_target).
+    ColumnInputs b = base_inputs_from(in, T_eff_guess);
+    ColumnBVPSolution s = solve_column_bvp(b, op);
+    if (!s.converged) {
+        // Guess outside the base basin — try a small multiplicative grid (still no
+        // Σ0 root-find; just a robust single-solve seed).
+        bool ok = false;
+        for (double m : {0.5, 2.0, 0.25, 4.0}) {
+            b = base_inputs_from(in, T_eff_guess * m);
+            s = solve_column_bvp(b, op);
+            if (s.converged) { ok = true; break; }
+        }
+        if (!ok) return false;
+    }
+    U.assign(4*N + 2, 0.0);
+    for (int i = 0; i < N; ++i) {
+        U[4*i+0] = s.P_gas[i]; U[4*i+1] = s.Q[i];
+        U[4*i+2] = s.T[i];     U[4*i+3] = s.z[i];
+    }
+    U[4*N]   = s.z0;          // z0 from the single base solve
+    U[4*N+1] = b.T_eff;       // FREED global: the GUESSED T_eff (generally ≠ root)
+    return true;
+}
+
 // Build the coupled initial state by REUSING the base T_eff-driven solver as a
 // robust BRING-UP that lands the differentiable row-swapped Newton essentially AT
 // its solution.
@@ -441,6 +481,94 @@ static bool build_coupled_seed(const ColumnCoupledInputs& in, const OpacityLUTs&
     return true;
 }
 
+// LU pivot ratio max|U_kk| / min|U_kk| of A (a cheap conditioning proxy). Factors a
+// COPY of A with the same partial-pivoting LU used by the Newton solve; returns -1 if
+// singular. Used only for the seed diagnostic print (before/after equilibration).
+static double lu_pivot_ratio(std::vector<double> A, int n) {
+    std::vector<int> piv;
+    if (!column_lu_factor(A, piv, n)) return -1.0;
+    double pmax = 0.0, pmin = 1e300;
+    for (int k = 0; k < n; ++k) {
+        const double d = std::abs(A[(size_t)k*n+k]);
+        pmax = std::max(pmax, d);
+        pmin = std::min(pmin, d);
+    }
+    return (pmin > 0.0) ? pmax / pmin : -1.0;
+}
+
+// Build the Ruiz-equilibrated copy of J (for the pivot-ratio diagnostic only).
+static void ruiz_scaled_copy(const std::vector<double>& J, int n, std::vector<double>& A) {
+    A = J;
+    constexpr int RUIZ_ITERS = 5;
+    for (int sweep = 0; sweep < RUIZ_ITERS; ++sweep) {
+        for (int i = 0; i < n; ++i) {
+            double rmax = 0.0;
+            for (int j = 0; j < n; ++j) rmax = std::max(rmax, std::abs(A[(size_t)i*n+j]));
+            if (rmax > 0.0) { const double s = 1.0/std::sqrt(rmax); for (int j=0;j<n;++j) A[(size_t)i*n+j]*=s; }
+        }
+        for (int j = 0; j < n; ++j) {
+            double cmax = 0.0;
+            for (int i = 0; i < n; ++i) cmax = std::max(cmax, std::abs(A[(size_t)i*n+j]));
+            if (cmax > 0.0) { const double s = 1.0/std::sqrt(cmax); for (int i=0;i<n;++i) A[(size_t)i*n+j]*=s; }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Ruiz two-sided (inf-norm) equilibration + LU solve of J·δ = rhs.
+//
+// The row-swapped coupled Jacobian is STIFF: its rows span ~13 orders of magnitude
+// (the surface-flux row ~1e17, the z rows ~1e4) and the −4σT_eff³ T_eff-column entry
+// ~1e14 — LU pivot ratio ~8e10. Ruiz equilibration computes diagonal scalings
+// Dr (rows) and Dc (cols) so that the scaled matrix Ã = Dr·J·Dc has all row and
+// column inf-norms ≈ 1, collapsing the conditioning. We solve the EQUIVALENT scaled
+// system Ã·ỹ = Dr·rhs and recover δ_j = Dc[j]·ỹ_j. This is a numerically-equivalent
+// reconditioning of the SAME linear system: the converged root is unchanged.
+//
+// Returns false if the (scaled) factorization is singular. On success δ holds the
+// true (un-scaled) Newton step. Dr/Dc are recomputed per call (J changes each iter).
+static bool equilibrate_and_solve(const std::vector<double>& J,
+                                  const std::vector<double>& rhs,
+                                  int n, std::vector<double>& delta) {
+    std::vector<double> Dr((size_t)n, 1.0), Dc((size_t)n, 1.0);
+    std::vector<double> A(J);  // working scaled copy Ã = Dr·J·Dc (built incrementally)
+
+    constexpr int RUIZ_ITERS = 5;
+    for (int sweep = 0; sweep < RUIZ_ITERS; ++sweep) {
+        // Row inf-norms of the CURRENT scaled matrix Ã.
+        for (int i = 0; i < n; ++i) {
+            double rmax = 0.0;
+            for (int j = 0; j < n; ++j) rmax = std::max(rmax, std::abs(A[(size_t)i*n+j]));
+            if (rmax > 0.0) {
+                const double s = 1.0 / std::sqrt(rmax);
+                Dr[i] *= s;
+                for (int j = 0; j < n; ++j) A[(size_t)i*n+j] *= s;
+            }
+        }
+        // Column inf-norms of the CURRENT scaled matrix Ã.
+        for (int j = 0; j < n; ++j) {
+            double cmax = 0.0;
+            for (int i = 0; i < n; ++i) cmax = std::max(cmax, std::abs(A[(size_t)i*n+j]));
+            if (cmax > 0.0) {
+                const double s = 1.0 / std::sqrt(cmax);
+                Dc[j] *= s;
+                for (int i = 0; i < n; ++i) A[(size_t)i*n+j] *= s;
+            }
+        }
+    }
+
+    // Scaled RHS b̃_i = Dr[i]·rhs_i, then factor/solve Ã·ỹ = b̃.
+    std::vector<double> b((size_t)n);
+    for (int i = 0; i < n; ++i) b[i] = Dr[i] * rhs[i];
+    std::vector<int> piv;
+    if (!column_lu_factor(A, piv, n)) return false;
+    column_lu_solve(A, piv, b, n);
+    // Recover the true step δ_j = Dc[j]·ỹ_j.
+    delta.assign((size_t)n, 0.0);
+    for (int j = 0; j < n; ++j) delta[j] = Dc[j] * b[j];
+    return true;
+}
+
 // -----------------------------------------------------------------------------
 // C1 driver: row-swapped coupled Newton. Mirrors solve_column_bvp's loop:
 //   residual -> coupled_column_jacobian -> column_lu_factor/solve -> step cap +
@@ -460,34 +588,44 @@ GRRT_EXPORT ColumnClosure solve_column_coupled(const ColumnCoupledInputs& in,
     assert(warm_start == nullptr || (int)warm_start->size() == n);
     if (warm_start && (int)warm_start->size() == n) {
         U = *warm_start;
+    } else if (in.naive_seed) {
+        if (!build_naive_coupled_seed(in, op, U))   // single base solve (no secant)
+            return ColumnClosure{};
     } else if (!build_coupled_seed(in, op, U)) {
         return ColumnClosure{};   // base seed solve failed -> no coupled solution
     }
 
-    std::vector<double> R, J, Jcopy, rhs, Utry, Rtry;
-    std::vector<int> piv;
+    std::vector<double> R, J, rhs, Utry, Rtry;
 
     // One-shot analytic-vs-FD Jacobian cross-check at the seed (the safety net the
     // spec requires). Printed; must be < 1e-6 for a robust Newton.
     {
         const double mism = coupled_jacobian_fd_mismatch(U, in, op);
         std::printf("  [coupled] analytic-vs-FD Jacobian max rel mismatch (seed) = %.3e\n", mism);
+        // Conditioning diagnostic: LU pivot ratio of the raw vs Ruiz-equilibrated J.
+        coupled_column_jacobian(U, in, op, J);
+        const double raw_ratio = lu_pivot_ratio(J, n);
+        std::vector<double> Jeq; ruiz_scaled_copy(J, n, Jeq);
+        const double eq_ratio = lu_pivot_ratio(Jeq, n);
+        std::printf("  [coupled] LU pivot ratio: raw = %.3e  Ruiz-equilibrated = %.3e\n",
+                    raw_ratio, eq_ratio);
     }
 
     coupled_column_residual(U, in, op, R);
     double merit = coupled_residual_norm(U, R, in);
 
+    std::vector<double> dUvec;
     for (int it = 0; it < in.max_iters; ++it) {
         coupled_column_jacobian(U, in, op, J);
-        Jcopy = J;
-        if (!column_lu_factor(Jcopy, piv, n)) break;     // singular -> bail
         rhs.assign(R.begin(), R.end());
         for (double& r : rhs) r = -r;
-        column_lu_solve(Jcopy, piv, rhs, n);
-        const std::vector<double>& dU = rhs;
+        // Ruiz-equilibrate the stiff coupled Jacobian before the LU solve. This is a
+        // numerically-equivalent reconditioning of J·δ = −R; the root is unchanged.
+        if (!equilibrate_and_solve(J, rhs, n, dUvec)) break;  // singular -> bail
+        const std::vector<double>& dU = dUvec;
 
         // Trust-region cap: limit fractional change of any positive variable (P, T)
-        // AND the free global T_eff to STEP_CAP, then run the merit line search.
+        // AND the free globals (z0, T_eff) to STEP_CAP, then run the merit line search.
         constexpr double STEP_CAP = 0.5;
         double lambda = 1.0;
         auto cap = [&](double u, double d){
@@ -497,7 +635,8 @@ GRRT_EXPORT ColumnClosure solve_column_coupled(const ColumnCoupledInputs& in,
             }
         };
         for (int i = 0; i < N; ++i) { cap(U[4*i+0], dU[4*i+0]); cap(U[4*i+2], dU[4*i+2]); }
-        cap(U[4*N+1], dU[4*N+1]);   // T_eff (the freed global)
+        cap(U[4*N],   dU[4*N]);     // z0     (the freed global photosphere height)
+        cap(U[4*N+1], dU[4*N+1]);   // T_eff  (the freed global surface temperature)
 
         bool accepted = false;
         double merit_try = merit;
