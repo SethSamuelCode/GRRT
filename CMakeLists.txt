@@ -166,6 +166,13 @@ target_link_libraries(test-raymarch-step-control PRIVATE grrt)
 add_executable(test-column-bvp tests/test_column_bvp.cpp)
 target_link_libraries(test-column-bvp PRIVATE grrt)
 
+# C1 coupled-column re-pose (Σ+T_c-driven). Include-the-.cpp probe: #includes
+# opacity.cpp + disk_column_bvp.cpp + disk_column_coupled.cpp in one TU to reach
+# the column's TU-local helpers (node_deriv, column_residual, analytic_jacobian);
+# does NOT link grrt to avoid duplicate symbols.
+add_executable(test-column-coupled tests/test_column_coupled.cpp)
+target_include_directories(test-column-coupled PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
 add_executable(test-slim-disk-radial tests/test_slim_disk_radial.cpp)
 target_link_libraries(test-slim-disk-radial PRIVATE grrt)
 
