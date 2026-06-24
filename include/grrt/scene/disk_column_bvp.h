@@ -71,6 +71,13 @@ GRRT_EXPORT void column_numerical_jacobian_test(const ColumnInputs& in, const Op
 GRRT_EXPORT void column_jacobians_test(const ColumnInputs& in, const OpacityLUTs& op,
                                        std::vector<double>& Ja, std::vector<double>& Jn, int& n);
 
+/// Dense LU with partial pivoting, split into reusable factor + solve so one
+/// factorization (O(n³)) serves many RHS back-substitutions (O(n²) each) — the
+/// IFT column-sensitivity needs ∂R_c/∂p solved against the same ∂R_c/∂U_c factor.
+GRRT_EXPORT bool column_lu_factor(std::vector<double>& A, std::vector<int>& piv, int n);
+GRRT_EXPORT void column_lu_solve(const std::vector<double>& LU, const std::vector<int>& piv,
+                                 std::vector<double>& b, int n);
+
 } // namespace grrt
 
 #endif

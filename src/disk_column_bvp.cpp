@@ -420,9 +420,71 @@ void column_jacobians_test(const ColumnInputs& in, const OpacityLUTs& op,
     numerical_jacobian(U, in, op, Jn);
 }
 
+/// Dense LU factorization with partial pivoting (factor-once half of dense_solve).
+/// A is row-major (n×n), overwritten in place: the upper triangle (incl. diagonal)
+/// holds U, and the strict-lower triangle holds the elimination multipliers L
+/// (unit diagonal implied). `piv[k]` records the row swapped into row k at step k,
+/// so column_lu_solve can replay the same row permutation on any RHS. Returns
+/// false if the matrix is (numerically) singular. Numerically identical to the
+/// elimination loop of the original one-shot dense_solve.
+bool column_lu_factor(std::vector<double>& A, std::vector<int>& piv, int n) {
+    piv.assign((size_t)n, 0);
+    for (int k = 0; k < n; ++k) {
+        int p = k; double maxv = std::abs(A[(size_t)k*n+k]);
+        for (int i = k+1; i < n; ++i) { double v = std::abs(A[(size_t)i*n+k]); if (v>maxv){maxv=v;p=i;} }
+        if (maxv < 1e-300) return false;
+        piv[k] = p;
+
+        if (p != k) { for (int j=0;j<n;++j) std::swap(A[(size_t)k*n+j],A[(size_t)p*n+j]); }
+
+        const double akk = A[(size_t)k*n+k];
+        for (int i = k+1; i < n; ++i) {
+            const double f = A[(size_t)i*n+k]/akk;
+            // Store the multiplier in the strict-lower triangle (standard in-place LU)
+            // and eliminate only the upper part — the j=k term of the one-shot path
+            // (A[i*n+k] - f*akk) is the stored f's own residual, which the solve never
+            // reads, so back-substitution against U is unaffected.
+            A[(size_t)i*n+k] = f;
+            if (f != 0.0) { for (int j=k+1;j<n;++j) A[(size_t)i*n+j]-=f*A[(size_t)k*n+j]; }
+        }
+    }
+    return true;
+}
+
+/// Apply an LU factorization (from column_lu_factor) to one RHS, in place: replays
+/// the recorded row swaps on b, forward-substitutes with the stored multipliers,
+/// then back-substitutes against U. b holds the solution on return. O(n²) per call,
+/// so one factorization serves many RHS columns.
+void column_lu_solve(const std::vector<double>& LU, const std::vector<int>& piv,
+                     std::vector<double>& b, int n) {
+    // Replay row permutation, then forward substitution (unit-lower L).
+    for (int k = 0; k < n; ++k) {
+        const int p = piv[(size_t)k];
+        if (p != k) std::swap(b[k], b[p]);
+        const double bk = b[k];
+        for (int i = k+1; i < n; ++i) {
+            const double f = LU[(size_t)i*n+k];
+            if (f != 0.0) b[i] -= f * bk;
+        }
+    }
+        // Back-substitution. Elimination above did NOT normalize the diagonal, so
+        // LU[i*n+i] still holds the original pivot (= U_ii) — divide by it.
+    for (int i = n-1; i >= 0; --i) { double sgi=b[i]; for (int j=i+1;j<n;++j) sgi-=LU[(size_t)i*n+j]*b[j]; b[i]=sgi/LU[(size_t)i*n+i]; }
+}
+
 /// Dense Gaussian elimination with partial pivoting. Solves A x = b; A is
 /// row-major (n×n) and modified in place; the solution is returned in b.
 /// Returns false if the matrix is (numerically) singular.
+///
+/// NOTE: this retains the original FUSED one-shot loop (the b-elimination is
+/// interleaved with the matrix-row elimination) rather than delegating to
+/// column_lu_factor/column_lu_solve. Under the project's /fp:fast (+FMA) build,
+/// splitting the fused loop into separate factor+solve passes makes MSVC emit a
+/// different (reassociated) arithmetic sequence; the column Newton sits on the edge
+/// of its convergence basin, so that bit-level difference flips several borderline
+/// convergence tests. Keeping the source fused guarantees the column-Newton path is
+/// byte-identical. column_lu_factor/column_lu_solve above are the reusable primitive
+/// for the IFT column sensitivity (Task 7), which does not require fused-loop bits.
 static bool dense_solve(std::vector<double>& A, std::vector<double>& b, int n) {
     for (int k = 0; k < n; ++k) {
         int piv = k; double maxv = std::abs(A[(size_t)k*n+k]);

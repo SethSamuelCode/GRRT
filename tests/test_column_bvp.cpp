@@ -357,6 +357,24 @@ static void test_analytic_vs_numerical_jacobian_fadv() {
     if (max_rel > 1e-3) { std::printf("  FAIL: analytic Jacobian disagrees with numerical (f_adv=0.5)\n"); failures++; }
 }
 
+static void test_lu_multi_rhs() {
+    std::printf("\n=== column LU: factor once, solve two RHS ===\n");
+    // 3x3 well-conditioned system; A x1 = b1, A x2 = b2 via one factorization.
+    std::vector<double> A = {4,1,0, 1,3,1, 0,1,2};
+    std::vector<int> piv;
+    std::vector<double> LU = A;
+    bool ok = grrt::column_lu_factor(LU, piv, 3);
+    std::vector<double> b1 = {1,2,3}, b2 = {0,1,0};
+    grrt::column_lu_solve(LU, piv, b1, 3);
+    grrt::column_lu_solve(LU, piv, b2, 3);
+    // Verify A*x ≈ b for both (b1,b2 now hold the solutions x).
+    auto resid = [&](const std::vector<double>& x, const std::vector<double>& b){
+        double m=0; for(int r=0;r<3;++r){double s=0;for(int c=0;c<3;++c)s+=A[r*3+c]*x[c]; m=std::max(m,std::abs(s-b[r]));} return m; };
+    double r1 = resid(b1, {1,2,3}), r2 = resid(b2, {0,1,0});
+    std::printf("  ok=%d resid1=%.2e resid2=%.2e\n", (int)ok, r1, r2);
+    if (!ok || r1>1e-12 || r2>1e-12) { std::printf("  FAIL\n"); failures++; }
+}
+
 static void test_warm_start_converges_fast() {
     std::printf("\n=== warm start from a converged neighbour converges fast ===\n");
     auto lut = grrt::build_opacity_luts(1e-14, 1e4, 3000.0, 1e8);
@@ -406,6 +424,7 @@ int main() {
     test_fadv_reduces_heating();
     test_analytic_vs_numerical_jacobian_fadv();
     test_warm_start_converges_fast();
+    test_lu_multi_rhs();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
 }
