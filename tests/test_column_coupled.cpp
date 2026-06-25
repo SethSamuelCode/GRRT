@@ -210,11 +210,116 @@ static void test_moments_eta3_onezone_limit() {
     if (std::abs(eta3-expect)/expect > 1e-6) { std::printf("  FAIL\n"); failures++; }
 }
 
+// =============================================================================
+// (5) C3: analytic column-output sensitivities dC/d{Σ_target,T_c} for
+// C = {F, z0, η3, η4, f_adv} via the implicit-function theorem through the
+// augmented column Jacobian — validated against the PERTURB-RESOLVE oracle:
+// re-solve the coupled column at p·(1±h) (warm-started from the base U_c) and
+// central-difference each output. Gate: each component's analytic-vs-resolve
+// relative error < 1e-3 (the re-solve FD floor; the column Jacobian carries
+// ~3e-4 inherited opacity-LUT inexactness, so 1e-3 is the right gate — neither
+// loosen above nor tighten below it). Components whose value ≈0 are guarded with
+// an absolute floor.
+// =============================================================================
+static void test_dC_dp_vs_resolve_oracle() {
+    std::printf("\n=== C3: dC/d{Sigma,Tc} analytic (IFT) vs perturb-resolve oracle ===\n");
+    auto lut = build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
+
+    // Base coupled solve at a CONSISTENT (Σ,T_c) (taken from a reference T_eff-driven
+    // column, exactly as the round-trip does) so f_adv≈0 and the base is on the root.
+    ColumnCoupledInputs ci; double z0_ref=0, F_ref=0;
+    if (!reference_pair(lut, ci, z0_ref, F_ref)) {
+        std::printf("  FAIL: reference column did not converge\n"); failures++; return;
+    }
+    ColumnClosure c0 = solve_column_coupled(ci, lut, nullptr);
+    if (!c0.converged) { std::printf("  FAIL: base coupled solve did not converge\n"); failures++; return; }
+
+    // Analytic IFT sensitivity at the base.
+    ColumnSensitivity sens = column_sensitivity(c0, ci, lut);
+
+    // Warm-start vector for the perturbed re-solves (the converged base U_c).
+    const std::vector<double> Uwarm = pack_state(c0, ci.n_nodes);
+
+    // Perturb-resolve oracle for one parameter index (0 = Σ_target, 1 = T_c).
+    // Returns central-difference dC/dp for C = {F, z0, η3, η4, f_adv}.
+    struct Cd { double dF, dz0, deta3, deta4, dfadv; bool ok; };
+    auto resolve_central = [&](int pidx, double h) -> Cd {
+        const double base_p = (pidx == 0) ? ci.Sigma_target : ci.Tc;
+        const double dp = h * base_p;                       // relative step
+        ColumnCoupledInputs cp = ci, cm = ci;
+        if (pidx == 0) { cp.Sigma_target = base_p + dp; cm.Sigma_target = base_p - dp; }
+        else           { cp.Tc           = base_p + dp; cm.Tc           = base_p - dp; }
+        // Re-solve the perturbed columns independently and central-difference. Try the
+        // warm start (from the base U_c) first — it converges in ~1 iter and gives a
+        // clean difference. If a warm-started perturbed solve STALLS (the augmented
+        // Newton's basin from the unperturbed seed is narrow for a tiny T_c nudge —
+        // empirically observed for the T_c branch at h≤1e-4), fall back to a COLD solve
+        // (the full 2-D bring-up to the true root). The cold solve is the MORE reliable
+        // reference, so this strengthens the oracle; it is not a tolerance relaxation.
+        auto resolve_one = [&](const ColumnCoupledInputs& cc) -> ColumnClosure {
+            ColumnClosure r = solve_column_coupled(cc, lut, &Uwarm);
+            if (!r.converged) r = solve_column_coupled(cc, lut, nullptr);   // cold fallback
+            return r;
+        };
+        ColumnClosure cpl = resolve_one(cp);
+        ColumnClosure cmi = resolve_one(cm);
+        Cd d{};
+        d.ok = cpl.converged && cmi.converged;
+        if (!d.ok) return d;
+        const double inv = 1.0 / (2.0 * dp);
+        d.dF    = (cpl.F     - cmi.F)     * inv;
+        d.dz0   = (cpl.z0    - cmi.z0)    * inv;
+        d.deta3 = (cpl.eta3  - cmi.eta3)  * inv;
+        d.deta4 = (cpl.eta4  - cmi.eta4)  * inv;
+        d.dfadv = (cpl.f_adv - cmi.f_adv) * inv;
+        return d;
+    };
+
+    // Relative-error compare with an absolute floor for near-zero components. The
+    // floor is scaled by the characteristic magnitude of each output so a component
+    // that is genuinely ≈0 (e.g. dfadv at a consistent base) is not spuriously failed.
+    auto rel_or_abs = [&](double analytic, double oracle, double floor) -> double {
+        const double denom = std::max(std::abs(oracle), floor);
+        return std::abs(analytic - oracle) / denom;
+    };
+
+    const double h = 1e-5;
+    const char* pname[2] = { "Sigma_target", "T_c" };
+    bool any_fail = false;
+    for (int p = 0; p < 2; ++p) {
+        Cd o = resolve_central(p, h);
+        if (!o.ok) { std::printf("  FAIL: perturb-resolve (%s) did not converge\n", pname[p]); failures++; any_fail=true; continue; }
+        const double aF    = sens.dF[p],    az0 = sens.dz0[p];
+        const double ae3   = sens.deta3[p], ae4 = sens.deta4[p], afa = sens.dfadv[p];
+        // Absolute floors: a small fraction of the base output magnitude, so the rel
+        // metric degrades gracefully to absolute when the derivative ≈0.
+        const double fF   = 1e-6 * std::abs(c0.F);
+        const double fz0  = 1e-6 * std::abs(c0.z0);
+        const double fe3  = 1e-6 * std::max(std::abs(c0.eta3), 1.0);
+        const double fe4  = 1e-6 * std::max(std::abs(c0.eta4), 1.0);
+        const double ffa  = 1e-3;   // f_adv is O(1) and ≈0 at the consistent base
+        const double eF   = rel_or_abs(aF,  o.dF,    fF);
+        const double ez0  = rel_or_abs(az0, o.dz0,   fz0);
+        const double ee3  = rel_or_abs(ae3, o.deta3, fe3);
+        const double ee4  = rel_or_abs(ae4, o.deta4, fe4);
+        const double efa  = rel_or_abs(afa, o.dfadv, ffa);
+        std::printf("  d/d%-12s  F: a=% .4e o=% .4e r=%.2e | z0: a=% .4e o=% .4e r=%.2e\n",
+                    pname[p], aF, o.dF, eF, az0, o.dz0, ez0);
+        std::printf("  %14s  eta3: a=% .4e o=% .4e r=%.2e | eta4: a=% .4e o=% .4e r=%.2e | fadv: a=% .4e o=% .4e r=%.2e\n",
+                    "", ae3, o.deta3, ee3, ae4, o.deta4, ee4, afa, o.dfadv, efa);
+        for (double e : { eF, ez0, ee3, ee4, efa }) {
+            if (!(e < 1e-3)) { any_fail = true; }
+        }
+    }
+    if (any_fail) { std::printf("  FAIL: a dC/dp component exceeds the 1e-3 perturb-resolve gate\n"); failures++; }
+}
+
 int main(){
     test_coupled_repose_roundtrip();
     test_coupled_naive_seed_converges();
     test_coupled_inconsistent_pair_converges();
     test_moments_eta3_onezone_limit();
+    test_dC_dp_vs_resolve_oracle();
     std::printf("\n## %d failure(s) ##\n", failures);
     return failures?1:0;
 }

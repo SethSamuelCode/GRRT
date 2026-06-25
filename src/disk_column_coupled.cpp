@@ -1051,4 +1051,144 @@ GRRT_EXPORT void column_moments(const ColumnBVPSolution& s, double& eta3, double
     eta4 = (m0 > 0.0) ? (m2 / m0) : 0.0;
 }
 
+// -----------------------------------------------------------------------------
+// C3: analytic column-output sensitivity dC/d{Σ_target,T_c} for C={F,z0,η3,η4,f_adv}
+// via the implicit-function theorem through the augmented column Jacobian.
+//
+//   R_c(U_c; p) = 0,  p = (Σ_target, T_c)   (only the two pin rows depend on p)
+//   dU_c/dp = −(∂R_c/∂U_c)⁻¹ (∂R_c/∂p)   [ONE LU of ∂R_c/∂U_c, two back-subs]
+//   dC/dp   = (∂C/∂U_c)(dU_c/dp)
+//
+// ∂R_c/∂p (n×2) is trivial after the C1 re-pose — the ONLY p-dependent rows are the
+// two pins (coupled_column_residual rows 4N+2 = T(0)−Tc and 4N+3 = Σ0−Σ_target):
+//   ∂R_c/∂Σ_target = −e_{4N+3}  ;  ∂R_c/∂T_c = −e_{4N+2}.
+// So the LU RHS = −∂R_c/∂p gives  dU_c/dΣ = LU⁻¹ e_{4N+3},  dU_c/dT_c = LU⁻¹ e_{4N+2}.
+//
+// ∂C/∂U_c:
+//   F  = Q(N-1) = U[4(N-1)+1]   (the closure stores out.F = U[4(N-1)+1]; at the root
+//                                this equals σT_eff⁴ via the surface BC, so selecting
+//                                the Q(N-1) slot and using 4σT_eff³ on the T_eff slot
+//                                are equal along the manifold — we use the literal
+//                                stored slot so it is exact for any sub-tol residual).
+//   z0   = U[4N] ; f_adv = U[4N+3]                 (direct slot selectors).
+//   η3,η4: depend on the profile (Pg[i]=U[4i], T[i]=U[4i+2], z[i]=U[4i+3]). We obtain
+//          ∂η/∂U_c by CENTRAL FINITE DIFFERENCES OF column_moments ALONE — a 1-level FD
+//          of a cheap, smooth PURE function (perturb one profile entry, rebuild the
+//          affected sol fields, re-evaluate the moment integral). This carries
+//          negligible error and is far less bug-prone than hand-differentiating the
+//          trapezoid; the perturb-RESOLVE oracle (test (5)) is the model-independent
+//          arbiter. Only the Pg/T/z slots enter the moments (Q and the globals do not).
+// -----------------------------------------------------------------------------
+GRRT_EXPORT ColumnSensitivity column_sensitivity(const ColumnClosure& c,
+                                                 const ColumnCoupledInputs& in,
+                                                 const OpacityLUTs& op) {
+    using namespace constants;
+    const int N = in.n_nodes;
+    const int n = 4*N + 4;
+
+    ColumnSensitivity S{};
+    if (!c.converged || (int)c.sol.T.size() != N) return S;   // honest: no profile ⇒ zeros
+
+    // Reconstruct the converged augmented state U_c from the closure (mirror pack_state):
+    //   profile slots from sol; globals z0, Σ0 from sol; T_eff, f_adv from the closure.
+    std::vector<double> U(n, 0.0);
+    for (int i = 0; i < N; ++i) {
+        U[4*i+0] = c.sol.P_gas[i]; U[4*i+1] = c.sol.Q[i];
+        U[4*i+2] = c.sol.T[i];     U[4*i+3] = c.sol.z[i];
+    }
+    U[4*N]   = c.z0;
+    U[4*N+1] = c.sol.Sigma0;
+    U[4*N+2] = c.T_eff;
+    U[4*N+3] = c.f_adv;
+
+    // Confirm we reconstructed the right vector: the residual at U_c must be ~tol.
+    {
+        std::vector<double> Rchk;
+        coupled_column_residual(U, in, op, Rchk);
+        const double rn = coupled_residual_norm(U, Rchk, in);
+        std::printf("  [sens] reconstructed-U_c residual merit = %.3e (expect ~tol)\n", rn);
+        assert(rn < 1e-4 && "column_sensitivity: reconstructed U_c is not at the column root");
+    }
+
+    // Factor ∂R_c/∂U_c ONCE.
+    std::vector<double> J;
+    coupled_column_jacobian(U, in, op, J);
+    std::vector<int> piv;
+    if (!column_lu_factor(J, piv, n)) {
+        std::printf("  [sens] WARNING: ∂R_c/∂U_c is singular — returning zero sensitivity\n");
+        return S;
+    }
+
+    // RHS = −∂R_c/∂p. Column 0 (Σ_target): −(−e_{4N+3}) = e_{4N+3}.
+    //                  Column 1 (T_c):      −(−e_{4N+2}) = e_{4N+2}.
+    std::vector<double> dU_dSigma(n, 0.0), dU_dTc(n, 0.0);
+    dU_dSigma[4*N+3] = 1.0;   // back-sub solves dU_c/dΣ_target = LU⁻¹ e_{4N+3}
+    dU_dTc   [4*N+2] = 1.0;   // back-sub solves dU_c/dT_c      = LU⁻¹ e_{4N+2}
+    column_lu_solve(J, piv, dU_dSigma, n);
+    column_lu_solve(J, piv, dU_dTc,    n);
+
+    // ∂η/∂U_c via central FD of column_moments alone. Build a working copy of sol and
+    // perturb one profile entry at a time (rebuilding the dependent rho/P/P_gas/T/z),
+    // re-evaluating the moments. dC[k]·dU_c/dp accumulates the chain rule.
+    auto moment_grads = [&](std::vector<double>& g3, std::vector<double>& g4) {
+        g3.assign(n, 0.0); g4.assign(n, 0.0);
+        ColumnBVPSolution s = c.sol;   // copy the converged profile (Pg,Q,T,z,rho,P,...)
+        auto rebuild_node = [&](int i) {            // sync rho/P from the perturbed Pg,T
+            s.rho[i] = std::max(rho_from_gas(s.P_gas[i], s.T[i]), 0.0);
+            s.P[i]   = p_total(s.P_gas[i], s.T[i]);
+        };
+        auto eval = [&](double& e3, double& e4) { column_moments(s, e3, e4); };
+        // Scales for the relative FD step of each profile variable.
+        double sPg=0, sT=0, sZ=0;
+        for (int i = 0; i < N; ++i) {
+            sPg = std::max(sPg, std::abs(c.sol.P_gas[i]));
+            sT  = std::max(sT,  std::abs(c.sol.T[i]));
+            sZ  = std::max(sZ,  std::abs(c.sol.z[i]));
+        }
+        const double fPg = 1e-7 * std::max(sPg, 1e-300);
+        const double fT  = 1e-7 * std::max(sT,  1e-300);
+        const double fZ  = 1e-7 * std::max(sZ,  1e-300);
+        for (int i = 0; i < N; ++i) {
+            // slot 4i+0 (Pg), 4i+2 (T), 4i+3 (z) — these are the moment-relevant entries.
+            struct Slot { int off; const double* base; double afloor; };
+            const Slot slots[3] = { {0, &c.sol.P_gas[i], fPg},
+                                    {2, &c.sol.T[i],     fT },
+                                    {3, &c.sol.z[i],     fZ } };
+            for (const Slot& sl : slots) {
+                const double v0 = *sl.base;
+                const double d  = std::max(1e-7 * std::abs(v0), sl.afloor);
+                double e3p, e4p, e3m, e4m;
+                // +
+                if (sl.off == 0) s.P_gas[i] = v0 + d; else if (sl.off == 2) s.T[i] = v0 + d; else s.z[i] = v0 + d;
+                rebuild_node(i); eval(e3p, e4p);
+                // −
+                if (sl.off == 0) s.P_gas[i] = v0 - d; else if (sl.off == 2) s.T[i] = v0 - d; else s.z[i] = v0 - d;
+                rebuild_node(i); eval(e3m, e4m);
+                // restore
+                if (sl.off == 0) s.P_gas[i] = v0;     else if (sl.off == 2) s.T[i] = v0;     else s.z[i] = v0;
+                rebuild_node(i);
+                const double inv = 1.0 / (2.0 * d);
+                g3[4*i+sl.off] = (e3p - e3m) * inv;
+                g4[4*i+sl.off] = (e4p - e4m) * inv;
+            }
+        }
+    };
+    std::vector<double> g3, g4;
+    moment_grads(g3, g4);
+
+    // dC/dp = (∂C/∂U_c)(dU_c/dp). F, z0, f_adv are slot selectors; η3, η4 are dot products.
+    auto apply = [&](const std::vector<double>& dU, int idx) {
+        S.dF[idx]   = dU[4*(N-1) + 1];     // F = Q(N-1)
+        S.dz0[idx]  = dU[4*N];             // z0
+        S.dfadv[idx]= dU[4*N+3];           // f_adv
+        double de3 = 0.0, de4 = 0.0;
+        for (int k = 0; k < n; ++k) { de3 += g3[k]*dU[k]; de4 += g4[k]*dU[k]; }
+        S.deta3[idx] = de3;
+        S.deta4[idx] = de4;
+    };
+    apply(dU_dSigma, 0);   // index 0 = ∂/∂Σ_target
+    apply(dU_dTc,    1);   // index 1 = ∂/∂T_c
+    return S;
+}
+
 } // namespace grrt

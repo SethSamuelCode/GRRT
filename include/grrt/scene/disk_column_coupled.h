@@ -39,5 +39,12 @@ GRRT_EXPORT ColumnClosure solve_column_coupled(const ColumnCoupledInputs& in,
 /// C2: vertical energy moment from a converged profile. η₃ = ∫E dz / ∫P dz with
 /// E = (3/2)P_gas + 3·P_rad (P_rad=(a_rad/3)T⁴), P = total. η₄ is Task 5 (stub=0). Pure.
 GRRT_EXPORT void column_moments(const ColumnBVPSolution& s, double& eta3, double& eta4);
+
+/// C3: column-output sensitivities dC/d{Σ,T_c} for C={F,z0,η3,η4,f_adv}, via the IFT
+/// through the augmented column Jacobian. Index [0]=∂/∂Σ_target, [1]=∂/∂T_c.
+struct ColumnSensitivity { double dF[2], dz0[2], deta3[2], deta4[2], dfadv[2]; };
+GRRT_EXPORT ColumnSensitivity column_sensitivity(const ColumnClosure& c,
+                                                 const ColumnCoupledInputs& in,
+                                                 const OpacityLUTs& op);
 } // namespace grrt
 #endif
