@@ -1012,7 +1012,34 @@ GRRT_EXPORT ColumnClosure solve_column_coupled(const ColumnCoupledInputs& in,
     }
     s.tau_mid = tau;
 
+    // C2: fill the vertical energy moment η₃ from the converged profile (η₄ stub=0).
+    column_moments(out.sol, out.eta3, out.eta4);
+
     return out;
+}
+
+// -----------------------------------------------------------------------------
+// C2: vertical energy moment of a converged column profile.
+//   η₃ = ∫E dz / ∫P dz,  E = (3/2)P_gas + 3·P_rad,  P_rad = (a_rad/3)T⁴,  P = total.
+// Trapezoidal in z, using the SAME radiation constant (constants::a_rad) the base
+// column's p_total uses. One-zone reduction (constant β = P_gas/P_total): E =
+// (3/2)βP + 3(1−β)P = (3−1.5β)P ⇒ η₃ → 3 − 1.5β. η₄ (S11 (1/Σ)∫ρz²dz) is Task 5.
+// -----------------------------------------------------------------------------
+GRRT_EXPORT void column_moments(const ColumnBVPSolution& s, double& eta3, double& eta4) {
+    using namespace constants;
+    const int N = (int)s.z.size();
+    double intE = 0.0, intP = 0.0;
+    auto Eden = [&](int k){
+        const double Prad = (a_rad / 3.0) * std::pow(s.T[k], 4);
+        return 1.5 * s.P_gas[k] + 3.0 * Prad;
+    };
+    for (int i = 0; i + 1 < N; ++i) {
+        const double dz = s.z[i+1] - s.z[i];
+        intE += 0.5 * (Eden(i) + Eden(i+1)) * dz;
+        intP += 0.5 * (s.P[i]  + s.P[i+1])  * dz;
+    }
+    eta3 = (intP > 0.0) ? intE / intP : 0.0;
+    eta4 = 0.0;  // Task 5 transcribes S11 η₄ = (1/Σ)∫ρz²dz; stubbed here.
 }
 
 } // namespace grrt

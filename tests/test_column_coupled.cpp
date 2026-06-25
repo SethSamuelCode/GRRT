@@ -183,10 +183,38 @@ static void test_coupled_inconsistent_pair_converges() {
     }
 }
 
+// =============================================================================
+// (4) C2: column_moments η₃ = ∫E dz / ∫P dz on a SELF-CONSISTENT synthetic profile.
+// Constant β ≡ P_gas/P_total reduces the moment to η₃ → 3 − 1.5β (E = (3/2)βP +
+// 3(1−β)P). T is set so P_rad = (a_rad/3)T⁴ equals (1−β)P exactly at every node, so
+// the profile's own radiation share matches β (the plan's constant-T draft was self-
+// inconsistent; this one is not).
+// =============================================================================
+static void test_moments_eta3_onezone_limit() {
+    std::printf("\n=== C2: eta3 = INT E/INT P reduces to 3-1.5*beta for constant beta ===\n");
+    const int N=128; const double beta=0.4;
+    grrt::ColumnBVPSolution s;
+    s.z.resize(N); s.P.resize(N); s.P_gas.resize(N); s.T.resize(N); s.rho.resize(N);
+    const double a_rad = grrt::constants::a_rad;  // SAME radiation constant the column uses
+    for (int i=0;i<N;++i){
+        const double zc = double(i)/(N-1);
+        const double P  = std::exp(-zc*zc) + 0.1;     // total pressure, smooth & positive
+        const double Prad = (1.0-beta)*P;             // radiation share => constant beta
+        s.z[i]=zc; s.P[i]=P; s.P_gas[i]=beta*P;
+        s.T[i]=std::pow(3.0*Prad/a_rad, 0.25);        // T consistent: (a_rad/3)T^4 = Prad
+        s.rho[i]=P;                                   // (rho only used by eta4, Task 5)
+    }
+    double eta3=0, eta4=0; grrt::column_moments(s, eta3, eta4);
+    const double expect = 3.0 - 1.5*beta;             // 2.4
+    std::printf("  eta3=%.8f expect=%.8f rel=%.2e\n", eta3, expect, std::abs(eta3-expect)/expect);
+    if (std::abs(eta3-expect)/expect > 1e-6) { std::printf("  FAIL\n"); failures++; }
+}
+
 int main(){
     test_coupled_repose_roundtrip();
     test_coupled_naive_seed_converges();
     test_coupled_inconsistent_pair_converges();
+    test_moments_eta3_onezone_limit();
     std::printf("\n## %d failure(s) ##\n", failures);
     return failures?1:0;
 }
