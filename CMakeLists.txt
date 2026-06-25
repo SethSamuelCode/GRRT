@@ -252,6 +252,13 @@ target_include_directories(slim-nt-term-probe PRIVATE include/ ${CMAKE_BINARY_DI
 add_executable(slim-fadv-freedom-probe tools/slim_fadv_freedom_probe.cpp)
 target_include_directories(slim-fadv-freedom-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# η₄ MOMENT probe: gates column_moments' η₄ = (1/Σ)∫ρz²dz (S11 density 2nd
+# moment) against the one-zone reductions (uniform→h²/3, Gaussian→H²) plus an
+# inline reference quadrature. Includes the slim/opacity .cpp directly (probe
+# pattern). Safe to delete along with tools/slim_eta4_moment_probe.cpp.
+add_executable(slim-eta4-moment-probe tools/slim_eta4_moment_probe.cpp)
+target_include_directories(slim-eta4-moment-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
 # Q_adv entropy-form validation: on a CONVERGED profile, evaluates the §23
 # advective-cooling bracket (flag #1) three independent ways — the solver's frozen
 # η₃=3/2 bracket vs the raw 2D entropy identity (implementation check) vs the true

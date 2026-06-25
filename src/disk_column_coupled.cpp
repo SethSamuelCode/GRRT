@@ -1039,7 +1039,16 @@ GRRT_EXPORT void column_moments(const ColumnBVPSolution& s, double& eta3, double
         intP += 0.5 * (s.P[i]  + s.P[i+1])  * dz;
     }
     eta3 = (intP > 0.0) ? intE / intP : 0.0;
-    eta4 = 0.0;  // Task 5 transcribes S11 η₄ = (1/Σ)∫ρz²dz; stubbed here.
+
+    // η₄ = (∫ρz²dz)/(∫ρdz) = density-weighted <z²> (S11 density 2nd moment; reference §23).
+    // Convention-free over the stored half-profile (the both-faces/Σ factors cancel).
+    double m2 = 0.0, m0 = 0.0;
+    for (size_t i = 0; i + 1 < s.z.size(); ++i) {
+        const double dz = s.z[i+1] - s.z[i];
+        m2 += 0.5*(s.rho[i]*s.z[i]*s.z[i] + s.rho[i+1]*s.z[i+1]*s.z[i+1])*dz;
+        m0 += 0.5*(s.rho[i] + s.rho[i+1])*dz;
+    }
+    eta4 = (m0 > 0.0) ? (m2 / m0) : 0.0;
 }
 
 } // namespace grrt
