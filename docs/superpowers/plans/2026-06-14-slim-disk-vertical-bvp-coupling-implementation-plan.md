@@ -12,6 +12,21 @@
 
 ---
 
+## ⚠ AMENDMENT (2026-06-25): `f_adv` is a column OUTPUT, not an input
+
+During C1 execution, source (S11 §3.1–3.2) + a numerical probe (`tools/slim_fadv_freedom_probe.cpp`) established that the vertical structure is a **two-parameter family** `(T_c, f_adv) ≡ (T_c, Σ)`. So the closure map is **`(Σ, T_c) → (F, z₀, η₃, η₄, f_adv)`** — `f_adv` is *determined by* `(Σ, T_c)`, not an independent input. Fixing all three over-determines the column (the cause of the spurious "folds"). The fix: **free `f_adv` as a column unknown** (augmented row-swap). See spec §2 + the reference §22 note (both amended 2026-06-25). **No task is reordered**; the sequence `C1→C2→C3→C5→C4→gates` holds. Per-task deltas:
+
+- **Tasks 1, 2** (f_adv heating term; reusable LU) — DONE/committed, unaffected.
+- **Task 3 (C1)** — RE-POSED: state becomes `[Pg,Q,T,z]×N + (z₀, T_eff, f_adv)`; pin `T(0)=T_c` and `Σ0=Σ`; free **both** `T_eff` and `f_adv`. Its "genuine fold" tests become *convergence* tests. The equilibration (Ruiz) + affine-invariant (Deuflhard) Newton from the column-hardening work are folded in as the now-well-conditioned solver.
+- **Tasks 4, 5 (C2 moments)** — unaffected (read the converged profile).
+- **Task 6 (C3 `∂R_c/∂p`)** — SIMPLIFIES: parameters `p=(Σ, T_c)` only (drop the `f_adv` column); `f_adv` is now in `U_c`, handled by `∂R_c/∂U_c`. The new `∂R_c/∂p` is just the two `−1` pin-row columns.
+- **Task 7 (C3 sensitivity)** — SIMPLIFIES: `ColumnSensitivity` drops the `*_dfadv` scalars; `dC/d{Σ,T_c}` only. `C` gains `f_adv` as an output component.
+- **Task 8 (C5 𝒩₁)** — unaffected.
+- **Task 9 (C4 driver)** — SIMPLIFIES + two pre-C4 checks: the column is self-contained `(Σ,T_c)→…`; **remove** the "compute `f_adv` from the profile and pass it in" plumbing. (a) Add a **consistency check** that the column's emergent `F` + back-solved `f_adv` satisfy the radial `Q_vis − F − Q_adv = 0` (expected automatic: `f_adv = Q_adv/F` when column dissipation = radial `Q_vis` — verify numerically, no new radial equation). (b) **Stale-warm-start regression (C1 review followup, 2026-06-25):** C4 takes the warm-start path, which BYPASSES the 2-D `(T_eff,f_adv)` bring-up and runs the monolithic 4N+4 Newton directly from a possibly-stale `(Σ,T_c)` warm state — the basin the bring-up currently hides. Before trusting C4, add a test driving the monolithic Newton from a deliberately-stale warm start (e.g. previous node's converged `U` applied to a 30%-Σ-shifted target, `allow_continuation=false`); confirm direct convergence, then verify the continuation fallback fires + recovers when it doesn't. Watch per-node cost (a cold node pays the full 2-D bring-up + the augmented solve). The C1 Jacobian's `~3e-4` (→`6e-2` on f_adv-large pairs) inherited opacity-LUT inexactness sets the merit floor — keep it in view for C3's sensitivity accuracy (within Task 7's `1e-3` gate).
+- **Tasks 10–12 (gates)** — conceptually unchanged.
+
+---
+
 ## Ground-truth interface facts (verified against the real code, 2026-06-14)
 
 These were read directly from the source; tasks below are written against them. Where the spec assumed something the code does differently, it is flagged **[SPEC-DELTA]**.
