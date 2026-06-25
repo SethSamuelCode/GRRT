@@ -304,3 +304,14 @@ target_include_directories(slim-edd09-dump PRIVATE include/ ${CMAKE_BINARY_DIR}/
 # .cpp directly.  Safe to delete along with tools/slim_sadowski_residual_probe.cpp.
 add_executable(slim-sadowski-residual-probe tools/slim_sadowski_residual_probe.cpp)
 target_include_directories(slim-sadowski-residual-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# C4 coupled-column slim-disk SMOKE probe: runs solve_slim_disk_coupled at a modest
+# operating point (a=0.9, f_Edd=0.02, small N) and on a degenerate input (mdot=0).
+# Include-the-.cpp consumer pattern: #includes opacity.cpp + disk_column_bvp.cpp +
+# disk_column_coupled.cpp + slim_disk_radial.cpp + slim_disk_coupled.cpp in ONE TU
+# (slim_disk_coupled.cpp reaches the radial solver's TU-local helpers this way); does
+# NOT link grrt to avoid duplicate symbols.  Safe to delete along with
+# tools/slim_coupled_smoke_probe.cpp (and src/slim_disk_coupled.cpp is consumer-only,
+# never added to the grrt library).
+add_executable(slim-coupled-smoke-probe tools/slim_coupled_smoke_probe.cpp)
+target_include_directories(slim-coupled-smoke-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
