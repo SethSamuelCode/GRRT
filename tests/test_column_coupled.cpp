@@ -140,6 +140,58 @@ static void test_coupled_naive_seed_converges() {
 }
 
 // =============================================================================
+// (3b) WARM-START TINY-T_c-PERTURBATION regression (the C4-relevant configuration).
+// Warm-start solve_column_coupled from a CONVERGED root for a tiny midplane-T_c
+// nudge (relative h=1e-4 and 1e-5). This used to STALL: the monolithic augmented
+// Newton cannot descend from the warm state (the inherited ~3e-4 opacity-LUT
+// inexactness in the stiff interior radiative-flux/surface rows makes the step that
+// closes the T(0)−T_c pin DIVERGENT; the damped line search then stalls at a
+// spurious fixed point ≈ the OLD root — converged=false). The fix re-seeds via the
+// well-conditioned 2-D (T_eff,f_adv) bring-up (the cold path's mechanism) on
+// warm-start failure, so this now converges DIRECTLY to the TRUE perturbed root.
+//
+// GATE: (i) converges; (ii) reaches the TRUE perturbed root, NOT the unperturbed
+// anchor — i.e. F MOVES by the expected O(h) amount (~8.6e-4 relative per the cold-
+// resolve reference at h=1e-4). A "converged at the old root" masking would leave
+// F unchanged (relF_move≈0) and is explicitly rejected here.
+// =============================================================================
+static void test_coupled_warmstart_tiny_Tc_perturbation() {
+    std::printf("\n=== C1/C4: warm-start TINY-T_c-perturbation converges to the TRUE root ===\n");
+    auto lut = build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
+    ColumnCoupledInputs ci; double z0_ref=0, F_ref=0;
+    if (!reference_pair(lut, ci, z0_ref, F_ref)) {
+        std::printf("  FAIL: reference column did not converge\n"); failures++; return;
+    }
+    ColumnClosure base = solve_column_coupled(ci, lut, nullptr);
+    if (!base.converged) { std::printf("  FAIL: unperturbed base did not converge\n"); failures++; return; }
+    const std::vector<double> Uwarm = pack_state(base, ci.n_nodes);
+
+    // For each tiny relative nudge: the warm-start solve must converge AND F must move
+    // by ~ the cold-resolve reference amount (so it is the NEW root, not the old one).
+    for (double h : { 1e-4, 1e-5 }) {
+        ColumnCoupledInputs cp = ci; cp.Tc = ci.Tc * (1.0 + h);
+        ColumnClosure cw = solve_column_coupled(cp, lut, &Uwarm);
+        // Independent cold reference for the perturbed root (the reliable answer).
+        ColumnClosure cc = solve_column_coupled(cp, lut, nullptr);
+        const bool both = cw.converged && cc.converged;
+        const double relF_move_warm = both ? std::abs(cw.F - base.F)/base.F : -1.0;  // should be ~8.6e-4*(h/1e-4)
+        const double relF_warm_vs_cold = both ? std::abs(cw.F - cc.F)/cc.F : -1.0;    // warm vs cold root agreement
+        std::printf("  h=%.0e: warm conv=%d cold conv=%d | F_move(warm)=%.3e (cold ref=%.3e) | warm-vs-cold rel=%.3e f_adv=%.3e\n",
+                    h, cw.converged, cc.converged, relF_move_warm,
+                    cc.converged ? std::abs(cc.F-base.F)/base.F : -1.0, relF_warm_vs_cold, cw.f_adv);
+        if (!cw.converged) { std::printf("  FAIL: warm-start tiny-T_c solve STALLED (the regression)\n"); failures++; continue; }
+        // (ii) the warm root must AGREE with the cold root (same true root) to <1e-4...
+        if (!(relF_warm_vs_cold < 1e-4)) {
+            std::printf("  FAIL: warm root disagrees with cold root (not the true perturbed root)\n"); failures++; }
+        // ...and must have actually MOVED off the anchor by the expected O(h) amount
+        // (a stalled "old-root" accept would leave F unmoved — masking guard).
+        const double expect_move = 8.62e-4 * (h / 1e-4);
+        if (!(relF_move_warm > 0.3 * expect_move)) {
+            std::printf("  FAIL: F did not move off the anchor (masking: accepted the OLD root)\n"); failures++; }
+    }
+}
+
+// =============================================================================
 // (2) Inconsistent (Σ,T_c) pairs (Σ×1.3, ×0.7 with T_c HELD at the unperturbed
 // value). With f_adv FREED these are NO LONGER folds — they MUST converge to a
 // physical column. The back-solved f_adv must be finite and physical (1+f_adv>0),
@@ -317,6 +369,7 @@ static void test_dC_dp_vs_resolve_oracle() {
 int main(){
     test_coupled_repose_roundtrip();
     test_coupled_naive_seed_converges();
+    test_coupled_warmstart_tiny_Tc_perturbation();
     test_coupled_inconsistent_pair_converges();
     test_moments_eta3_onezone_limit();
     test_dC_dp_vs_resolve_oracle();

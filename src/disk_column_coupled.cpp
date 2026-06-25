@@ -940,6 +940,48 @@ GRRT_EXPORT ColumnClosure solve_column_coupled(const ColumnCoupledInputs& in,
     std::printf("  [coupled] affine-invariant Newton: converged=%d in %d iters\n",
                 converged, iters);
 
+    // --- Fallback (WARM-START re-seed): the monolithic augmented Newton can fail to
+    //     descend from a CONVERGED warm start when the target differs only by a small
+    //     midplane-T_c perturbation. The warm state satisfies every row except the
+    //     T(0)−T_c pin (off by ~ΔT_c); the Newton step that closes that pin must
+    //     propagate a temperature change through the whole optically-thick column, and
+    //     the inherited ~3e-4 opacity-LUT inexactness in the (high-magnitude) interior
+    //     radiative-flux/surface rows turns that step DIVERGENT (undamped Newton blows
+    //     up; the damped line search then stalls at a spurious fixed point ≈ the OLD
+    //     root — converged outputs off by O(ΔT_c), NOT a true root). The (Σ,T_c)
+    //     continuation below inherits the same stall (each homotopy sub-step is itself a
+    //     tiny warm perturbation). The ROBUST recovery is the SAME 2-D (T_eff,f_adv)
+    //     bring-up the COLD path uses: an outer 2×2 Newton on (T_eff,f_adv)→(T_c,Σ) with
+    //     the base column solve_column_bvp as the INNER solver, so the 4N+2 interior
+    //     block is EXACTLY zero at every outer iterate (no inexact-Jacobian propagation
+    //     of the T_c change). It reaches the TRUE perturbed root in ~1 augmented-Newton
+    //     polish step. This is bring-up, not continuation, so it does NOT depend on
+    //     allow_continuation.
+    //
+    //     The bring-up uses the SAME grey-relation T_eff guess (estimate_Teff_guess,
+    //     ∝ T_c) the cold path uses — NOT the warm state's frozen T_eff. The estimate
+    //     tracks T_c, so a +ΔT_c and −ΔT_c re-seed start from SYMMETRICALLY-bracketing
+    //     guesses and the inner bring-up converges symmetrically; a frozen warm T_eff
+    //     (identical for both signs) biases the two roots asymmetrically within the
+    //     bring-up's tolerance ball and corrupts a downstream central difference
+    //     (the C3 perturb-resolve oracle). Cost is unchanged (~1 augmented polish step).
+    if (!converged && have_consistent_ref) {
+        std::vector<double> Useed;
+        if (build_coupled_seed_2d(in, op, Useed)) {
+            int it2 = 0;
+            if (affine_invariant_newton(Useed, in, op, &it2)) {
+                U.swap(Useed);
+                converged = true;
+                std::printf("  [coupled] warm-start re-seed (2-D bring-up): converged=1"
+                            " in %d polish iters\n", it2);
+            } else {
+                std::printf("  [coupled] warm-start re-seed (2-D bring-up): polish failed\n");
+            }
+        } else {
+            std::printf("  [coupled] warm-start re-seed (2-D bring-up): seed failed\n");
+        }
+    }
+
     // --- Fallback: (Σ,T_c) continuation from a CONSISTENT anchor (rarely needed; the
     //     augmented system is balanced and should converge directly). ---
     auto try_continuation = [&](const std::vector<double>& Uref,
