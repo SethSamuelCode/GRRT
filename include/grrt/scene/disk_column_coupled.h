@@ -6,9 +6,8 @@
 #include <vector>
 namespace grrt {
 struct ColumnCoupledInputs {
-    double Sigma_target;  ///< Σ [g/cm²] (radial unknown)
-    double Tc;            ///< midplane T_c [K] (radial unknown)
-    double f_adv;         ///< advected fraction (radial input)
+    double Sigma_target;  ///< Σ [g/cm²] (radial unknown) — pinned via Σ0
+    double Tc;            ///< midplane T_c [K] (radial unknown) — pinned via T(0)
     double shear, omega_z, alpha, rho_mid_guess;
     int n_nodes = 96; int max_iters = 300; double tol = 1e-8;
     double Teff_guess = 0.0;  ///< warm-start for T_eff (0 ⇒ derive from Tc)
@@ -16,6 +15,10 @@ struct ColumnCoupledInputs {
                               ///< base solve at a grey-relation T_eff guess (no Σ0
                               ///< root-find) — sits off the coupled root, exercising
                               ///< the equilibrated Newton from a non-trivial seed.
+    bool allow_continuation = true;  ///< if the affine-invariant Newton fails from the
+                                     ///< seed AND a consistent reference is available,
+                                     ///< fall back to a (Σ,T_c) homotopy from that
+                                     ///< reference to the target. false ⇒ primary only.
 };
 struct ColumnClosure {
     double F = 0.0;     ///< emergent flux σT_eff⁴ [erg/cm²/s]
@@ -23,10 +26,12 @@ struct ColumnClosure {
     double eta3 = 0.0;  ///< filled by C2 (Task 4); leave 0 here
     double eta4 = 0.0;  ///< filled by C2 (Task 5); leave 0 here
     double T_eff = 0.0; ///< converged surface temperature (warm-start carrier)
+    double f_adv = 0.0; ///< back-solved advected fraction (OUTPUT, not input)
     bool converged = false;
     ColumnBVPSolution sol;  ///< converged profile (for C2/C3)
 };
-/// C1: solve the column with (Σ, T_c, f_adv) fixed and T_eff/F free (BC row-swap).
+/// C1: solve the column with (Σ, T_c) pinned and (T_eff, f_adv) freed as global
+/// unknowns (augmented 4N+4 system). f_adv is a back-solved OUTPUT (S11 §3.1-3.2).
 GRRT_EXPORT ColumnClosure solve_column_coupled(const ColumnCoupledInputs& in,
                                                const OpacityLUTs& op,
                                                const std::vector<double>* warm_start);

@@ -246,6 +246,12 @@ target_include_directories(slim-benchmark-probe PRIVATE include/ ${CMAKE_BINARY_
 add_executable(slim-nt-term-probe tools/slim_nt_term_probe.cpp)
 target_include_directories(slim-nt-term-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# f_adv FREEDOM probe: tests whether the Sigma-folds are artifacts of holding f_adv
+# fixed. Solves eval(T_eff,f_adv)=(T_c,scale*Sigma) via the BASE column solver as a
+# black box (no new column physics). Safe to delete with tools/slim_fadv_freedom_probe.cpp.
+add_executable(slim-fadv-freedom-probe tools/slim_fadv_freedom_probe.cpp)
+target_include_directories(slim-fadv-freedom-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
 # Q_adv entropy-form validation: on a CONVERGED profile, evaluates the §23
 # advective-cooling bracket (flag #1) three independent ways — the solver's frozen
 # η₃=3/2 bracket vs the raw 2D entropy identity (implementation check) vs the true
