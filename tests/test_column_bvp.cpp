@@ -275,8 +275,10 @@ static void test_hot_inner_disk_columns_converge() {
     // Representative of a T_peak=1e7, 10 Msun, a=0.998 disk's inner columns:
     // omega_z ~ 3000/s, shear ~ 5800/s near the peak-flux radius (~2 r_g).
     // These T_eff values are what the disk DERIVES (not the easy gas-dominated
-    // values the other tests pick). EXPECTED TO FAIL until the rad-pressure-regime
-    // convergence barrier is fixed; do NOT relax the gate to make it pass.
+    // values the other tests pick). MUST-PASS: the rad-pressure Newton-basin barrier
+    // is resolved by solve_column_bvp's internal T_eff continuation (a feasible cold
+    // anchor at 3e6, then a warm march up to the hot target) plus the per-variable-
+    // scaled relative-step convergence metric. Do NOT relax the gate.
     auto lut = grrt::build_opacity_luts(1e-16, 1e6, 3000.0, 1e8);
     const double Teffs[] = {1e6, 3e6, 6e6, 1e7};
     int ok = 0;
@@ -290,6 +292,40 @@ static void test_hot_inner_disk_columns_converge() {
     }
     std::printf("  hot columns converged %d/4\n", ok);
     if (ok < 4) { std::printf("  FAIL: not all hot inner-disk columns converge (solver rad-pressure barrier)\n"); failures++; }
+}
+
+static void test_rad_pressure_barrier_reach() {
+    std::printf("\n=== deep radiation-pressure column converges (continuation reach gate) ===\n");
+    // PERMANENT REGRESSION GATE for the rad-pressure Newton-basin barrier. A COLD call
+    // (no warm start) at the inner-disk geometry and T_eff=1e7 lands FAR past the
+    // cold-start basin edge (~4-5e6 here) — it can only converge via solve_column_bvp's
+    // internal T_eff continuation. We additionally assert the column is GENUINELY in the
+    // radiation-pressure-dominated regime (midplane beta = P_gas/P_total well below the
+    // documented few×1e-4 barrier), so a future regression that "converges" but fails to
+    // actually reach the hot regime cannot pass this gate by masking. Do NOT relax.
+    using namespace grrt::constants;
+    auto lut = grrt::build_opacity_luts(1e-16, 1e6, 3000.0, 1e8);
+    grrt::ColumnInputs in{};
+    in.T_eff = 1e7; in.shear = 5.25e3; in.omega_z = 3.12e3; in.alpha = 0.1;
+    in.rho_mid_guess = 1e-6; in.n_nodes = 96; in.max_iters = 120; in.tol = 1e-8;
+    auto s = grrt::solve_column_bvp(in, lut);   // COLD: continuation is the only path
+    if (!s.converged) {
+        std::printf("  FAIL: deep rad-pressure column (T_eff=1e7) did not converge\n");
+        failures++; return;
+    }
+    const double beta = s.P_gas.front() / std::max(s.P.front(), 1e-300);
+    const double Tc = s.T.front();
+    std::printf("  converged=%d iters=%d Tc=%.3e beta=%.3e z0=%.3e tau_mid=%.3e\n",
+                s.converged, s.iters, Tc, beta, s.z0, s.tau_mid);
+    // Genuine radiation-pressure regime: beta must be deep below the documented barrier.
+    if (!(beta < 1e-4)) {
+        std::printf("  FAIL: midplane beta=%.3e not in the rad-pressure regime (<1e-4)\n", beta);
+        failures++;
+    }
+    // Sanity: an optically-thick, self-heated column (midplane hotter than the surface).
+    if (!(Tc > in.T_eff) || !(s.tau_mid > 1.0)) {
+        std::printf("  FAIL: converged column is not optically-thick/self-heated\n"); failures++;
+    }
 }
 
 static void test_fadv_reduces_heating() {
@@ -421,6 +457,7 @@ int main() {
     test_convergence_sweep();
     test_thickness_increases_with_teff();
     test_hot_inner_disk_columns_converge();
+    test_rad_pressure_barrier_reach();
     test_fadv_reduces_heating();
     test_analytic_vs_numerical_jacobian_fadv();
     test_warm_start_converges_fast();

@@ -539,70 +539,59 @@ static double scaled_residual_norm(const std::vector<double>& U,
     return std::sqrt(sum / (double)R.size());
 }
 
-ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op,
-                                   const std::vector<double>* warm_start) {
+/// Build the flux-balanced COLD seed (analytic Gaussian seed + heating-balance rescale).
+///
+/// T_eff is a fixed surface boundary condition, so in steady state the height-integrated
+/// viscous heating must equal the radiated surface flux:
+///   ∫ alpha*shear*P dz  ≈  sigma_SB T_eff^4   (per face).
+/// The user-supplied rho_mid_guess is only a rough density estimate and can be many orders
+/// of magnitude away from the value that satisfies this balance (e.g. for the cool gas-limit
+/// it overshoots by ~1e5). Starting Newton from a grossly over-dense column drives the solver
+/// toward a runaway-hot state and stalls the line search. We rescale the Gaussian seed's
+/// density by the single factor that makes the analytic heating integral match the surface
+/// flux, landing the seed within the Newton basin of the true (heating-balanced) column.
+static std::vector<double> build_cold_seed(const ColumnInputs& in) {
+    using namespace constants;
+    const int N = in.n_nodes;
+    std::vector<double> U = build_seed(in);
+    // Mirror the radiation-aware H from build_seed (cs2_gas + P_rad/rho_mid) so scale
+    // cancels the H factor in Sigma0 and the seed lands on the correct flux-balanced
+    // density regardless of how much radiation contributes to H.
+    const double cs2_gas_r = k_B * in.T_eff / (mu_fully_ionized * m_p);
+    const double rho_mid_seed = in.rho_mid_guess;
+    const double P_rad_seed   = (a_rad / 3.0) * in.T_eff * in.T_eff * in.T_eff * in.T_eff;
+    const double H_r = std::sqrt(cs2_gas_r + P_rad_seed / rho_mid_seed) / in.omega_z;
+    // Heating per face for the current seed (Gaussian rho, P_gas ≈ rho cs2_gas):
+    //   ∫0^∞ alpha*shear*rho_mid*cs2_gas*exp(-z^2/2H_r^2) dz
+    //   = alpha * shear * P_gas_mid * H_r * sqrt(pi/2)
+    const double P_gas_mid_seed = rho_mid_seed * cs2_gas_r;
+    const double heat_seed    = in.alpha * in.shear * P_gas_mid_seed * H_r * std::sqrt(std::numbers::pi / 2.0);
+    const double flux_target  = surface_flux(in.T_eff);
+    // scale can be large if shear/alpha are near-zero (heat_seed -> 0); the caller is
+    // expected to supply physically reasonable (nonzero) inputs.
+    const double scale = (heat_seed > 0.0) ? flux_target / heat_seed : 1.0;
+    // Density scales linearly with the column, so P_gas and Sigma do too.
+    for (int i = 0; i < N; ++i) {
+        const double T_i = U[4*i+2];
+        const double rho_old = std::max(rho_from_gas(U[4*i+0], T_i), 0.0);
+        U[4*i+0] = (rho_old * scale) * cs2_gas_r;   // refresh GAS pressure Pg = rho cs2_gas
+    }
+    U[4*N+1] *= scale;                              // Sigma0
+    return U;
+}
+
+/// Run the damped-Newton relaxation on a given seed `U` (mutated in place to the root on
+/// success). Fills `converged`/`iters`/`final_residual` and returns the converged flag.
+/// This is the SHARED inner driver used by both the direct solve and the T_eff-continuation
+/// fallback in solve_column_bvp; the residual and analytic Jacobian are unchanged.
+static bool run_column_newton(std::vector<double>& U, const ColumnInputs& in,
+                              const OpacityLUTs& op, bool& converged_out,
+                              int& iters_out, double& final_residual_out) {
     const int N = in.n_nodes;
     const int n = 4*N + 2;
-    ColumnBVPSolution s;
+    converged_out = false; iters_out = 0; final_residual_out = 0.0;
 
-    std::vector<double> U;
     std::vector<double> R, J, Jcopy, rhs, Utry, Rtry;
-
-    // A non-null warm_start of the wrong size is a caller bug (mismatched n_nodes):
-    // catch it in debug, but fall back to a cold start in release rather than
-    // corrupt state by consuming a misaligned vector.
-    assert(warm_start == nullptr || (int)warm_start->size() == n);
-    if (warm_start && (int)warm_start->size() == n) {
-        // Numerical continuation: start Newton from the converged neighbour.
-        // It is already flux-balanced, so skip the analytic seed + rescale.
-        U = *warm_start;
-    } else {
-        U = build_seed(in);
-        // Flux-balance seed rescale (cold start only).
-        //
-        // T_eff is a fixed surface boundary condition, so in steady state the
-        // height-integrated viscous heating must equal the radiated surface flux:
-        //   ∫ alpha*shear*P dz  ≈  sigma_SB T_eff^4   (per face).
-        // The user-supplied rho_mid_guess is only a rough density estimate and can be
-        // many orders of magnitude away from the value that satisfies this balance
-        // (e.g. for the cool gas-limit it overshoots by ~1e5). Starting Newton from a
-        // grossly over-dense column drives the solver toward a runaway-hot state and
-        // stalls the line search. We therefore rescale the Gaussian seed's density by
-        // the single factor that makes the analytic heating integral match the surface
-        // flux. This lands the seed within the Newton basin of the true (heating-
-        // balanced) column, from which the relaxation converges quadratically.
-        {
-            using namespace constants;
-            // Mirror the radiation-aware H from build_seed (cs2_gas + P_rad/rho_mid)
-            // so scale cancels the H factor in Sigma0 and the seed lands on the correct
-            // flux-balanced density regardless of how much radiation contributes to H.
-            const double cs2_gas_r = k_B * in.T_eff / (mu_fully_ionized * m_p);
-            const double rho_mid_seed = in.rho_mid_guess;
-            const double P_rad_seed   = (a_rad / 3.0) * in.T_eff * in.T_eff * in.T_eff * in.T_eff;
-            const double H_r = std::sqrt(cs2_gas_r + P_rad_seed / rho_mid_seed) / in.omega_z;
-            // Heating per face for the current seed (Gaussian rho, P_gas ≈ rho cs2_gas):
-            //   ∫0^∞ alpha*shear*rho_mid*cs2_gas*exp(-z^2/2H_r^2) dz
-            //   = alpha * shear * P_gas_mid * H_r * sqrt(pi/2)
-            // Using H_r here (not the old gas-only H) keeps scale consistent with the
-            // radiation-aware Sigma0 in U, so the final Sigma0 = 2*flux/(alpha*shear*cs2_gas)
-            // matches the gas-dominated limit identically.
-            const double P_gas_mid_seed = rho_mid_seed * cs2_gas_r;
-            const double heat_seed    = in.alpha * in.shear * P_gas_mid_seed * H_r * std::sqrt(std::numbers::pi / 2.0);
-            const double flux_target  = surface_flux(in.T_eff);
-            // scale can be large if shear/alpha are near-zero (heat_seed -> 0); the
-            // caller is expected to supply physically reasonable (nonzero) inputs.
-            double scale = (heat_seed > 0.0) ? flux_target / heat_seed : 1.0;
-            // Density scales linearly with the column, so P_gas and Sigma do too.
-            for (int i = 0; i < N; ++i) {
-                const double T_i = U[4*i+2];
-                const double rho_old = std::max(rho_from_gas(U[4*i+0], T_i), 0.0);
-                const double rho_new = rho_old * scale;
-                U[4*i+0] = rho_new * cs2_gas_r;                // refresh GAS pressure Pg = rho cs2_gas
-            }
-            U[4*N+1] *= scale;                                          // Sigma0
-        }
-    }
-
     column_residual(U, in, op, R);
     double merit = scaled_residual_norm(U, R, in);
 
@@ -654,27 +643,202 @@ ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op
         if (!accepted) break;                          // stuck -> bail (non-converged)
 
         // 3) Convergence on relative step size.
+        //
+        // The relative step of each component is measured against a PER-VARIABLE-TYPE
+        // scale floor (max |P|, |Q|, |T|, |z| across nodes; one shared global scale for
+        // z0/Σ0), NOT against that component's own magnitude floored at 1e-300. This
+        // mirrors numerical_jacobian's per-variable step floors and scaled_residual_norm's
+        // row scales — and it is essential here: two state components are pinned to EXACTLY
+        // zero by boundary conditions (z(0)=0 and Q(0)=0). At the residual floor their value
+        // sits at roundoff (~1e-26) while the Newton step dU is the same roundoff magnitude,
+        // so a self-relative step |dU|/max(|U|,1e-300) ≈ 1 for those pins FOREVER — pinning
+        // maxrel at ~1 even though the column is fully converged (merit ~1e-16). That false
+        // "still-moving" reading made warm/continuation solves (which reach the floor in a
+        // few iters) fail to be DETECTED as converged and bail via the line search. Scaling
+        // z(0)'s step by the column's z-scale (and Q(0)'s by the Q-scale) makes the metric
+        // well-posed; the merit<1e-6 AND-guard below is unchanged, so this cannot create a
+        // false positive on a genuinely unconverged (large-residual) iterate.
+        double scP = 0, scQ = 0, scT = 0, scZ = 0;
+        for (int i = 0; i < N; ++i) {
+            scP = std::max(scP, std::abs(Utry[4*i+0])); scQ = std::max(scQ, std::abs(Utry[4*i+1]));
+            scT = std::max(scT, std::abs(Utry[4*i+2])); scZ = std::max(scZ, std::abs(Utry[4*i+3]));
+        }
+        scP = std::max(scP, 1e-300); scQ = std::max(scQ, 1e-300);
+        scT = std::max(scT, 1e-300); scZ = std::max(scZ, 1e-300);
+        const double scG = std::max(std::max(std::abs(Utry[4*N]), std::abs(Utry[4*N+1])), 1e-300);
         double maxrel = 0.0;
         for (int i = 0; i < n; ++i) {
-            const double rel = std::abs(lambda * dU[i]) / std::max(std::abs(U[i]), 1e-300);
+            double sc;
+            if (i < 4*N) { switch (i & 3) { case 0: sc = scP; break; case 1: sc = scQ; break;
+                                            case 2: sc = scT; break; default: sc = scZ; } }
+            else sc = scG;
+            const double rel = std::abs(lambda * dU[i]) / std::max(std::abs(Utry[i]), sc);
             maxrel = std::max(maxrel, rel);
         }
 
         U.swap(Utry);
         R.swap(Rtry);
         merit = merit_try;
-        s.iters = it + 1;
-        s.final_residual = merit;
+        iters_out = it + 1;
+        final_residual_out = merit;
 
         // The merit<1e-6 guard prevents a tiny improving line-search step (small
         // |lambda*dU|) from being mistaken for convergence while the residual is
         // still large. Both must hold: relative step small AND residual small.
         // 1e-6 floor: a practical residual floor for the analytic-Jacobian Newton
         // solve below the scaled-residual noise from the bilinear opacity-LUT slopes.
-        if (maxrel < in.tol && merit < 1e-6) { s.converged = true; break; }
+        if (maxrel < in.tol && merit < 1e-6) { converged_out = true; break; }
+    }
+    return converged_out;
+}
+
+// T_eff-continuation fallback for solve_column_bvp.
+//
+// The cold-start Newton basin of the grey column collapses when the column is strongly
+// radiation-pressure-dominated (β = P_gas/P_total ≲ few×10⁻⁴, reached at T_eff ≳ 4-6e6 at
+// the inner-disk geometry): the analytic Gaussian/heating-balance cold seed lands outside
+// the basin and the line search cannot descend. WARM starts from a converged neighbour stay
+// inside the basin and converge in a few iters, so we march T_eff up from a feasible anchor.
+//
+// Strategy (no physics/residual/Jacobian change — seeding only):
+//   1. Anchor at T_eff_lo = min(T_eff_target, T_ANCHOR), where T_ANCHOR=3e6 is a fixed value
+//      VERIFIED to cold-converge across the inner-disk geometry. If that anchor fails cold,
+//      step DOWN (×0.5 …) to find a feasible cold anchor; give up if none converges.
+//   2. From the anchor's converged state, march T_eff toward the target. Each step solves at
+//      the next T_eff WARM-STARTED from the previous step's converged column. On a step
+//      failure, halve the remaining step; on success, grow it (×1.5, capped). Give up only
+//      when the step shrinks below a small floor (target genuinely unreachable → false).
+//
+// On success U holds the converged column at T_eff_target. Only invoked when the direct
+// solve already failed, so the cool fast path pays nothing.
+static bool teff_continuation(const ColumnInputs& in, const OpacityLUTs& op,
+                              std::vector<double>& U_out,
+                              bool& converged_out, int& iters_out, double& final_residual_out) {
+    const int N = in.n_nodes;
+    constexpr double T_ANCHOR = 3.0e6;     // verified inner-disk cold-convergent anchor
+
+    // Guard: continuation only makes sense for a finite, POSITIVE target hotter than the
+    // cold-convergent regime. A degenerate target (T_eff ≤ 0, or non-finite) yields an
+    // all-zero/NaN seed whose residual divides by T³=0 — the cold solve cannot help and
+    // would just spin. Bail so the caller keeps the (graceful) non-converged result, exactly
+    // as the direct solve already returned. (VolumetricDisk hands T_eff=0 for its outermost
+    // zero-flux bin; that column must fail cleanly, not enter continuation.) Below ~1e5 K the
+    // cold seed already converges directly, so continuation is never the right tool there.
+    if (!(std::isfinite(in.T_eff)) || in.T_eff <= 0.0) return false;
+
+    // A single Newton solve at T_eff=Te from seed `seed` (warm if non-null, else cold).
+    auto solve_at = [&](double Te, const std::vector<double>* seed,
+                        std::vector<double>& U, int& iters, double& resid) -> bool {
+        ColumnInputs sub = in;
+        sub.T_eff = Te;
+        U = seed ? *seed : build_cold_seed(sub);
+        bool conv = false;
+        run_column_newton(U, sub, op, conv, iters, resid);
+        return conv;
+    };
+
+    // --- 1) Find a feasible cold anchor at or below T_ANCHOR (and below the target). ---
+    double T_anchor = std::min(in.T_eff, T_ANCHOR);
+    std::vector<double> Uanchor;
+    int it_a = 0; double res_a = 0.0;
+    bool anchored = solve_at(T_anchor, nullptr, Uanchor, it_a, res_a);
+    if (!anchored) {
+        for (double m : {0.5, 0.25, 0.1, 0.05, 0.02}) {
+            T_anchor = std::min(in.T_eff, T_ANCHOR) * m;
+            anchored = solve_at(T_anchor, nullptr, Uanchor, it_a, res_a);
+            if (anchored) break;
+        }
+    }
+    if (!anchored) return false;          // no feasible cold anchor → continuation impossible
+
+    // Anchor == target. T_anchor = min(in.T_eff, 3e6) and the step-down ladder above only
+    // DECREASES it, so T_anchor <= in.T_eff always; this guard therefore fires ONLY when no
+    // step-down occurred and T_anchor == in.T_eff exactly (i.e. in.T_eff <= 3e6 and the cold
+    // solve at the EXACT target converged). Uanchor is thus the converged column at exactly
+    // in.T_eff -- the correct target, NOT a nearby one. Purpose: recover the case where the
+    // caller's warm_start failed but a fresh cold start at the same target succeeds. After any
+    // step-down T_anchor < in.T_eff, this guard is false and the warm march below runs instead.
+    if (in.T_eff <= T_anchor * (1.0 + 1e-12)) {
+        U_out.swap(Uanchor);
+        converged_out = anchored; iters_out = it_a; final_residual_out = res_a;
+        return anchored;
     }
 
-    // No fallback (Approach A: fail or succeed, never a fabricated profile).
+    // --- 2) Adaptive warm march T_anchor → T_eff_target. ---
+    std::vector<double> Uprev = Uanchor;
+    double T_cur = T_anchor;
+    // Initial step: a modest fraction of the gap (the basin edge is crossed in small warm
+    // hops). Relative steps keep the ladder geometry-independent.
+    double step = std::max(0.1 * (in.T_eff - T_anchor), 0.02 * T_anchor);
+    const double STEP_FLOOR = 1e-3 * T_anchor;   // give-up floor (~3e3 K at the 3e6 anchor)
+    int last_iters = it_a; double last_resid = res_a;
+
+    while (T_cur < in.T_eff * (1.0 - 1e-12)) {
+        const double T_try = std::min(in.T_eff, T_cur + step);
+        std::vector<double> Utry; int it_s = 0; double res_s = 0.0;
+        if (solve_at(T_try, &Uprev, Utry, it_s, res_s)) {
+            Uprev.swap(Utry);
+            T_cur = T_try; last_iters = it_s; last_resid = res_s;
+            step = std::min(step * 1.5, in.T_eff - T_anchor);   // grow on success (capped)
+        } else {
+            step *= 0.5;                                        // shrink remaining step
+            if (step < STEP_FLOOR) return false;                // genuinely unreachable
+        }
+    }
+
+    U_out.swap(Uprev);
+    converged_out = true; iters_out = last_iters; final_residual_out = last_resid;
+    return true;
+}
+
+ColumnBVPSolution solve_column_bvp(const ColumnInputs& in, const OpacityLUTs& op,
+                                   const std::vector<double>* warm_start) {
+    const int N = in.n_nodes;
+    const int n = 4*N + 2;
+    ColumnBVPSolution s;
+
+    // Non-physical effective temperature has no vertical-structure solution: with T_eff≤0
+    // the seed collapses (scale height H→0) and the radiative-diffusion residual divides by
+    // T³=0, producing Inf/NaN that the Newton solve cannot recover from. Return the standard
+    // non-converged empty solution (the documented "no solution" contract) instead. Callers
+    // such as VolumetricDisk legitimately hand T_eff=0 for zero-flux (e.g. outermost / sub-
+    // plunge) bins and already check `converged`; this makes that path safe and explicit.
+    if (!(std::isfinite(in.T_eff)) || in.T_eff <= 0.0) {
+        s.converged = false;
+        return s;   // empty profile vectors, z0/Sigma0/tau_mid = 0
+    }
+
+    // Build the initial seed: a provided (correctly-sized) warm_start is used as-is
+    // (already flux-balanced); otherwise the flux-balanced cold seed.
+    //
+    // A non-null warm_start of the wrong size is a caller bug (mismatched n_nodes):
+    // catch it in debug, but fall back to a cold start in release rather than corrupt
+    // state by consuming a misaligned vector.
+    assert(warm_start == nullptr || (int)warm_start->size() == n);
+    const bool have_warm = (warm_start && (int)warm_start->size() == n);
+    std::vector<double> U = have_warm ? *warm_start : build_cold_seed(in);
+
+    // --- Direct solve (fast path): the provided warm start, or the cold seed. ---
+    bool converged = false; int iters = 0; double final_residual = 0.0;
+    run_column_newton(U, in, op, converged, iters, final_residual);
+    s.converged = converged; s.iters = iters; s.final_residual = final_residual;
+
+    // --- Fallback: T_eff continuation when the direct solve failed. ---
+    // The cold-start (and warm-start) Newton basin collapses for strongly radiation-
+    // pressure-dominated columns; warm-marching T_eff from a feasible anchor crosses the
+    // basin edge. INTERNAL strategy only — no interface change. This runs ONLY when the
+    // direct solve above did not converge, so the cool fast path (which converges directly)
+    // skips it and never pays the continuation cost.
+    if (!s.converged) {
+        std::vector<double> Uc;
+        bool c_conv = false; int c_iters = 0; double c_resid = 0.0;
+        if (teff_continuation(in, op, Uc, c_conv, c_iters, c_resid) && c_conv) {
+            U.swap(Uc);
+            s.converged = true; s.iters = c_iters; s.final_residual = c_resid;
+        }
+    }
+
+    // No fallback profile (Approach A: fail or succeed, never a fabricated profile).
     // On non-convergence return EMPTY profile vectors; the caller MUST check
     // `converged` before reading the solution.
     if (!s.converged) {
