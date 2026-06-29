@@ -325,3 +325,16 @@ target_include_directories(slim-sadowski-residual-probe PRIVATE include/ ${CMAKE
 add_executable(slim-coupled-smoke-probe tools/slim_coupled_smoke_probe.cpp)
 target_include_directories(slim-coupled-smoke-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# Task 11 coupled-column -> Novikov-Thorne REDUCTION gate: drives solve_column_coupled
+# at the EXACT NT state (a=0.9, f_Edd=0.02; Page-Thorne flux + α-relation Σ + grey T_c,
+# reusing slim_nt_term_probe's NT-state math) and checks the emergent one-face column
+# flux reduces to the one-zone NT diffusion flux 32σT_c⁴/(3κΣ) with the O(1) vertical-
+# structure factor f_F≈0.94 (Sądowski 2011 Eq 45), gating only on the radii where the
+# column converges and is gas-dominated/optically-thick.  Include-the-.cpp consumer
+# pattern: opacity.cpp + disk_column_bvp.cpp + disk_column_coupled.cpp +
+# slim_disk_radial.cpp in ONE TU (the coupled column needs the radial solver's TU-local
+# machinery); does NOT link grrt to avoid duplicate symbols.  Safe to delete along with
+# tools/slim_coupled_nt_probe.cpp.
+add_executable(slim-coupled-nt-probe tools/slim_coupled_nt_probe.cpp)
+target_include_directories(slim-coupled-nt-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+

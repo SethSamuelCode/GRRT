@@ -259,7 +259,9 @@ Q_vis = −αP·(A Γ²/r³)·(dΩ/dr)                              (S09 Eq 6 �
 ```
 Q_rad = 64·σ·T_c⁴ / (3·κ_R·Σ)        κ_R = Rosseland mean (es + Kramers), Σ = FULL surface density, τ = κ_R Σ/2
 ```
-⚠ One face = `32σT_c⁴/(3κ_R Σ)`. **NEVER `8σT_c⁴/(κΣ)`** (wrong factor). The `f_F≈0.94` vertical-structure correction is a Phase-3 refinement.
+⚠ One face = `32σT_c⁴/(3κ_R Σ)`. **NEVER `8σT_c⁴/(κΣ)`** (wrong factor).
+
+⚠⚠ **VERTICAL-TRANSPORT MODEL — GRRT is PURE RADIATIVE (opus + Wolfram verified, 2026-06-29).** The in-tree column (`disk_column_bvp.cpp`) solves **pure grey radiative diffusion** — `dQ/dz` is the heating, `dT/dz = −3κρQ/(16σT³)` i.e. `Q = −(4σ/3κρ)dT⁴/dz`, the textbook Rosseland law with `C_diff = 3/4` **exactly** (Wolfram ratio = 1; NO 2× coefficient bug). On the coupled column the emergent flux reduces **cleanly and flatly** to a one-zone, but the factor is **`f_F = 2F_column/(64σT_c⁴/3κΣ) ≈ 0.42`, NOT the literature `0.94`** — and `0.42` is **CORRECT** for a pure-radiative *distributed* (pressure-weighted, viscous `αP`) heated column: the pure-radiative distributed-heating one-zone coefficient is `f_F ≈ 0.42–0.50` (n=3/2→uniform-τ; Wolfram). **`64σT_c⁴/3κΣ` is NOT the pure-radiative value** — it requires the flux-depth ratio `g = ⟨F⟩/F_surf = 1/4` (heating concentrated in the OUTER quarter of τ), the physical *opposite* of deep viscous heating (the column measures `g = 0.595`). **`64σ/3` is the ~2×-larger radiative+CONVECTIVE/polytropic closure**, and Sądowski's `f_F≈0.94` (S11 Eq 45) is his radiative+convection mixing-length fit *to that*. **Consequence:** by energy balance (`2F = Q_vis = F_NT` at low Ṁ) GRRT radiates the CORRECT emergent flux / `T_eff` / spectrum; only the *internal* midplane `T_c` runs ~20% hotter and `H/r` differs by an O(1)-but-modest factor from a convective disk, where convection would operate. This is a **documented modeling choice, not a bug.** Adding mixing-length convection (the Sądowski model) is a scoped potential upgrade — see `disk-approach-a-refinements.md` #13. Gate it against the pure-radiative one-zone (`f_F≈0.42–0.50`, flat), NOT `0.94`.
 
 **Advective cooling (S11 Eq 29, one-zone):**
 ```
