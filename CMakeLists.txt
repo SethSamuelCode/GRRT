@@ -184,6 +184,15 @@ target_link_libraries(test-slim-disk-radial PRIVATE grrt)
 add_executable(test-slim-jacobian tests/test_slim_jacobian.cpp)
 target_include_directories(test-slim-jacobian PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# Task 10 GATE: analytic reduced/Schur Jacobian of the COUPLED slim-disk driver
+# (slim_coupled_reduced_jacobian) vs the perturb-resolve FD oracle, at a feasible
+# synthetic operating point.  Validates the C3 column-mediated Σ,T_c Schur block was
+# assembled correctly into the radial Jacobian (per-column scaled 2-norm < 1e-3).
+# Include-the-.cpp: opacity + column-bvp + column-coupled + slim-radial + slim-coupled
+# in one TU (reaches slim_disk_coupled.cpp's TU-local helpers); does NOT link grrt.
+add_executable(test-slim-coupled-jacobian tests/test_slim_coupled_jacobian.cpp)
+target_include_directories(test-slim-coupled-jacobian PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
 # TEMPORARY DIAGNOSTIC PROBE (slim-disk basin-vs-noise verdict). Includes the
 # slim/opacity .cpp directly to reach internal helpers; does NOT link grrt to
 # avoid duplicate symbols. Safe to delete along with tools/slim_diag_probe.cpp.
@@ -315,3 +324,4 @@ target_include_directories(slim-sadowski-residual-probe PRIVATE include/ ${CMAKE
 # never added to the grrt library).
 add_executable(slim-coupled-smoke-probe tools/slim_coupled_smoke_probe.cpp)
 target_include_directories(slim-coupled-smoke-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+

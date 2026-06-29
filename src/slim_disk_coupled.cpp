@@ -127,10 +127,17 @@ static inline double shear_cgs(const SlimDiskInputs& in, double r_i, double Om_i
 // rerouted to z0 and (F, η3, η4, f_adv) from the column.  Warm-starts from the cached
 // converged column state for node i (if any), then refreshes the cache on success.
 // shear_i / omega_z_i are passed in (computed by the caller from the node geometry).
+//
+// `c_out` / `ci_out` (default null) are PURELY ADDITIVE outputs the analytic reduced
+// Jacobian (Task 10) needs: the converged ColumnClosure and the exact ColumnCoupledInputs
+// the column was solved at, so column_sensitivity (C3) can be formed at this node WITHOUT
+// re-deriving the inputs.  When both are null the behaviour is byte-identical to before.
 static CoupledNode eval_node_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
                                      const ColumnOpts& copt, ColumnCache& cache,
                                      int i, double r, double Sigma, double V, double ell,
-                                     double Tc, double shear_i, double omega_z_i) {
+                                     double Tc, double shear_i, double omega_z_i,
+                                     ColumnClosure* c_out = nullptr,
+                                     ColumnCoupledInputs* ci_out = nullptr) {
     using namespace constants;
     CoupledNode e;
     e.r = r;
@@ -165,6 +172,7 @@ static CoupledNode eval_node_coupled(const SlimDiskInputs& in, const OpacityLUTs
     // bring-up out of basin.  (When a warm column is cached, the full warm state carries
     // its converged T_eff directly, so this guess is only used on the cold first solve.)
     ci.Teff_guess   = 0.0;
+    if (ci_out) *ci_out = ci;   // (additive) hand the exact inputs to the Jacobian builder
 
     const int n_c = 4 * copt.n_z + 4;
     const std::vector<double>* warm = nullptr;
@@ -173,6 +181,7 @@ static CoupledNode eval_node_coupled(const SlimDiskInputs& in, const OpacityLUTs
         warm = &cache.Uc[i];
     }
     ColumnClosure c = solve_column_coupled(ci, op, warm);
+    if (c_out) *c_out = c;       // (additive) hand the converged closure to the Jacobian builder
     if (!c.converged) { e.ok = false; return e; }
 
     // Cache the converged augmented column state for the next warm-start.  Reconstruct
@@ -254,68 +263,24 @@ static double calN1_coupled(const SlimDiskInputs& in, const CoupledNode& e,
 }
 
 // ===========================================================================
-// Coupled radial residual (4N+2), with the column rerouting + C5.
+// Row assembly (4N+2) from a CLOSED node array — shared by the live residual and
+// the analytic Jacobian's frozen-column residual.
 // ===========================================================================
-// Mirrors slim_radial_residual EXACTLY for the grid + the six row groups (mass,
-// angular momentum, radial-momentum transonic ODE, energy ODE, outer BCs, sonic
-// regularity), but:
-//   • every node's closure is the column closure (eval_node_coupled), so H = z0, the
-//     EOS pressure P = 2 p_mid z0, and η3/η4/F come from the column;
-//   • energy row: Q_rad = 64σT_c⁴/(3κΣ)  →  2·F_i (column F is one face, radial Q_rad
-//     is both faces — disk-physics §23);
-//   • Q_adv uses the column η3_i wherever eta3_of_beta(beta) appeared;
-//   • 𝒩₁ uses calN1_coupled (C5 η-gradient terms restored).
-//
-// `infeasible` is set true (and the residual filled with a large sentinel) if ANY
-// node's column fails to converge, so the driver's feasibility line search rejects the
-// step.  The per-node column cache is warm-started + refreshed in eval_node_coupled.
-static void slim_coupled_residual(const std::vector<double>& U, const SlimDiskInputs& in,
-                                  const OpacityLUTs& op, const ColumnOpts& copt,
-                                  ColumnCache& cache, std::vector<double>& R,
-                                  bool& infeasible) {
+// Given the per-node closed state e[] (Σ,V,ℓ,T_c + the column-rerouted P, cs2_geom,
+// gtilde1, F, η3, η4 already packed), the geometric Ω(ℓ) array Om[], the grid r[],
+// and the globals (ℓ_in, Ṁ), assemble the SIX row groups EXACTLY as the live residual
+// did (this is a verbatim code-motion extraction — no physics change).  Keeping this
+// in one place lets the Jacobian build a "columns-frozen" residual (the e[] column
+// outputs held fixed while U_r is perturbed) by feeding a frozen-closed e[] here.
+static void assemble_coupled_rows(const SlimDiskInputs& in,
+                                  const std::vector<CoupledNode>& e,
+                                  const std::vector<double>& Om,
+                                  const std::vector<double>& r,
+                                  double ell_in, double Mdot,
+                                  std::vector<double>& R) {
     using namespace constants;
-    const int N = std::max(in.n_nodes, 4);
+    const int N = (int)e.size();
     R.assign((size_t)4 * N + 2, 0.0);
-    infeasible = false;
-
-    const double ell_in = U[4 * N + 0];
-    const double r_s    = U[4 * N + 1];
-    const double Mdot   = in.mdot;
-
-    // Free-inner-node grid [r_s, r_out], r[0] == r_s (node 0 is the sonic point) — the
-    // SAME log grid slim_radial_residual builds.
-    const double lr0 = std::log(r_s), lr1 = std::log(in.r_out);
-    std::vector<double> r(N);
-    for (int i = 0; i < N; ++i) {
-        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
-        r[i] = std::exp(lr0 + (lr1 - lr0) * t);
-    }
-    cache.resize(N, copt.n_z);
-
-    // Per-node orbital Ω (geometric) for shear FD (LOCAL Ω(ℓ), like Gbalance).
-    std::vector<double> Om(N);
-    for (int i = 0; i < N; ++i)
-        Om[i] = omega_from_ell(in.mass, in.spin, r[i], U[4 * i + 2]);
-
-    // Closure every node (column).  shear_i / Ω_z,i from the node geometry.
-    std::vector<CoupledNode> e(N);
-    bool any_fail = false;
-    for (int i = 0; i < N; ++i) {
-        const int j = (i + 1 < N) ? i + 1 : i - 1;   // neighbour for the shear FD
-        const double shear_i  = shear_cgs(in, r[i], Om[i], r[j], Om[j]);
-        const double omegaz_i = omega_perp_cgs(in, r[i]);
-        e[i] = eval_node_coupled(in, op, copt, cache, i,
-                                 r[i], U[4*i+0], U[4*i+1], U[4*i+2], U[4*i+3],
-                                 shear_i, omegaz_i);
-        if (!e[i].ok) any_fail = true;
-    }
-    if (any_fail) {
-        // Column infeasible at this iterate: fill a large finite sentinel so the merit
-        // is huge and the line search rejects the step (NEVER a fabricated profile).
-        infeasible = true;
-        for (double& x : R) x = 1e300;
-        return;
-    }
 
     // FD radial log-gradient helper (mirrors slim_radial_residual's dln).
     auto dln = [&](double f_lo, double f_hi, double r_lo, double r_hi) {
@@ -452,15 +417,323 @@ static void slim_coupled_residual(const std::vector<double>& U, const SlimDiskIn
 }
 
 // ===========================================================================
+// Coupled radial residual (4N+2), with the column rerouting + C5.
+// ===========================================================================
+// Mirrors slim_radial_residual EXACTLY for the grid + the six row groups (mass,
+// angular momentum, radial-momentum transonic ODE, energy ODE, outer BCs, sonic
+// regularity), but:
+//   • every node's closure is the column closure (eval_node_coupled), so H = z0, the
+//     EOS pressure P = 2 p_mid z0, and η3/η4/F come from the column;
+//   • energy row: Q_rad = 64σT_c⁴/(3κΣ)  →  2·F_i (column F is one face, radial Q_rad
+//     is both faces — disk-physics §23);
+//   • Q_adv uses the column η3_i wherever eta3_of_beta(beta) appeared;
+//   • 𝒩₁ uses calN1_coupled (C5 η-gradient terms restored).
+//
+// `infeasible` is set true (and the residual filled with a large sentinel) if ANY
+// node's column fails to converge, so the driver's feasibility line search rejects the
+// step.  The per-node column cache is warm-started + refreshed in eval_node_coupled.
+static void slim_coupled_residual(const std::vector<double>& U, const SlimDiskInputs& in,
+                                  const OpacityLUTs& op, const ColumnOpts& copt,
+                                  ColumnCache& cache, std::vector<double>& R,
+                                  bool& infeasible) {
+    using namespace constants;
+    const int N = std::max(in.n_nodes, 4);
+    R.assign((size_t)4 * N + 2, 0.0);
+    infeasible = false;
+
+    const double ell_in = U[4 * N + 0];
+    const double r_s    = U[4 * N + 1];
+    const double Mdot   = in.mdot;
+
+    // Free-inner-node grid [r_s, r_out], r[0] == r_s (node 0 is the sonic point) — the
+    // SAME log grid slim_radial_residual builds.
+    const double lr0 = std::log(r_s), lr1 = std::log(in.r_out);
+    std::vector<double> r(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        r[i] = std::exp(lr0 + (lr1 - lr0) * t);
+    }
+    cache.resize(N, copt.n_z);
+
+    // Per-node orbital Ω (geometric) for shear FD (LOCAL Ω(ℓ), like Gbalance).
+    std::vector<double> Om(N);
+    for (int i = 0; i < N; ++i)
+        Om[i] = omega_from_ell(in.mass, in.spin, r[i], U[4 * i + 2]);
+
+    // Closure every node (column).  shear_i / Ω_z,i from the node geometry.
+    std::vector<CoupledNode> e(N);
+    bool any_fail = false;
+    for (int i = 0; i < N; ++i) {
+        const int j = (i + 1 < N) ? i + 1 : i - 1;   // neighbour for the shear FD
+        const double shear_i  = shear_cgs(in, r[i], Om[i], r[j], Om[j]);
+        const double omegaz_i = omega_perp_cgs(in, r[i]);
+        e[i] = eval_node_coupled(in, op, copt, cache, i,
+                                 r[i], U[4*i+0], U[4*i+1], U[4*i+2], U[4*i+3],
+                                 shear_i, omegaz_i);
+        if (!e[i].ok) any_fail = true;
+    }
+    if (any_fail) {
+        // Column infeasible at this iterate: fill a large finite sentinel so the merit
+        // is huge and the line search rejects the step (NEVER a fabricated profile).
+        infeasible = true;
+        for (double& x : R) x = 1e300;
+        return;
+    }
+
+    // All columns converged ⇒ assemble the 4N+2 rows from the closed node array.
+    assemble_coupled_rows(in, e, Om, r, ell_in, Mdot, R);
+}
+
+// ===========================================================================
+// Columns-FROZEN residual + analytic reduced (Schur) Jacobian (Task 10).
+// ===========================================================================
+
+// FrozenCol — the per-node column OUTPUTS the radial residual consumes (the ONLY column
+// dependence the rows carry: F, z0, η3, η4).  Holding these fixed while U_r is perturbed
+// isolates the DIRECT (columns-frozen) part of ∂R_r/∂U_r; perturbing them isolates ∂R_r/∂C.
+struct FrozenCol { double F = 0.0, z0 = 0.0, eta3 = 0.0, eta4 = 0.0; };
+
+// eval_node_frozen — eval_node_coupled with the column SOLVE replaced by frozen outputs.
+// It recomputes every U_r-direct quantity (Σ,V,ℓ,T_c, mech, Γ, the one-zone p_mid, and the
+// z0/η3-derived P, ρ_mid, P/Σ, Γ̃₁, c_s²) byte-for-byte as eval_node_coupled does, so a
+// frozen-column residual differs from the live one ONLY by holding (F,z0,η3,η4) fixed.
+// (f_adv is consumed by NO row ⇒ left 0 — see assemble_coupled_rows.)
+static CoupledNode eval_node_frozen(const SlimDiskInputs& in, const OpacityLUTs& op,
+                                    double r, double Sigma, double V, double ell, double Tc,
+                                    const FrozenCol& fc) {
+    using namespace constants;
+    CoupledNode e;
+    e.r = r;
+    e.Sigma = std::max(Sigma, kSigmaFloor);
+    e.V   = std::clamp(V, -kVCap, kVCap);
+    e.ell = ell;
+    e.Tc  = std::max(Tc, kTFloor);
+    e.mech = node_mech(in, r, ell);
+    {
+        const double A = std::max(e.mech.A, 1e-300);
+        e.Gamma = std::sqrt(1.0 / (1.0 - e.V * e.V) + e.ell * e.ell * e.r * e.r / A);
+    }
+    const OneZoneState oz = one_zone_closure(e.Sigma, e.Tc, r, in, op);
+    e.ok    = true;
+    e.F     = fc.F;
+    e.z0    = fc.z0;
+    e.eta3  = fc.eta3;
+    e.eta4  = fc.eta4;
+    e.f_adv = 0.0;
+    const double z0_s = std::max(e.z0, 1e-300);
+    e.rho_mid = e.Sigma / (2.0 * z0_s);
+    e.P       = 2.0 * oz.p_mid * z0_s;
+    const double P_over_Sigma = e.P / e.Sigma;
+    e.P_over_Sigma_geom = P_over_Sigma / (c_cgs * c_cgs);
+    const double eta3_safe = std::max(e.eta3, 1e-6);
+    e.gtilde1 = 1.0 + 1.0 / eta3_safe;
+    e.cs2_geom = e.gtilde1 * e.P_over_Sigma_geom;
+    return e;
+}
+
+// Columns-frozen residual: build e[] from U_r with each node's column outputs HELD at fc[]
+// (NO column solve), then run the shared assembly.  Always evaluable (no infeasible path).
+// At fc[] = the live converged outputs this reproduces slim_coupled_residual EXACTLY.
+static void slim_coupled_residual_frozen(const std::vector<double>& U, const SlimDiskInputs& in,
+                                         const OpacityLUTs& op, const std::vector<FrozenCol>& fc,
+                                         std::vector<double>& R) {
+    const int N = std::max(in.n_nodes, 4);
+    const double ell_in = U[4 * N + 0];
+    const double r_s    = U[4 * N + 1];
+    const double Mdot   = in.mdot;
+    const double lr0 = std::log(r_s), lr1 = std::log(in.r_out);
+    std::vector<double> r(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        r[i] = std::exp(lr0 + (lr1 - lr0) * t);
+    }
+    std::vector<double> Om(N);
+    for (int i = 0; i < N; ++i)
+        Om[i] = omega_from_ell(in.mass, in.spin, r[i], U[4 * i + 2]);
+    std::vector<CoupledNode> e(N);
+    for (int i = 0; i < N; ++i)
+        e[i] = eval_node_frozen(in, op, r[i], U[4*i+0], U[4*i+1], U[4*i+2], U[4*i+3], fc[i]);
+    assemble_coupled_rows(in, e, Om, r, ell_in, Mdot, R);
+}
+
+// ---------------------------------------------------------------------------
+// Analytic reduced (Schur) Jacobian J_red of the coupled residual.
+// ---------------------------------------------------------------------------
+//   J_red[row][col] = dR_r[row]/dU_r[col]
+//                   = ∂R_r/∂U_r|_C            (direct, columns frozen)
+//                   + Σ_i (∂R_r/∂C_i)(dC_i/dU_r[col]).
+//
+// HYBRID assembly (06-20 design + Task-10 brief):
+//   • Σ_i, V_i, T_c,i columns — DIRECT part by central-FD of the COLUMNS-FROZEN residual
+//     (cheap residual algebra, NO column solves).  V carries no column dependence ⇒ its
+//     frozen-FD already IS the total derivative.
+//   • Σ_i, T_c,i columns — PLUS the analytic column-mediated Schur term  B_i·dC_i/d{Σ,T_c},
+//     where B_i = ∂R_r/∂{F_i,z0_i,η3_i,η4_i} (central-FD of the frozen residual w.r.t. the
+//     four HELD outputs — the explicit residual derivatives) and dC_i/d{Σ,T_c} is C3's
+//     analytic IFT sensitivity (column_sensitivity).  Σ_i (resp. T_c,i) enters ONLY column
+//     i (not its neighbours'), so the Schur sum over nodes collapses to the single node i.
+//   • ℓ_i, ℓ_in, r_s columns — FULL central-FD of the LIVE residual (re-solving columns):
+//     captures the shear→Ω(ℓ) and grid→(shear,Ω_⊥) mediated column response WITHOUT a
+//     bespoke dC/dshear chain (06-20 "option (b)").  ℓ_in carries no column dependence; ℓ_i
+//     and r_s do (via the geometry the columns are solved at).
+//
+// Returns false if the BASE point is column-infeasible (a node failed) — the driver then
+// handles it exactly as an infeasible residual (no fabricated profile).
+static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const SlimDiskInputs& in,
+                                          const OpacityLUTs& op, const ColumnOpts& copt,
+                                          ColumnCache& cache, std::vector<double>& J) {
+    const int N = std::max(in.n_nodes, 4);
+    const int n = 4 * N + 2;
+    J.assign((size_t)n * n, 0.0);
+
+    const double r_s = U[4 * N + 1];
+    const double lr0 = std::log(r_s), lr1 = std::log(in.r_out);
+    std::vector<double> r(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N == 1) ? 0.0 : double(i) / double(N - 1);
+        r[i] = std::exp(lr0 + (lr1 - lr0) * t);
+    }
+    std::vector<double> Om(N);
+    for (int i = 0; i < N; ++i)
+        Om[i] = omega_from_ell(in.mass, in.spin, r[i], U[4 * i + 2]);
+    cache.resize(N, copt.n_z);
+
+    // --- Base column solve at U: capture the frozen outputs fc[] + the C3 sensitivities S[]. ---
+    std::vector<FrozenCol> fc(N);
+    std::vector<ColumnSensitivity> S(N);
+    for (int i = 0; i < N; ++i) {
+        const int jn = (i + 1 < N) ? i + 1 : i - 1;
+        const double shear_i  = shear_cgs(in, r[i], Om[i], r[jn], Om[jn]);
+        const double omegaz_i = omega_perp_cgs(in, r[i]);
+        ColumnClosure c; ColumnCoupledInputs ci;
+        const CoupledNode ei = eval_node_coupled(in, op, copt, cache, i,
+                                                 r[i], U[4*i+0], U[4*i+1], U[4*i+2], U[4*i+3],
+                                                 shear_i, omegaz_i, &c, &ci);
+        if (!ei.ok || !c.converged) return false;          // infeasible base point
+        fc[i] = FrozenCol{ c.F, c.z0, c.eta3, c.eta4 };
+        S[i]  = column_sensitivity(c, ci, op);
+    }
+
+    // Per-variable FD step — identical keying to slim_coupled_numerical_jacobian.
+    auto step_for = [&](int col) -> double {
+        const double u = U[col];
+        double floor;
+        if (col >= 4 * N) { floor = (col == 4*N) ? 1e-6 : 1e-5; }   // ℓ_in : r_s
+        else {
+            switch (col % 4) {
+                case 0: floor = 1e-3 * std::max(std::abs(u), 1e2); break; // Σ
+                case 1: floor = 1e-9;                              break; // V
+                case 2: floor = 1e-6;                              break; // ℓ
+                default: floor = 1.0;                             break; // T_c
+            }
+        }
+        return std::max(1e-6 * std::abs(u), floor);
+    };
+
+    std::vector<double> Up, Um, Rp, Rm;
+
+    // ---------- (1) DIRECT part for the Σ, V, T_c columns (frozen-column FD). ----------
+    auto frozen_fd_col = [&](int col) {
+        const double h = step_for(col);
+        Up = U; Um = U; Up[col] += h; Um[col] -= h;
+        slim_coupled_residual_frozen(Up, in, op, fc, Rp);
+        slim_coupled_residual_frozen(Um, in, op, fc, Rm);
+        const double inv = 1.0 / (2.0 * h);
+        for (int row = 0; row < n; ++row) {
+            double d = (Rp[row] - Rm[row]) * inv;
+            if (!std::isfinite(d)) d = 0.0;
+            J[(size_t)row * n + col] = d;
+        }
+    };
+    for (int i = 0; i < N; ++i) { frozen_fd_col(4*i+0); frozen_fd_col(4*i+1); frozen_fd_col(4*i+3); }
+
+    // ---------- (2) FULL-FD for the ℓ_i, ℓ_in, r_s columns (option (b): re-solve cols). ----------
+    // Base residual at the (feasibility-checked) point U — the anchor for one-sided
+    // differencing when a perturbed side goes infeasible. U is feasible (checked above),
+    // so f0 is true on the normal path.
+    std::vector<double> R0; bool f0 = false;
+    slim_coupled_residual(U, in, op, copt, cache, R0, f0);
+    auto full_fd_col = [&](int col) {
+        const double h = step_for(col);
+        Up = U; Um = U; Up[col] += h; Um[col] -= h;
+        bool fp = false, fm = false;
+        slim_coupled_residual(Up, in, op, copt, cache, Rp, fp);
+        slim_coupled_residual(Um, in, op, copt, cache, Rm, fm);
+        // A perturbed side that goes infeasible is sentinel-filled (1e300); the central
+        // difference (1e300 − finite) is FINITE (~1e305), so the isfinite guard would NOT
+        // catch it and a garbage entry would land in J. Fall back to a one-sided difference
+        // from the feasible base; zero the entry only if BOTH sides are infeasible (no usable
+        // gradient — the LM damping + feasibility line search bound the held unknown).
+        for (int row = 0; row < n; ++row) {
+            double d;
+            if (fp && fm)      d = (Rp[row] - Rm[row]) / (2.0 * h);
+            else if (fp && f0) d = (Rp[row] - R0[row]) / h;   // backward side infeasible
+            else if (fm && f0) d = (R0[row] - Rm[row]) / h;   // forward side infeasible
+            else               d = 0.0;                        // both sides infeasible
+            if (!std::isfinite(d)) d = 0.0;
+            J[(size_t)row * n + col] = d;
+        }
+    };
+    for (int i = 0; i < N; ++i) full_fd_col(4*i+2);   // ℓ_i
+    full_fd_col(4*N+0);                               // ℓ_in
+    full_fd_col(4*N+1);                               // r_s
+
+    // ---------- (3) Column-mediated Schur term for Σ_i, T_c,i (analytic via C3). ----------
+    // B_i columns = ∂R_r/∂{F_i,z0_i,η3_i,η4_i} via central-FD of the FROZEN residual w.r.t.
+    // the four held outputs of node i (cheap — no column solves).  Then
+    //   J[:, Σ_i ] += B_i·(dF/dΣ,  dz0/dΣ,  dη3/dΣ,  dη4/dΣ)    [C3 index 0]
+    //   J[:, T_c,i] += B_i·(dF/dT_c, dz0/dT_c, dη3/dT_c, dη4/dT_c) [C3 index 1]
+    std::vector<double> bcol[4];   // bF, bz0, be3, be4
+    auto frozen_fd_output = [&](int i, int which, std::vector<double>& out) {
+        double v0, floor;
+        switch (which) {
+            case 0:  v0 = fc[i].F;    floor = 1e-300; break;
+            case 1:  v0 = fc[i].z0;   floor = 1e-300; break;
+            case 2:  v0 = fc[i].eta3; floor = 1e-9;   break;
+            default: v0 = fc[i].eta4; floor = 1e-300; break;
+        }
+        const double h = std::max(1e-6 * std::abs(v0), floor);
+        std::vector<FrozenCol> fcp = fc, fcm = fc;
+        auto setv = [&](std::vector<FrozenCol>& f, double val) {
+            switch (which) { case 0: f[i].F=val; break; case 1: f[i].z0=val; break;
+                             case 2: f[i].eta3=val; break; default: f[i].eta4=val; }
+        };
+        setv(fcp, v0 + h); setv(fcm, v0 - h);
+        slim_coupled_residual_frozen(U, in, op, fcp, Rp);
+        slim_coupled_residual_frozen(U, in, op, fcm, Rm);
+        const double inv = 1.0 / (2.0 * h);
+        out.assign(n, 0.0);
+        for (int row = 0; row < n; ++row) out[row] = (Rp[row] - Rm[row]) * inv;
+    };
+    for (int i = 0; i < N; ++i) {
+        for (int k = 0; k < 4; ++k) frozen_fd_output(i, k, bcol[k]);
+        const int cS = 4*i+0, cT = 4*i+3;
+        const double dC_dS[4] = { S[i].dF[0], S[i].dz0[0], S[i].deta3[0], S[i].deta4[0] };
+        const double dC_dT[4] = { S[i].dF[1], S[i].dz0[1], S[i].deta3[1], S[i].deta4[1] };
+        for (int row = 0; row < n; ++row) {
+            double schur_S = 0.0, schur_T = 0.0;
+            for (int k = 0; k < 4; ++k) {
+                schur_S += bcol[k][row] * dC_dS[k];
+                schur_T += bcol[k][row] * dC_dT[k];
+            }
+            if (std::isfinite(schur_S)) J[(size_t)row*n+cS] += schur_S;
+            if (std::isfinite(schur_T)) J[(size_t)row*n+cT] += schur_T;
+        }
+    }
+    return true;
+}
+
+// ===========================================================================
 // Numerical (central-difference) Jacobian of the coupled residual.
 // ===========================================================================
 // J[row*n + col] = ∂R_row/∂U_col, n = 4N+2.  Perturbs each unknown and RE-ASSEMBLES
 // the full coupled residual (re-solving every column per perturbation — slow but
 // correct; the analytic Schur Jacobian is the next task).  Per-variable absolute step
 // floors keyed to the state-variable TYPE (mirrors slim_numerical_jacobian) so a state
-// entry that is ~0 at the seed does not collapse the FD step to round-off.  If either
-// perturbed residual is infeasible (a column failed), that column is set to 0 (the LM
-// damping + line search handle the resulting noise; the seed itself was feasible).
+// entry that is ~0 at the seed does not collapse the FD step to round-off.  If a perturbed
+// residual side is infeasible (a column failed → sentinel-filled), that side is dropped and
+// a one-sided difference from the feasible base is used; if BOTH sides fail the column entry
+// is set to 0 (the LM damping + line search handle the resulting noise).
 static void slim_coupled_numerical_jacobian(const std::vector<double>& U,
                                             const SlimDiskInputs& in, const OpacityLUTs& op,
                                             const ColumnOpts& copt, ColumnCache& cache,
@@ -487,18 +760,25 @@ static void slim_coupled_numerical_jacobian(const std::vector<double>& U,
         return std::max(1e-6 * std::abs(u), floor);
     };
 
-    std::vector<double> Up, Um, Rp, Rm;
-    bool fp = false, fm = false;
+    // Base residual at U — the anchor for one-sided differencing when a perturbed side
+    // goes infeasible (a finite ~1e305 sentinel difference would otherwise slip past the
+    // isfinite guard and inject garbage).
+    std::vector<double> Up, Um, Rp, Rm, R0; bool f0 = false;
+    slim_coupled_residual(U, in, op, copt, cache, R0, f0);
     for (int col = 0; col < n; ++col) {
         const double h = step_for(col);
         Up = U; Um = U;
         Up[col] += h; Um[col] -= h;
+        bool fp = false, fm = false;
         slim_coupled_residual(Up, in, op, copt, cache, Rp, fp);
         slim_coupled_residual(Um, in, op, copt, cache, Rm, fm);
-        const double inv = 1.0 / (2.0 * h);
         for (int row = 0; row < n; ++row) {
-            double d = (Rp[row] - Rm[row]) * inv;
-            if (!std::isfinite(d)) d = 0.0;   // a sentinel-filled infeasible side -> 0 column entry
+            double d;
+            if (fp && fm)      d = (Rp[row] - Rm[row]) / (2.0 * h);
+            else if (fp && f0) d = (Rp[row] - R0[row]) / h;   // backward side infeasible
+            else if (fm && f0) d = (R0[row] - Rm[row]) / h;   // forward side infeasible
+            else               d = 0.0;                        // both sides infeasible
+            if (!std::isfinite(d)) d = 0.0;
             J[(size_t)row * n + col] = d;
         }
     }
@@ -520,6 +800,10 @@ static bool relax_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
     const int N = std::max(in.n_nodes, 4);
     const int n = 4 * N + 2;
     const bool kDiag = std::getenv("SLIM_DIAG") != nullptr;
+    // Jacobian selector: analytic reduced/Schur J_red by default (Task 10); the pure
+    // numerical (re-solve-every-column) Jacobian stays available as a fallback + oracle
+    // behind SLIM_COUPLED_NUMJAC=1 (set it to force the old path for A/B comparison).
+    const bool kNumJac = std::getenv("SLIM_COUPLED_NUMJAC") != nullptr;
 
     ColumnCache cache; cache.resize(N, copt.n_z);
 
@@ -561,9 +845,13 @@ static bool relax_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
             if (kDiag) std::printf("[COUPLED] it=%d BUDGET EXCEEDED -> abort\n", it);
             break; } }
 
-        // Numerical Jacobian of the coupled residual (re-solves all columns per col).
+        // Jacobian of the coupled residual.  Analytic reduced/Schur J_red by default
+        // (Σ,T_c columns analytic via C3; ℓ/ℓ_in/r_s by re-solve FD); numerical fallback
+        // if forced (SLIM_COUPLED_NUMJAC) or if the analytic base point is infeasible.
         std::vector<double> J;
-        slim_coupled_numerical_jacobian(U, in, op, copt, cache, J);
+        bool jac_ok = false;
+        if (!kNumJac) jac_ok = slim_coupled_reduced_jacobian(U, in, op, copt, cache, J);
+        if (!jac_ok)  slim_coupled_numerical_jacobian(U, in, op, copt, cache, J);
 
         // Row + column scaling (full system; same scheme as relax_structure).
         std::vector<double> cs(n), rs_inv(n);
