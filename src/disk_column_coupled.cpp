@@ -455,6 +455,33 @@ static bool build_coupled_seed(const ColumnCoupledInputs& in, const OpacityLUTs&
     }
     if (!sbest.converged) return false;
 
+    // HONEST Σ0-MATCH GATE. The secant returns the best-so-far column even when it could
+    // NOT actually drive Σ0(T_eff) to Σ_target. That happens when Σ_target lies OUTSIDE the
+    // f_adv=0 column's reachable Σ0 range: at a fixed (shear, Ω_z, α) the grey column's Σ0 is
+    // a single-valued, SATURATING function of T_eff (it rises, peaks at a few×10³ g/cm² near
+    // T_eff~2e6, then falls), so a high-Σ node (Σ_target ≫ that ceiling) has NO f_adv=0 root.
+    // The old code packed sbest's profile (whose true Σ0 = sbest.Sigma0 ≈ the ceiling) but
+    // FORCE-overwrote U[4N+1] = Σ_target — a self-inconsistent state: the interior heating/
+    // hydrostatic rows use Σ0 = Σ_target while the profile's ρ/Q/z correspond to Σ0 ≈ ceiling,
+    // giving a giant interior residual (O(Q) ~ 1e20). That garbage seed made the augmented
+    // Newton burn every iteration without descending and never expose the real obstruction
+    // (a genuine column-infeasibility at that Σ). Reject the seed unless its packed profile's
+    // OWN Σ0 actually matches the pinned target to a basin-width relative band; otherwise the
+    // seed would be inconsistent and the caller must fall through (to the 2-D f_adv-freeing
+    // bring-up, or an honest no-root). No tolerance/gate/physics change — this only stops a
+    // non-Σ-matched seed from being reported as a valid f_adv=0 manifold column.
+    // Band width: the secant's achieved Σ0 must be within ~1/3 of the target. Empirically
+    // (a=0.9 inner disk) every node from which the augmented Newton CONVERGES has a seed
+    // Σ-matched to ≤27%, while the unreachable (Σ_target above the column's Σ0 ceiling) nodes
+    // miss by 40–99% — so 0.30 admits every convergent near-manifold seed and rejects only the
+    // factor-of-several garbage whose self-inconsistent packing gives the ~1e20 interior
+    // residual. (The merit-based seed selection in solve_column_coupled is the second guard;
+    // this keeps build_coupled_seed itself from REPORTING a non-Σ-matched column as a valid
+    // f_adv=0 manifold.)
+    constexpr double SIGMA_SEED_BAND = 0.30;
+    if (!(std::abs(sbest.Sigma0 - in.Sigma_target) <= SIGMA_SEED_BAND * in.Sigma_target))
+        return false;
+
     U.assign(4*N + 4, 0.0);
     for (int i = 0; i < N; ++i) {
         U[4*i+0] = sbest.P_gas[i]; U[4*i+1] = sbest.Q[i];
@@ -912,12 +939,42 @@ GRRT_EXPORT ColumnClosure solve_column_coupled(const ColumnCoupledInputs& in,
         ref_Sigma = sigma_from_state(U, N);
         ref_Tc    = U[2];                  // T(0) of the warm start
     } else {
-        // Seed by the 2-D (T_eff, f_adv) bring-up (generalizes the 1-D f_adv=0 secant; it
-        // lands BOTH the Σ0-pin and the T_c-pin to ~1e-6 with f_adv back-solved, so the
-        // augmented Newton only polishes). Fall back to the f_adv=0 secant seed if the 2-D
-        // bring-up cannot converge (the augmented Newton + continuation then do the work).
-        if (!build_coupled_seed_2d(in, op, U) && !build_coupled_seed(in, op, U))
-            return ColumnClosure{};   // no seed -> no coupled solution
+        // Seed selection: build BOTH bring-up candidates and start the Newton from whichever
+        // has the SMALLER coupled residual merit at the actual (Σ,T_c). Neither builder is
+        // uniformly best:
+        //   • the 2-D (T_eff,f_adv) bring-up lands BOTH pins to its own ~1e-6 scaled (T_c,Σ)
+        //     tolerance with f_adv back-solved — general, but its packed coupled residual can
+        //     sit at ~1e-7 (just above the Newton's MERIT_FLOOR), in a regime where the
+        //     augmented Jacobian is near-singular (huge ‖δ‖), so the polish cannot tighten it
+        //     and reports non-convergence even though the seed is essentially at the root.
+        //   • the 1-D f_adv=0 secant drives the BASE column to its full ~1e-13 residual, so
+        //     when in.T_c is at/near the f_adv=0 manifold T_c (the calibration's feasibility
+        //     query, and any near-manifold node) it is a FAR better start (already a root).
+        // Picking the lower-merit seed makes a genuinely-feasible near-manifold node converge
+        // where the 2-D seed alone stalls — a pure SEEDING change (residual/Jacobian/tol/gate
+        // unchanged). build_coupled_seed now also honestly returns false when its secant
+        // cannot Σ-match the target, so a packed 1-D seed here is always Σ-consistent.
+        auto merit_of = [&](const std::vector<double>& Us) -> double {
+            std::vector<double> R; coupled_column_residual(Us, in, op, R);
+            return coupled_residual_norm(Us, R, in);
+        };
+        std::vector<double> U2d, U1d;
+        const bool ok2d = build_coupled_seed_2d(in, op, U2d);
+        const double m2 = ok2d ? merit_of(U2d) : 1e300;
+        // Only pay for the 1-D manifold seed when the 2-D seed is NOT already deep in the
+        // Newton's basin (its merit ≳ the affine-invariant Newton's MERIT_FLOOR). On the vast
+        // majority of healthy nodes the 2-D seed lands at merit ≪ that, so this short-circuits
+        // to the prior behaviour (2-D only) and adds no cost; the extra base solve runs only
+        // for the near-fold / near-manifold nodes where the 2-D seed stalls.
+        constexpr double SEED_GOOD_ENOUGH = 1e-7;   // = MERIT_FLOOR in affine_invariant_newton
+        bool ok1d = false;
+        if (!ok2d || m2 > SEED_GOOD_ENOUGH) ok1d = build_coupled_seed(in, op, U1d);
+        const double m1 = ok1d ? merit_of(U1d) : 1e300;
+        if (std::getenv("AIN_DBG") && (ok2d || ok1d))
+            std::printf("  [coupled] seed merits: 2-D=%.4e  1-D=%.4e  -> picked %s\n",
+                        m2, m1, (m1 < m2) ? "1-D" : "2-D");
+        if      (!ok2d && !ok1d) return ColumnClosure{};   // no seed -> no coupled solution
+        else                     U = (m1 < m2) ? U1d : U2d;
     }
 
     // One-shot analytic-vs-FD Jacobian cross-check at the seed (the safety net the

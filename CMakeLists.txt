@@ -338,3 +338,35 @@ target_include_directories(slim-coupled-smoke-probe PRIVATE include/ ${CMAKE_BIN
 add_executable(slim-coupled-nt-probe tools/slim_coupled_nt_probe.cpp)
 target_include_directories(slim-coupled-nt-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# Task 12 coupled-column f_Edd CONTINUATION WALK probe (THE DECISIVE EXPERIMENT):
+# walk the coupled (column-driven) slim disk via f_Edd continuation from a feasible
+# low-f_Edd cold-seed base UP toward the POC target f_Edd≈0.9 (a=0.9), warm-starting
+# each rung from the previous converged radial state; reports REACHED-0.9 (physical?)
+# / STALLED-at-f_Edd_max (column/radial/fold) / BASE-INFEASIBLE — the OUTCOME is the
+# deliverable (honest, exploratory).  Include-the-.cpp consumer pattern: opacity.cpp +
+# disk_column_bvp.cpp + disk_column_coupled.cpp + slim_disk_radial.cpp +
+# slim_disk_coupled.cpp in ONE TU (reaches relax_coupled + the radial solver's TU-local
+# machinery); does NOT link grrt to avoid duplicate symbols.  Safe to delete along with
+# tools/slim_coupled_walk_probe.cpp.
+add_executable(slim-coupled-walk-probe tools/slim_coupled_walk_probe.cpp)
+target_include_directories(slim-coupled-walk-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# PLUMBING CONSISTENCY AUDIT probe (DELETABLE, audit-only): replicates Path A
+# (calibrate_seed_to_manifold's ColumnCoupledInputs + 2-D/1-D seed builder) and Path B
+# (eval_node_coupled's ColumnCoupledInputs + solve_column_coupled) at the SAME node and
+# prints a field-by-field comparison + the manifold round-trip verdict.  No full radial
+# relax (column solves only).  Same include-the-.cpp consumer order as the walk probe;
+# does NOT link grrt.  Safe to delete along with tools/slim_plumbing_audit_probe.cpp.
+add_executable(slim-plumbing-audit-probe tools/slim_plumbing_audit_probe.cpp)
+target_include_directories(slim-plumbing-audit-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# FOCUSED HARD-NODE probe (DELETABLE, diagnostic): isolates the solve_column_coupled
+# HIGH-Σ failure at ONE representative node (a=0.9, f_Edd=0.01, Σ~5e4) — builds the
+# f_adv=0 manifold column via build_coupled_seed, shows solve_column_coupled's internal
+# seed lands on the WRONG branch, and proves (decisive experiment) that seeding the
+# augmented Newton from the manifold column converges.  Same include-the-.cpp consumer
+# order as the walk probe; does NOT link grrt.  Safe to delete along with
+# tools/slim_coupled_hard_probe.cpp.
+add_executable(slim-coupled-hard-probe tools/slim_coupled_hard_probe.cpp)
+target_include_directories(slim-coupled-hard-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
