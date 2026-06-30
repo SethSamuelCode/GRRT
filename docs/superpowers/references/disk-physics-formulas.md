@@ -292,3 +292,61 @@ A *cooling* term (carries heat inward). `Q_vis = Q_rad + Q_adv`.
 10. **The slim disk is a TRANSONIC eigenvalue problem** (§22): regularity at the sonic point (`𝒩=𝒟₀=0`) pins `ℓ_in`; the sonic point is *found, not prescribed*, and lies *inside* the ISCO. Do not apply the thin-disk no-torque ISCO boundary condition.
 11. **`f_adv` convention — LOCKED to Sądowski (§23):** `f_adv ≡ Q_adv/Q_rad`, radiated fraction `= 1/(1+f_adv)`, `Q_rad = Q_vis/(1+f_adv)`. This is **NOT** the Narayan-Yi `f_adv=Q_adv/Q_vis` (which gives `Q_rad=(1−f_adv)Q_vis`) — they differ except for `f_adv≪1`, related by `f_NY=f_S/(1+f_S)`. The vertical-coupling `αp/(1+f_adv)` and the §22/§23 energy law both use the Sądowski form. Stay consistent.
 12. **`Ṁ_Edd` factor differs by paper** (`16 L_Edd/c²` in Abramowicz & Fragile vs the textbook `10 L_Edd/c²` at η=0.1) — check which convention before comparing accretion rates (§4, §22).
+
+---
+
+## 24. Mixing-length convection in the vertical column (verified)
+
+**Externally verified** against Sądowski et al. 2011 (A&A 527 A17 [arXiv:1006.4309]) §2.2(iii) "Energy transport" (Eqs 13–21); the thermodynamic closures (`∇_ad`, `C_p`) **opus+Wolfram-derived from the gas+radiation specific entropy, 2026-06-30** (entropy `s = R_g ln(T^{3/2}/ρ) + 4aT³/3ρ`, monatomic γ=5/3). This is refinement **#13** — the path to a physical `f_Edd≈0.9` disk (the pure-radiative column saturates at `Σ0≈1e4–1.3e4`; the near-Eddington disk needs more — Sądowski: *"high radiative fluxes give rise to convection as fluxes approach the Eddington limit; the dense inner parts ... are convective"*).
+
+**Scope (LOCKED choice):** `∇_ad` and `C_p` use the **closed-form gas+radiation** EOS (NO partial ionization), consistent with the existing column EOS (`rho_from_gas`/`p_total`). Justified: GRRT renders only `T_c > 10⁷ K` (fully ionized); partial ionization lives in the cool surface layers, *outside the rendered regime and outside the deep convective zone that sets Σ-capacity*. So `f_F` lands *near* (not exactly) the literature 0.94.
+
+**Transport channel (Schwarzschild criterion, S11 Eq 15):** the column's `dT/dz` ODE uses the gradient
+```
+∇ = dlnT/dlnP = { ∇_rad ,           ∇_rad ≤ ∇_ad   (radiative — today's pure-radiative column)
+                { ∇_conv ,          ∇_rad >  ∇_ad   (convective — MLT below) }
+```
+Reduces EXACTLY to the current pure-radiative column wherever `∇_rad ≤ ∇_ad` (the low-Ṁ / outer disk) ⇒ the NT-reduction gate is preserved by construction.
+
+**Radiative gradient (S11 Eq 16 — IDENTICAL to our column form, Wolfram-checked):**
+```
+∇_rad = 3 κ_R Q P / (16 σ T⁴ Ω_⊥² z)
+```
+Derived as `(P/T)·(dT/dz)/(dP/dz)` from our `dT/dz = −3κ_RρQ/(16σT³)` (§23) and `dP/dz = −ρΩ_⊥²z` (§22); `ρ` cancels. `Q`=flux ℱ, `P`=total pressure, `Ω_⊥²`=`omega_z_sq`. Finite at the midplane (`Q∝z` ⇒ `Q/z→dQ/dz|₀`).
+
+**Adiabatic gradient (gas+radiation, β=p_gas/p_total — opus+Wolfram-verified):**
+```
+∇_ad = (4 − 3β) / (16 − 12β − (3/2)β²)
+```
+Limits (Wolfram-exact): β=1 (gas) → `2/5 = 0.40`; β=0 (radiation) → `1/4 = 0.25`. ✓
+
+**Specific heat (gas+radiation — opus+Wolfram-verified):**
+```
+C_p = R_g · (16/β² − 12/β − 3/2) ,   R_g = k_B/(μ m_u)
+```
+Limits: β=1 → `(5/2)R_g` (monatomic ideal gas) ✓; β→0 → ∞ (radiation at constant P) ✓.
+
+**Expansion coefficient (the SIGN TRAP — read carefully):**
+```
+δ ≡ −(∂lnρ/∂lnT)_p = (4 − 3β)/β   > 0
+```
+⚠ **S11 Eq 21 literally writes `(∂lnρ/∂lnT)_p`, which is NEGATIVE for gas+radiation.** Used as-printed it makes `1/w² < 0` ⇒ `w` imaginary ⇒ NaN. The buoyancy-correct quantity is the POSITIVE `δ = −(∂lnρ/∂lnT)_p`. **Implement `δ = (4−3β)/β`, not the signed derivative.**
+
+**Mixing length, optical depth (S11 Eqs 17–18):**
+```
+H_ml = α_ML · H_p ,  α_ML = 1   (Sądowski's value — no free parameter)
+H_p  = p / (ρ Ω_⊥² z + √(pρ)·Ω_⊥)          (pressure scale height, Eq 18)
+τ_ml = ρ κ_R H_ml                          (convective-element optical depth)
+```
+
+**Convective gradient + efficiency cubic (S11 Eqs 19–21):**
+```
+∇_conv = ∇_ad + (∇_rad − ∇_ad)·y(y + w)                            (Eq 19)
+(9/4)·[τ_ml²/(3+τ_ml²)]·y³ + w·y² + w²·y − w = 0                   (Eq 20; solve for y>0)
+1/w² = [(3+τ_ml²)/(3τ_ml)]² · [Ω_⊥² z H_ml² ρ² C_p²]/(512 σ² T⁶ H_p) · δ · (∇_rad − ∇_ad)   (Eq 21, δ sign-resolved)
+```
+**Efficiency-limit sanity check (verified):** deep/optically-thick (τ_ml large) ⇒ `1/w²` large ⇒ `w→0` ⇒ cubic gives `y→0` ⇒ `∇_conv→∇_ad` = **efficient** convection. Thin (τ_ml small) ⇒ `w→∞` ⇒ `∇_conv→∇_rad` = **inefficient**. Correct direction. (`y(y+w) = (∇_conv−∇_ad)/(∇_rad−∇_ad) ∈ [0,1]`.)
+
+**Integration into the column:** convection modifies ONLY the `dT/dz` row — replace `∇_rad` with `min`-channel `∇` above. When convective, radiation carries flux at the *reduced* `∇_conv`; convection carries the rest (the total flux `Q` is conserved by `dQ/dz` = heating, unchanged). **Effect:** shallower interior `dT/dz` ⇒ holds MORE Σ at given heating (raises the `Σ0` capacity ~2×) and cools `T_c` (raises `f_F` 0.42→~0.9). Analytic Jacobian gains `∂(∇_conv)/∂{P_gas,T,Q,z}` via implicit differentiation of the cubic (`dy` from Eq 20) — keep it analytic (the column Newton + coupled Schur Jacobian depend on it).
+
+*Sources: S11 Eqs 13–21; ∇_ad/C_p Wolfram-derived from gas+radiation entropy (2026-06-30). Gate convection against the pure-radiative reduction (∇_rad≤∇_ad ⇒ unchanged) + the f_F lift + the Σ0-capacity increase.*

@@ -379,3 +379,26 @@ target_include_directories(slim-coupled-hard-probe PRIVATE include/ ${CMAKE_BINA
 add_executable(slim-coupled-nz-probe tools/slim_coupled_nz_probe.cpp)
 target_include_directories(slim-coupled-nz-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# Σ↔V CHECK probe (DELETABLE, diagnostic): the resume-action check of the 2026-06-30
+# handoff §0 — is the demanded inner Σ≈5e4 g/cm² PHYSICAL or a thin-disk-seed artifact?
+# Per-node mass-conservation inversion (the V required to carry Ṁ through the column's
+# Σ0 capacity) + the column ceiling (fresh, n_z=96) + one-zone c_s.  Decides Option A
+# (transonic-aware seed) vs Option C (convection #13).  Same include-the-.cpp consumer
+# order as the hard probe; does NOT link grrt.  Safe to delete with the .cpp.
+add_executable(slim-sigma-v-probe tools/slim_sigma_v_probe.cpp)
+target_include_directories(slim-sigma-v-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# GLOBAL-SEED DUMP probe (DELETABLE, diagnostic): Task 1 of the seed-pivot —
+# dump the production build_slim_disk_seed(a,f_Edd) RAW (no relax) to judge slim
+# vs torus + column-feasibility of its Σ, before wiring it into relax_coupled.
+# include-the-.cpp (opacity + slim_disk_radial); does NOT link grrt. Delete with the .cpp.
+add_executable(slim-seed-dump-probe tools/slim_seed_dump_probe.cpp)
+target_include_directories(slim-seed-dump-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# SONIC-Σ vs CAPACITY probe (DELETABLE, diagnostic): the rigorous convection gate —
+# self-consistent sonic-point Σ (column's own c_s) vs the pure-radiative column Σ0
+# capacity at f_Edd=0.9. Confirms whether the column genuinely cannot hold the disk
+# (→ convection #13). include-the-.cpp; does NOT link grrt. Delete with the .cpp.
+add_executable(slim-sonic-sigma-probe tools/slim_sonic_sigma_probe.cpp)
+target_include_directories(slim-sonic-sigma-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
