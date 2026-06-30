@@ -393,6 +393,18 @@ static void test_analytic_vs_numerical_jacobian_fadv() {
     if (max_rel > 1e-3) { std::printf("  FAIL: analytic Jacobian disagrees with numerical (f_adv=0.5)\n"); failures++; }
 }
 
+static void test_convection_thermo_helpers() {
+    using namespace grrt::detail_bvp;
+    std::printf("\n=== convection: nabla_ad / c_p closed forms ===\n");
+    if (std::abs(nabla_ad(1.0) - 0.40) > 1e-12) { std::printf("  FAIL nabla_ad(1)=%.6f\n", nabla_ad(1.0)); failures++; }
+    if (std::abs(nabla_ad(0.0) - 0.25) > 1e-12) { std::printf("  FAIL nabla_ad(0)=%.6f\n", nabla_ad(0.0)); failures++; }
+    const double na = nabla_ad(0.5);
+    if (!(na > 0.25 && na < 0.40)) { std::printf("  FAIL nabla_ad(0.5)=%.6f\n", na); failures++; }
+    const double Rg = grrt::constants::k_B / (grrt::constants::mu_fully_ionized * grrt::constants::m_p);
+    if (std::abs(c_p_gas_rad(1.0) - 2.5*Rg) > 1e-6*2.5*Rg) { std::printf("  FAIL c_p(1)\n"); failures++; }
+    if (!(c_p_gas_rad(0.3) > c_p_gas_rad(1.0))) { std::printf("  FAIL c_p monotonic\n"); failures++; }
+}
+
 static void test_lu_multi_rhs() {
     std::printf("\n=== column LU: factor once, solve two RHS ===\n");
     // 3x3 well-conditioned system; A x1 = b1, A x2 = b2 via one factorization.
@@ -461,6 +473,7 @@ int main() {
     test_fadv_reduces_heating();
     test_analytic_vs_numerical_jacobian_fadv();
     test_warm_start_converges_fast();
+    test_convection_thermo_helpers();
     test_lu_multi_rhs();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;

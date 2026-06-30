@@ -2,10 +2,40 @@
 #define GRRT_DISK_COLUMN_BVP_H
 
 #include "grrt/color/opacity.h"
+#include "grrt/math/constants.h"
 #include "grrt_export.h"
+#include <algorithm>
 #include <vector>
 
 namespace grrt {
+
+/// Closed-form gas+radiation thermodynamic helpers for mixing-length convection
+/// (refinement #13; see docs/superpowers/references/disk-physics-formulas.md §24).
+/// Both are opus+Wolfram-derived from the gas+radiation specific entropy
+/// (s = R_g ln(T^{3/2}/ρ) + 4aT³/3ρ, monatomic γ=5/3), no partial ionization.
+/// β = P_gas / P_total ∈ [0,1]. Header-inline so both src/disk_column_bvp.cpp and
+/// the linked tests can reach them as grrt::detail_bvp::<fn>.
+namespace detail_bvp {
+
+/// Adiabatic temperature gradient ∇_ad = dlnT/dlnP at constant entropy, gas+radiation.
+///   ∇_ad = (4 − 3β) / (16 − 12β − (3/2)β²)
+/// Limits: β=1 (pure gas) → 0.40 = (γ−1)/γ for γ=5/3; β=0 (pure radiation) → 0.25.
+inline double nabla_ad(double beta) {
+    const double b = std::clamp(beta, 0.0, 1.0);
+    return (4.0 - 3.0 * b) / (16.0 - 12.0 * b - 1.5 * b * b);
+}
+
+/// Specific heat at constant pressure C_p for the gas+radiation mixture [erg/(g K)].
+///   C_p = R_g · (16/β² − 12/β − 3/2),   R_g = k_B / (μ m_p)
+/// Limits: β=1 → (5/2)R_g (monatomic ideal gas); β→0 → ∞ (radiation-dominated).
+inline double c_p_gas_rad(double beta) {
+    using namespace grrt::constants;
+    const double b = std::max(beta, 1e-12);   // diverges as β→0; floor to stay finite
+    const double R_g = k_B / (mu_fully_ionized * m_p);
+    return R_g * (16.0 / (b * b) - 12.0 / b - 1.5);
+}
+
+} // namespace detail_bvp
 
 /// Inputs for one disc column's vertical-structure BVP (all CGS).
 struct ColumnInputs {
