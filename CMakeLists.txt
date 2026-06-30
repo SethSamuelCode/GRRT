@@ -370,3 +370,12 @@ target_include_directories(slim-plumbing-audit-probe PRIVATE include/ ${CMAKE_BI
 add_executable(slim-coupled-hard-probe tools/slim_coupled_hard_probe.cpp)
 target_include_directories(slim-coupled-hard-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# Σ0 n_z RESOLUTION probe (DELETABLE, diagnostic): decides whether the Σ0≈8.6e3
+# saturation ceiling at the high-Σ failing node (a=0.9, f_Edd=0.01, Σ~5e4) is a
+# RESOLUTION ARTIFACT of the relax bring-up n_z=24 or a PHYSICAL column-capacity
+# limit, by sweeping the base column solver's Σ0 ceiling + the coupled solve over
+# n_z ∈ {24,48,96,200,400}.  Same include-the-.cpp consumer order as the hard
+# probe; does NOT link grrt.  Safe to delete along with tools/slim_coupled_nz_probe.cpp.
+add_executable(slim-coupled-nz-probe tools/slim_coupled_nz_probe.cpp)
+target_include_directories(slim-coupled-nz-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
