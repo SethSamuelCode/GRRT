@@ -402,3 +402,8 @@ target_include_directories(slim-seed-dump-probe PRIVATE include/ ${CMAKE_BINARY_
 add_executable(slim-sonic-sigma-probe tools/slim_sonic_sigma_probe.cpp)
 target_include_directories(slim-sonic-sigma-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# CONVECTION VERIFY probe (DELETABLE): confirms convection triggers + flattens ∇ in the
+# deep-rad-pressure column (the midplane-cooling mechanism behind the β 7e-6→3e-3 shift).
+add_executable(slim-convection-verify-probe tools/slim_convection_verify_probe.cpp)
+target_include_directories(slim-convection-verify-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+

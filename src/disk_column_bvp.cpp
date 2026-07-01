@@ -101,7 +101,13 @@ Deriv node_deriv(double Pg, double Q, double T, double z,
     d.dz = dz_dq;
     d.dP = (-rho * omega_z * omega_z * z) * dz_dq;   // rhs of d(P_tot)/dz (UNCHANGED form)
     d.dQ = ( alpha * shear * Ptot / (1.0 + f_adv)) * dz_dq;  // S11 Eq 13: q+ = alpha P_tot |r dΩ/dr| / (1+f_adv)
-    d.dT = (-3.0 * kR * rho * Q / (16.0 * sigma_SB * T * T * T)) * dz_dq;
+    // dT/dz: grey radiative diffusion, OR the shallower MLT convective gradient where the
+    // column is convectively unstable (Schwarzschild). Stable nodes are bit-identical to
+    // the old radiative form (convective_gradient returns dTdz_rad there). §24.
+    double nabla_unused; bool convective_unused;
+    const double dTdz = grrt::detail_bvp::convective_gradient(rho, T, Ptot, Q, kR, z, omega_z,
+                                                              nabla_unused, convective_unused);
+    d.dT = dTdz * dz_dq;
     return d;
 }
 } // namespace
@@ -248,7 +254,7 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
         // Slot 0 (denoted *_dP) is now the GAS-pressure partial.
         double dP_dP, dP_dz, dP_dS;                 // dP/dq partials (rho cancels)
         double dQ_dP, dQ_dT, dQ_dS;                 // dQ/dq partials (P_tot reconstructed)
-        double dT_dP, dT_dQ, dT_dT, dT_dS;          // dT/dq partials
+        double dT_dP, dT_dQ, dT_dT, dT_dS, dT_dz;   // dT/dq partials (dT_dz nonzero only at convective nodes)
         double dz_dP, dz_dT, dz_dS;                 // dz/dq partials
     };
     auto node_jac = [&](int i) -> NodeJac {
@@ -282,12 +288,32 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
         J.dQ_dP = fadv_inv * as * Sigma0 / 2.0 * (1.0 / rho) * (1.0 - (Ptot / rho) * drho_dP);
         J.dQ_dT = fadv_inv * as * Sigma0 / 2.0 * (1.0 / rho) * (dPtot_dT - (Ptot / rho) * drho_dT);
         J.dQ_dS = fadv_inv * as * Ptot / (2.0 * rho);
-        // dT/dq = -3 kappa Q Sigma0 / (32 sigma T^3)   (rho cancels; kappa(rho,T))
+        // dT/dq partials. Radiative form is analytic (rho cancels; no z-dependence).
+        // Where the node is CONVECTIVE, dT/dq depends on z and on (Pg,Q,T,Sigma0) through
+        // the MLT cubic; central-FD node_deriv's dT for THIS node (a smooth scalar of the
+        // locals) — matches the residual by construction, gated by the FD oracle. Stable
+        // nodes keep the analytic radiative partials.
         const double T3 = T*T*T;
-        J.dT_dQ = -3.0 * kappa * Sigma0 / (32.0 * sigma_SB * T3);
-        J.dT_dS = -3.0 * kappa * Q / (32.0 * sigma_SB * T3);
-        J.dT_dP = -3.0 * Q * Sigma0 / (32.0 * sigma_SB * T3) * dk_dP;
-        J.dT_dT = -3.0 * Q * Sigma0 / (32.0 * sigma_SB) * (dk_dT / T3 - 3.0 * kappa / (T3 * T));
+        double nabla_chk; bool is_conv;
+        grrt::detail_bvp::convective_gradient(rho, T, Ptot, Q, kappa, z, in.omega_z, nabla_chk, is_conv);
+        if (!is_conv) {
+            J.dT_dQ = -3.0 * kappa * Sigma0 / (32.0 * sigma_SB * T3);
+            J.dT_dS = -3.0 * kappa * Q / (32.0 * sigma_SB * T3);
+            J.dT_dP = -3.0 * Q * Sigma0 / (32.0 * sigma_SB * T3) * dk_dP;
+            J.dT_dT = -3.0 * Q * Sigma0 / (32.0 * sigma_SB) * (dk_dT / T3 - 3.0 * kappa / (T3 * T));
+            J.dT_dz = 0.0;
+        } else {
+            auto dTdq = [&](double Pg_, double Q_, double T_, double z_, double S_) {
+                return node_deriv(Pg_, Q_, T_, z_, S_, in.alpha, in.shear, in.omega_z, in.f_adv, op).dT;
+            };
+            const double hP=1e-6*std::max(std::abs(Pg),1e-300), hQ=1e-6*std::max(std::abs(Q),1e-300);
+            const double hT=1e-6*std::max(T,1.0), hz=1e-6*std::max(std::abs(z),1e-300), hS=1e-6*std::max(Sigma0,1e-300);
+            J.dT_dP = (dTdq(Pg+hP,Q,T,z,Sigma0)-dTdq(Pg-hP,Q,T,z,Sigma0))/(2*hP);
+            J.dT_dQ = (dTdq(Pg,Q+hQ,T,z,Sigma0)-dTdq(Pg,Q-hQ,T,z,Sigma0))/(2*hQ);
+            J.dT_dT = (dTdq(Pg,Q,T+hT,z,Sigma0)-dTdq(Pg,Q,T-hT,z,Sigma0))/(2*hT);
+            J.dT_dz = (dTdq(Pg,Q,T,z+hz,Sigma0)-dTdq(Pg,Q,T,z-hz,Sigma0))/(2*hz);
+            J.dT_dS = (dTdq(Pg,Q,T,z,Sigma0+hS)-dTdq(Pg,Q,T,z,Sigma0-hS))/(2*hS);
+        }
         // dz/dq = Sigma0/(2 rho)
         J.dz_dP = -Sigma0 / (2.0 * rho*rho) * drho_dP;
         J.dz_dT = -Sigma0 / (2.0 * rho*rho) * drho_dT;
@@ -347,6 +373,8 @@ static void analytic_jacobian(const std::vector<double>& U, const ColumnInputs& 
             at(r, cj+0) += -half_dq * jj.dT_dP;
             at(r, cj+1) += -half_dq * jj.dT_dQ;
             at(r, cj+2) += -half_dq * jj.dT_dT;
+            at(r, ci+3) += -half_dq * ji.dT_dz;         // z-column contrib (convective nodes only)
+            at(r, cj+3) += -half_dq * jj.dT_dz;
             at(r, cS)   += -half_dq * (ji.dT_dS + jj.dT_dS);
         }
         // --- R_z row ---
