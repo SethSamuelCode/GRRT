@@ -5,6 +5,7 @@
 #include "grrt/math/constants.h"
 #include "grrt_export.h"
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace grrt {
@@ -33,6 +34,61 @@ inline double c_p_gas_rad(double beta) {
     const double b = std::max(beta, 1e-12);   // diverges as β→0; floor to stay finite
     const double R_g = k_B / (mu_fully_ionized * m_p);
     return R_g * (16.0 / (b * b) - 12.0 / b - 1.5);
+}
+
+/// Solve the MLT efficiency cubic  A y^3 + w y^2 + w^2 y - w = 0  for the unique y>0
+/// (§24 Eq 20). F(0)=-w<0, monotone increasing for y>0 (A,w>0) -> guarded Newton.
+inline double mlt_solve_y(double A, double w) {
+    double y = (w > 1.0) ? 1.0/w : 1.0;
+    for (int it = 0; it < 40; ++it) {
+        const double F  = A*y*y*y + w*y*y + w*w*y - w;
+        const double dF = 3.0*A*y*y + 2.0*w*y + w*w;
+        const double step = F/dF;
+        y -= step;
+        if (y <= 0.0) y = 1e-12;
+        if (std::abs(step) <= 1e-12*(std::abs(y)+1e-12)) break;
+    }
+    return std::max(y, 0.0);
+}
+
+/// Returns dT/dz (the quantity node_deriv multiplies by dz_dq). Stable (∇_rad≤∇_ad):
+/// bare radiative gradient (BIT-IDENTICAL). Unstable: ∇_conv·(T/Ptot)·dP/dz. §24 Eqs 16-21.
+inline double convective_gradient(double rho, double T, double Ptot, double Q, double kR,
+                                  double z, double omega_z,
+                                  double& nabla_out, bool& convective) {
+    using namespace grrt::constants;
+    const double dTdz_rad = -3.0*kR*rho*Q/(16.0*sigma_SB*T*T*T);
+    const double dPdz     = -rho*omega_z*omega_z*z;
+    convective = false;
+    if (!(z > 0.0) || !(dPdz < 0.0) || !(Q > 0.0)) { nabla_out = 0.0; return dTdz_rad; }
+    const double Pg   = Ptot - (a_rad/3.0)*T*T*T*T;
+    const double beta = (Ptot > 0.0) ? std::clamp(Pg/Ptot, 0.0, 1.0) : 1.0;
+    const double nab_rad = (Ptot/T) * (dTdz_rad/dPdz);
+    const double nab_ad  = nabla_ad(beta);
+    nabla_out = nab_rad;
+    if (nab_rad <= nab_ad) return dTdz_rad;                 // STABLE -> bit-identical radiative
+    const double Hp  = Ptot / (rho*omega_z*omega_z*z + std::sqrt(Ptot*rho)*omega_z);
+    const double Hml = Hp;                                    // α_MLT = 1 (Sądowski 2011)
+    const double tau = rho*kR*Hml;
+    // Optically-thin mixing length (τ_ml→0, e.g. κ_R→0): convection carries no flux —
+    // the MLT cubic's own continuous limit is ∇_conv→∇_rad (Wolfram-verified). Guard the
+    // τ=0 singularity in `pref` (else pref→∞ → w=0,A=0 → mlt_solve_y(0,0)=NaN cascade).
+    if (!(tau > 0.0)) { nabla_out = nab_rad; return dTdz_rad; }
+    const double Cp  = c_p_gas_rad(beta);
+    const double delta = (4.0 - 3.0*beta)/std::max(beta,1e-12);   // SIGN-RESOLVED (>0)
+    const double T6 = T*T*T*T*T*T;
+    const double pref = (3.0+tau*tau)/(3.0*tau);
+    const double inv_w2 = pref*pref
+        * (omega_z*omega_z * z * Hml*Hml * rho*rho * Cp*Cp) / (512.0*sigma_SB*sigma_SB*T6*Hp)
+        * delta * (nab_rad - nab_ad);
+    const double w = 1.0/std::sqrt(std::max(inv_w2, 1e-300));
+    const double A = (9.0/4.0) * (tau*tau)/(3.0 + tau*tau);
+    const double y = mlt_solve_y(A, w);
+    double frac = std::clamp(y*(y + w), 0.0, 1.0);
+    const double nab_conv = nab_ad + (nab_rad - nab_ad)*frac;
+    nabla_out = nab_conv;
+    convective = true;
+    return nab_conv * (T/Ptot) * dPdz;
 }
 
 } // namespace detail_bvp

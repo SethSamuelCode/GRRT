@@ -405,6 +405,34 @@ static void test_convection_thermo_helpers() {
     if (!(c_p_gas_rad(0.3) > c_p_gas_rad(1.0))) { std::printf("  FAIL c_p monotonic\n"); failures++; }
 }
 
+static void test_convective_gradient() {
+    using namespace grrt::detail_bvp;
+    using namespace grrt::constants;
+    std::printf("\n=== convection: convective_gradient ===\n");
+    { // (a) STABLE: tiny Q -> radiative, bit-identical
+        const double rho=1e-2, T=1e7, Ptot=1e15, Q=1e3, kR=0.34, z=1e4, omega_z=1e-3;
+        double nab; bool convective;
+        const double g = convective_gradient(rho, T, Ptot, Q, kR, z, omega_z, nab, convective);
+        const double dTdz_rad = -3.0*kR*rho*Q/(16.0*sigma_SB*T*T*T);
+        if (convective) { std::printf("  FAIL: stable node flagged convective\n"); failures++; }
+        if (std::abs(g - dTdz_rad) > 1e-12*std::abs(dTdz_rad)) { std::printf("  FAIL: stable grad != radiative\n"); failures++; }
+        (void)nab;
+    }
+    { // (b) UNSTABLE: large Q -> convective; shallower; nabla in [nab_ad, nab_rad]
+        const double rho=1.0, T=3e7, Ptot=3e16, Q=1e17, kR=0.34, z=1e3, omega_z=3e-3;
+        double nab; bool convective;
+        const double g = convective_gradient(rho, T, Ptot, Q, kR, z, omega_z, nab, convective);
+        const double dTdz_rad = -3.0*kR*rho*Q/(16.0*sigma_SB*T*T*T);
+        const double beta = Ptot>0 ? (Ptot - (a_rad/3.0)*T*T*T*T)/Ptot : 1.0;
+        const double na = nabla_ad(beta);
+        const double dPdz = -rho*omega_z*omega_z*z;
+        const double nr = (Ptot/T)*(dTdz_rad/dPdz);
+        if (!convective) { std::printf("  FAIL: unstable node not convective\n"); failures++; }
+        if (!(std::abs(g) < std::abs(dTdz_rad))) { std::printf("  FAIL: not shallower (%.3e vs %.3e)\n", g, dTdz_rad); failures++; }
+        if (!(nab >= na - 1e-9 && nab <= nr + 1e-9)) { std::printf("  FAIL: nabla %.4f outside [%.4f,%.4f]\n", nab, na, nr); failures++; }
+    }
+}
+
 static void test_lu_multi_rhs() {
     std::printf("\n=== column LU: factor once, solve two RHS ===\n");
     // 3x3 well-conditioned system; A x1 = b1, A x2 = b2 via one factorization.
@@ -474,6 +502,7 @@ int main() {
     test_analytic_vs_numerical_jacobian_fadv();
     test_warm_start_converges_fast();
     test_convection_thermo_helpers();
+    test_convective_gradient();
     test_lu_multi_rhs();
     std::printf("\n=== %d failures ===\n", failures);
     return failures > 0 ? 1 : 0;
