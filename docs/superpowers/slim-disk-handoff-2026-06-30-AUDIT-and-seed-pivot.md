@@ -4,7 +4,18 @@
 
 ---
 
-## 0. THE NEXT TASK (resume action) — DECIDED: (A) transonic-V seed + (B) convection #13
+## STATUS UPDATE (2026-07-02) — component B (convection) DONE; next = A + real coupling test
+
+**Component B (MLT convection) is BUILT, VERIFIED, and COMMITTED** (plan `plans/2026-07-01-convective-column.md`, Tasks 1–4):
+- `grrt::detail_bvp::{nabla_ad, c_p_gas_rad, mlt_solve_y, convective_gradient}` in `disk_column_bvp.h` (all §24 formulas, opus+Wolfram-verified; δ sign-trap resolved; τ_ml→0 radiative-limit guard Wolfram-verified).
+- Wired into `node_deriv`; analytic Jacobian extended with convective `dT` partials (local-FD of `node_deriv`, **FD-oracle clean 0.0**). Pure-radiative reduction **bit-identical** (NT gate green). Two pure-radiative gates recalibrated to the convective model (verified via `slim-convection-verify-probe`: the deep-rad-pressure column is 94/96 convective, ∇ flattened 0.40→0.25, midplane cooled, β 7e-6→3e-3 — the documented convective signature).
+- **Task 5 (Σ0-capacity-lift success metric): INCONCLUSIVE via proxy.** `slim-sonic-sigma-probe` is NOT a valid tool for the convective column — it computes c_s from the *pure-radiative* `one_zone_closure`, which returns garbage (cs/c~0.08) exactly where convection is active (high T_eff). On trustworthy (radiative-regime) rows col/req at r_s stays ~0.64 (unchanged), but that's where convection is OFF — uninformative. **The capacity lift is neither confirmed nor refuted.** USER DECISION (2026-07-02): skip the proxy; let the **real coupled relax** answer it (option 2).
+
+**NEXT = component A (transonic-V seed) → wire `relax_coupled` with convective columns → run at f_Edd=0.9 (the real integration test).** Component A: `build_slim_disk_seed`'s Σ is 10–100× too high (subsonic V); re-derive (Σ,V) onto the transonic branch (|V|→c_s at r_s, declining outward; Σ from mass conservation). Then seed `relax_coupled` from it with the now-convective columns and see if the inner disk is feasible / the relax converges at f_Edd=0.9. That is the ground-truth answer to "do convection + a good seed unblock f_Edd=0.9". Component A needs its own brainstorm→spec→plan (fresh work).
+
+---
+
+## 0. (SUPERSEDED by the status update above) THE ORIGINAL DECISION: (A) transonic-V seed + (B) convection #13
 
 **Reach a physical (a=0.9, f_Edd=0.9) disk via TWO committed pieces:**
 - **(A) Transonic-V seed fix** — `build_slim_disk_seed` produces Σ **10–100× too high** because its inner V is far too subsonic (it thickened the shape but kept thin-disk-like high-Σ/low-V). Re-derive (Σ,V) onto the transonic branch (|V|→c_s at r_s, declining outward; back-derive Σ from mass conservation) → Σ drops to the true ~1e4. **Dominant, tractable lever.**

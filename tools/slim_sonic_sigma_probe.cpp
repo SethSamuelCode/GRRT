@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
             ColumnInputs b{}; b.T_eff=Te; b.shear=std::max(sh,1e-300);
             b.omega_z=std::max(ozf,1e-300); b.alpha=in.alpha; b.f_adv=0.0;
             // rho_mid guess from one-zone at a nominal (Σ,Tc); refined internally.
-            b.rho_mid_guess=1.0; b.n_nodes=nz; b.max_iters=400; b.tol=1e-8;
+            b.rho_mid_guess=1e-6; b.n_nodes=nz; b.max_iters=400; b.tol=1e-8;  // convective-column-friendly seed
             ColumnBVPSolution s = solve_column_bvp(b, op, nullptr);
             if (!s.converged) { std::printf("    %-11.3e %-12s\n", Te, "(fail)"); continue; }
             const double Sig0 = s.Sigma0;
