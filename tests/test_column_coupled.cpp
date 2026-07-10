@@ -366,6 +366,60 @@ static void test_dC_dp_vs_resolve_oracle() {
     if (any_fail) { std::printf("  FAIL: a dC/dp component exceeds the 1e-3 perturb-resolve gate\n"); failures++; }
 }
 
+// =============================================================================
+// (6) CONVECTIVE-STATE Jacobian oracle. The coupled Schur Jacobian's dT partials
+// must switch to the MLT convective form wherever the column is convectively
+// unstable (Schwarzschild), EXACTLY as the standalone analytic_jacobian does. A
+// deep radiation-pressure column (T_eff=1e7, inner-disk geometry) is convective at
+// nearly every interior node; its packed coupled state exposes any convection-
+// blindness in coupled_column_jacobian as a large analytic-vs-FD mismatch. The
+// earlier gates all used consistent / low-Ṁ (radiative) states, so this regression
+// slipped through — hence a dedicated convective oracle. The FD Jacobian differences
+// coupled_column_residual (which is convection-aware via node_deriv), so a convection-
+// blind analytic Jacobian mismatches it by ~1e-1 on this state.
+// =============================================================================
+static void test_coupled_jacobian_convective_state() {
+    std::printf("\n=== C1: coupled Jacobian matches FD on a CONVECTIVE column state ===\n");
+    auto lut = build_opacity_luts(1e-12, 1e6, 3000.0, 1e8);
+    // Solve the standalone (convection-aware) BVP at the deep rad-pressure geometry to
+    // get a converged CONVECTIVE profile, then pack it into the augmented coupled state.
+    const int N = 96;
+    ColumnInputs ref{}; ref.T_eff=1e7; ref.shear=5.25e3; ref.omega_z=3.12e3;
+    ref.alpha=0.1; ref.f_adv=0.0; ref.rho_mid_guess=1.0; ref.n_nodes=N; ref.max_iters=300; ref.tol=1e-8;
+    auto s = solve_column_bvp(ref, lut);
+    if (!s.converged) { std::printf("  FAIL: deep rad-pressure reference column did not converge\n"); failures++; return; }
+
+    // Pack into the (4N+4) coupled state: interior nodes + z0, Σ0, T_eff(surface), f_adv=0.
+    std::vector<double> U(4*N+4, 0.0);
+    for (int i=0;i<N;++i){ U[4*i+0]=s.P_gas[i]; U[4*i+1]=s.Q[i]; U[4*i+2]=s.T[i]; U[4*i+3]=s.z[i]; }
+    U[4*N]=s.z0; U[4*N+1]=s.Sigma0; U[4*N+2]=ref.T_eff; U[4*N+3]=0.0;
+
+    ColumnCoupledInputs ci{}; ci.Sigma_target=s.Sigma0; ci.Tc=s.T.front();
+    ci.shear=ref.shear; ci.omega_z=ref.omega_z; ci.alpha=ref.alpha; ci.rho_mid_guess=1.0;
+    ci.n_nodes=N; ci.max_iters=300; ci.tol=1e-8;
+
+    // The oracle is only meaningful if the state actually HAS convective nodes.
+    int nconv=0;
+    for (int i=0;i<N;++i){
+        const double Pg=U[4*i+0], Q=U[4*i+1], T=U[4*i+2], z=U[4*i+3];
+        const double rho=std::max(rho_from_gas(Pg,T), RHO_GHOST_FLOOR);
+        const double Ptot=p_total(Pg,T);
+        const double kappa=kappa_total(lut, rho, T);
+        double nab; bool is_conv;
+        grrt::detail_bvp::convective_gradient(rho,T,Ptot,Q,kappa,z,ci.omega_z,nab,is_conv);
+        if (is_conv) ++nconv;
+    }
+    std::printf("  convective interior nodes: %d / %d\n", nconv, N);
+    if (nconv == 0) { std::printf("  FAIL: state has no convective nodes — oracle is vacuous\n"); failures++; return; }
+
+    // GATE: analytic coupled Jacobian must match the FD of the (convective) residual to
+    // the inherited-opacity floor — the SAME <4e-4 band the radiative round-trip meets.
+    const double fd_mism = coupled_jacobian_fd_mismatch(U, ci, lut);
+    std::printf("  analytic-vs-FD Jacobian mismatch on convective state = %.3e (expect <4e-4)\n", fd_mism);
+    if (!(fd_mism < 4.0e-4)) {
+        std::printf("  FAIL: coupled Jacobian is convection-blind (mismatch exceeds FD floor)\n"); failures++; }
+}
+
 int main(){
     test_coupled_repose_roundtrip();
     test_coupled_naive_seed_converges();
@@ -373,6 +427,7 @@ int main(){
     test_coupled_inconsistent_pair_converges();
     test_moments_eta3_onezone_limit();
     test_dC_dp_vs_resolve_oracle();
+    test_coupled_jacobian_convective_state();
     std::printf("\n## %d failure(s) ##\n", failures);
     return failures?1:0;
 }

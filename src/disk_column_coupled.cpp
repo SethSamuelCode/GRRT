@@ -122,7 +122,7 @@ static void coupled_column_jacobian(const std::vector<double>& U,
     struct NodeJac {
         double dP_dP, dP_dz, dP_dS;
         double dQ_dP, dQ_dT, dQ_dS, dQ_dfadv;
-        double dT_dP, dT_dQ, dT_dT, dT_dS;
+        double dT_dP, dT_dQ, dT_dT, dT_dS, dT_dz;
         double dz_dP, dz_dT, dz_dS;
     };
     const double fadv_inv = 1.0 / (1.0 + f_adv);
@@ -148,11 +148,33 @@ static void coupled_column_jacobian(const std::vector<double>& U,
         // dQ/dq = (as * P_tot /(1+f_adv)) * Sigma0/(2 rho).  ∂/∂f_adv = −1/(1+f_adv)·dQ/dq.
         //   = −fadv_inv² · as · P_tot · Sigma0/(2 rho).
         Jn.dQ_dfadv = -fadv_inv * fadv_inv * as * Ptot * Sigma0 / (2.0 * rho);
+        // dT/dq partials. Radiative form is analytic (rho cancels; no z-dependence).
+        // Where the node is CONVECTIVE, dT/dq follows the MLT cubic (z-dependent and a
+        // different function of (Pg,Q,T,Sigma0)); central-FD node_deriv's dT for THIS
+        // node so the Schur term matches the (convection-aware) residual by construction.
+        // Mirrors analytic_jacobian's split — gated by the FD oracle. node_deriv's dT is
+        // f_adv-INDEPENDENT (dT = dTdz·dz_dq, no f_adv), so the freed state f_adv is used.
         const double T3 = T*T*T;
-        Jn.dT_dQ = -3.0 * kappa * Sigma0 / (32.0 * sigma_SB * T3);
-        Jn.dT_dS = -3.0 * kappa * Q / (32.0 * sigma_SB * T3);
-        Jn.dT_dP = -3.0 * Q * Sigma0 / (32.0 * sigma_SB * T3) * dk_dP;
-        Jn.dT_dT = -3.0 * Q * Sigma0 / (32.0 * sigma_SB) * (dk_dT / T3 - 3.0 * kappa / (T3 * T));
+        double nabla_chk; bool is_conv;
+        grrt::detail_bvp::convective_gradient(rho, T, Ptot, Q, kappa, z, in.omega_z, nabla_chk, is_conv);
+        if (!is_conv) {
+            Jn.dT_dQ = -3.0 * kappa * Sigma0 / (32.0 * sigma_SB * T3);
+            Jn.dT_dS = -3.0 * kappa * Q / (32.0 * sigma_SB * T3);
+            Jn.dT_dP = -3.0 * Q * Sigma0 / (32.0 * sigma_SB * T3) * dk_dP;
+            Jn.dT_dT = -3.0 * Q * Sigma0 / (32.0 * sigma_SB) * (dk_dT / T3 - 3.0 * kappa / (T3 * T));
+            Jn.dT_dz = 0.0;
+        } else {
+            auto dTdq = [&](double Pg_, double Q_, double T_, double z_, double S_) {
+                return node_deriv(Pg_, Q_, T_, z_, S_, in.alpha, in.shear, in.omega_z, f_adv, op).dT;
+            };
+            const double hP=1e-6*std::max(std::abs(Pg),1e-300), hQ=1e-6*std::max(std::abs(Q),1e-300);
+            const double hT=1e-6*std::max(T,1.0), hz=1e-6*std::max(std::abs(z),1e-300), hS=1e-6*std::max(Sigma0,1e-300);
+            Jn.dT_dP = (dTdq(Pg+hP,Q,T,z,Sigma0)-dTdq(Pg-hP,Q,T,z,Sigma0))/(2*hP);
+            Jn.dT_dQ = (dTdq(Pg,Q+hQ,T,z,Sigma0)-dTdq(Pg,Q-hQ,T,z,Sigma0))/(2*hQ);
+            Jn.dT_dT = (dTdq(Pg,Q,T+hT,z,Sigma0)-dTdq(Pg,Q,T-hT,z,Sigma0))/(2*hT);
+            Jn.dT_dz = (dTdq(Pg,Q,T,z+hz,Sigma0)-dTdq(Pg,Q,T,z-hz,Sigma0))/(2*hz);
+            Jn.dT_dS = (dTdq(Pg,Q,T,z,Sigma0+hS)-dTdq(Pg,Q,T,z,Sigma0-hS))/(2*hS);
+        }
         Jn.dz_dP = -Sigma0 / (2.0 * rho*rho) * drho_dP;
         Jn.dz_dT = -Sigma0 / (2.0 * rho*rho) * drho_dT;
         Jn.dz_dS = 1.0 / (2.0 * rho);
@@ -210,6 +232,8 @@ static void coupled_column_jacobian(const std::vector<double>& U,
             at(r, cj+0) += -half_dq * jj.dT_dP;
             at(r, cj+1) += -half_dq * jj.dT_dQ;
             at(r, cj+2) += -half_dq * jj.dT_dT;
+            at(r, ci+3) += -half_dq * ji.dT_dz;
+            at(r, cj+3) += -half_dq * jj.dT_dz;
             at(r, cS)   += -half_dq * (ji.dT_dS + jj.dT_dS);
         }
         // --- R_z row ---
