@@ -3,6 +3,8 @@
 #include "../src/opacity.cpp"
 #include "../src/disk_column_bvp.cpp"
 #include "../src/disk_column_coupled.cpp"
+#include "../src/slim_disk_radial.cpp"
+#include "../src/slim_disk_coupled.cpp"
 #include <cstdio>
 #include <cmath>
 using namespace grrt;
@@ -420,6 +422,25 @@ static void test_coupled_jacobian_convective_state() {
         std::printf("  FAIL: coupled Jacobian is convection-blind (mismatch exceeds FD floor)\n"); failures++; }
 }
 
+// Mass-conservation Σ<->V round-trip. The inverse must be exact.
+static void test_massconsv_roundtrip() {
+    std::printf("\n=== C2: mass-conservation Σ<->V round-trip ===\n");
+    SlimDiskInputs in{};
+    in.mass = 1.0; in.spin = 0.9; in.r_g = 1.48e6;
+    in.mdot = 1.6399e16;  // f_Edd=0.001 scale
+    const double rs[]  = {2.27, 5.0, 20.0, 50.0};
+    const double Sig[] = {1.0e2, 5.0e3, 1.2e4, 6.0e3};
+    bool any_fail = false;
+    for (double r : rs) for (double S : Sig) {
+        const double V  = grrt::slim_coupled_detail::V_from_sigma(in, r, S);
+        const double S2 = grrt::slim_coupled_detail::sigma_from_V(in, r, V);
+        const double rel = std::abs(S2 - S) / S;
+        std::printf("  r=%.2f Σ=%.3e -> V=%.3e -> Σ'=%.3e  rel=%.2e\n", r, S, V, S2, rel);
+        if (!(rel < 1e-10)) any_fail = true;
+    }
+    if (any_fail) { std::printf("  FAIL: round-trip exceeds 1e-10\n"); failures++; }
+}
+
 int main(){
     test_coupled_repose_roundtrip();
     test_coupled_naive_seed_converges();
@@ -428,6 +449,7 @@ int main(){
     test_moments_eta3_onezone_limit();
     test_dC_dp_vs_resolve_oracle();
     test_coupled_jacobian_convective_state();
+    test_massconsv_roundtrip();
     std::printf("\n## %d failure(s) ##\n", failures);
     return failures?1:0;
 }

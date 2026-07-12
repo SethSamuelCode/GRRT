@@ -293,7 +293,8 @@ int main() {
     // max_iters per coupled relax (the relax loop's own iteration cap).
     const int kMaxIters = 160;
 
-    ColumnOpts copt;             // n_z=24, 300 column iters, tol 1e-8 (bring-up defaults)
+    ColumnOpts copt;             // bring-up defaults (300 column iters, tol 1e-8)
+    copt.n_z = 96;               // DIAGNOSTIC: n_z=24 undercounts column capacity 2-4x (nz-refine study) — test at 96
     const double r_isco = slim_detail::isco_prograde(in_base.mass, in_base.spin);
 
     std::printf("# =====================================================================\n");

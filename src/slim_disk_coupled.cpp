@@ -41,6 +41,28 @@ using slim_detail::kerr_A;
 using slim_detail::ell_kepler;
 using slim_detail::isco_prograde;
 
+// Mass conservation:  Ṁ = 2πΣ|V|√Δ·r_g·c / √(1−V²).
+// Forward (Σ→V): mirrors build_slim_disk_seed's Vfrom (returns V<0 inflow).
+static double V_from_sigma(const SlimDiskInputs& in, double r, double Sigma) {
+    using namespace constants;
+    const double sqrtD = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r), 0.0));
+    const double dn = 2.0 * std::numbers::pi * Sigma * sqrtD * in.r_g * c_cgs;
+    if (!(dn > 0.0)) return -1e-12;
+    const double X = -in.mdot / dn;
+    double V = X / std::sqrt(1.0 + X*X);
+    if (!(V < 0.0)) V = -1e-12;
+    return std::clamp(V, -0.9999, -1e-12);
+}
+// Inverse (V→Σ):  Σ = Ṁ√(1−V²) / (2π|V|√Δ·r_g·c).   (verified vs Vfrom)
+static double sigma_from_V(const SlimDiskInputs& in, double r, double V) {
+    using namespace constants;
+    const double sqrtD = std::sqrt(std::max(kerr_delta(in.mass, in.spin, r), 0.0));
+    const double aV = std::abs(V);
+    if (!(aV > 0.0) || !(sqrtD > 0.0)) return 0.0;
+    return in.mdot * std::sqrt(std::max(1.0 - V*V, 0.0))
+         / (2.0 * std::numbers::pi * aV * sqrtD * in.r_g * c_cgs);
+}
+
 // Per-node column closure cache entry: the converged augmented column state U_c
 // (length 4*n_z+4), warm-started across radial iterations + FD perturbations so each
 // node's column converges in a few polish steps.  Keyed by node index.

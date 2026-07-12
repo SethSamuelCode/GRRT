@@ -407,3 +407,22 @@ target_include_directories(slim-sonic-sigma-probe PRIVATE include/ ${CMAKE_BINAR
 add_executable(slim-convection-verify-probe tools/slim_convection_verify_probe.cpp)
 target_include_directories(slim-convection-verify-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 
+# BASE-INFEASIBLE per-node CLASSIFIER probe (DELETABLE, diagnostic): at f_Edd=0.001 a=0.9,
+# classifies EACH failing radial node's column as H1 (seed-placement: Σ above the column's
+# Σ0 capacity, no reachable column) vs H2 (solver-robustness: a feasible column exists near
+# the target but the direct solve cannot reach it) — via the Σ0-capacity ratio + a fine
+# continuation from a known-feasible anchor, plus a convective/chatter landscape.  Same
+# include-the-.cpp consumer order as the walk probe; does NOT link grrt.  Safe to delete
+# along with tools/slim_base_classify_probe.cpp.
+add_executable(slim-base-classify-probe tools/slim_base_classify_probe.cpp)
+target_include_directories(slim-base-classify-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# n_z-REFINEMENT + MULTI-START disambiguator probe (DELETABLE, diagnostic): resolves the
+# three-way ambiguity (H1 physical Σ-wall / ARTIFACT n_z=24 resolution / H2-basin solver)
+# behind the base-infeasible wall at f_Edd=0.001 a=0.9.  Part 1 re-ratios the Σ0 capacity
+# at n_z=96; Part 2 walks Σ0_max + direct target-Σ solve across n_z {24,48,96}; Part 3
+# multi-starts solve_column_coupled at the pinned demanded Σ.  Same include-the-.cpp order
+# as the base-classify probe; does NOT link grrt.  Delete with tools/slim_nz_refine_probe.cpp.
+add_executable(slim-nz-refine-probe tools/slim_nz_refine_probe.cpp)
+target_include_directories(slim-nz-refine-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
