@@ -145,6 +145,58 @@ static inline double shear_cgs(const SlimDiskInputs& in, double r_i, double Om_i
     return std::abs(r_dOmega_dr) * (constants::c_cgs / in.r_g);  // [1/s]
 }
 
+// Lever C — transonic-Σ seed for the coupled relax. Drop-in for
+// build_thin_disk_seed(in,op) in the coupled seed path. Returns the standard
+// 4N+2 packed radial state ([Σ,V,ℓ,T_c]×N, tail ℓ_in, r_s).
+std::vector<double> build_transonic_coupled_seed(const SlimDiskInputs& in,
+                                                 const OpacityLUTs& op,
+                                                 const ColumnOpts& copt) {
+    using namespace constants;
+    using grrt::slim_detail::one_zone_closure;
+    using grrt::slim_detail::omega_from_ell;
+    // 1) Grid, ℓ(r), r_s from the thin seed.
+    std::vector<double> U = build_thin_disk_seed(in, op);
+    const int N = std::max(in.n_nodes, 4);
+    const double r_s = U[4*N+1];
+    const double lr0 = std::log(r_s), lr1 = std::log(in.r_out);
+    std::vector<double> r(N), Om(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = (N==1)?0.0:double(i)/double(N-1);
+        r[i]  = std::exp(lr0 + (lr1-lr0)*t);
+        Om[i] = omega_from_ell(in.mass, in.spin, r[i], U[4*i+2]);
+    }
+    // 2) Sonic anchor: |V(r_s)| = c_s/c from the thin-seed (Σ,T_c) at node 0.
+    const double cs0 = one_zone_closure(std::max(U[0],1e2), std::max(U[3],1.0), r_s, in, op).c_s;
+    const double Vsonic = -std::clamp(cs0 / c_cgs, 1e-6, 0.9999);
+    // 3) Far-field subsonic target |V| from the thin seed at the outer node.
+    const double Vout = -std::max(std::abs(U[4*(N-1)+1]), 1e-12);
+    // 4) Monotone ln|V| interp r_s->r_out; Σ from mass conservation.
+    for (int i = 0; i < N; ++i) {
+        const double t = (N==1)?0.0:double(i)/double(N-1);
+        const double lnV = std::log(std::abs(Vsonic))
+                         + (std::log(std::abs(Vout)) - std::log(std::abs(Vsonic))) * t;
+        double Vi = std::clamp(-std::exp(lnV), -0.9999, -1e-12);
+        double Sig = std::max(sigma_from_V(in, r[i], Vi), 1e2);
+        U[4*i+0] = Sig;
+        U[4*i+1] = V_from_sigma(in, r[i], Sig);   // re-derive V from the clamped Σ (consistency)
+    }
+    // 5) T_c on the f_adv≈0 manifold at each node's (Σ, geometry).
+    for (int i = 0; i < N; ++i) {
+        const int j = (i+1<N)?i+1:i-1;
+        const double shear_i  = shear_cgs(in, r[i], Om[i], r[j], Om[j]);
+        const double omegaz_i = omega_perp_cgs(in, r[i]);
+        const OneZoneState oz = one_zone_closure(U[4*i+0], std::max(U[4*i+3],1.0), r[i], in, op);
+        ColumnCoupledInputs ci{};
+        ci.Sigma_target=U[4*i+0]; ci.Tc=std::max(U[4*i+3],1.0);
+        ci.shear=std::max(shear_i,1e-300); ci.omega_z=std::max(omegaz_i,1e-300);
+        ci.alpha=in.alpha; ci.rho_mid_guess=std::max(oz.rho_mid,1e-30);
+        ci.n_nodes=copt.n_z; ci.max_iters=copt.max_iter; ci.tol=copt.tol; ci.Teff_guess=0.0;
+        std::vector<double> Uc;
+        if (build_coupled_seed(ci, op, Uc)) U[4*i+3] = std::max(Uc[2], 1.0);
+    }
+    return U;
+}
+
 // Solve the per-node column closure at (Σ_i, T_c,i, r_i) and pack a CoupledNode with H
 // rerouted to z0 and (F, η3, η4, f_adv) from the column.  Warm-starts from the cached
 // converged column state for node i (if any), then refreshes the cache on success.

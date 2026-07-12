@@ -424,7 +424,7 @@ static void test_coupled_jacobian_convective_state() {
 
 // Mass-conservation Σ<->V round-trip. The inverse must be exact.
 static void test_massconsv_roundtrip() {
-    std::printf("\n=== C2: mass-conservation Σ<->V round-trip ===\n");
+    std::printf("\n=== LC1: mass-conservation Σ<->V round-trip ===\n");
     SlimDiskInputs in{};
     in.mass = 1.0; in.spin = 0.9; in.r_g = 1.48e6;
     in.mdot = 1.6399e16;  // f_Edd=0.001 scale
@@ -441,6 +441,36 @@ static void test_massconsv_roundtrip() {
     if (any_fail) { std::printf("  FAIL: round-trip exceeds 1e-10\n"); failures++; }
 }
 
+// LC2: transonic seed structure — node 0 at Mach 1, |V| monotone-declining outward.
+static void test_transonic_seed_structure() {
+    std::printf("\n=== LC2: transonic coupled seed structure ===\n");
+    auto op = build_opacity_luts(1e-14, 1e6, 3000.0, 1e8);
+    SlimDiskInputs in{};
+    in.mass=1.0; in.spin=0.9; in.alpha=0.1; in.r_g=1.48e6; in.r_out=50.0;
+    in.n_nodes=18; in.tol=1e-8;
+    in.r_in = 0.5 * grrt::slim_detail::isco_prograde(in.mass, in.spin);
+    in.mdot = 1.6399e16;  // f_Edd=0.001
+    grrt::slim_coupled_detail::ColumnOpts copt; copt.n_z = 96;
+    std::vector<double> U =
+        grrt::slim_coupled_detail::build_transonic_coupled_seed(in, op, copt);
+    const int N = std::max(in.n_nodes, 4);
+    if ((int)U.size() < 4*N+2) { std::printf("  FAIL: wrong state size\n"); failures++; return; }
+    const double r_s = U[4*N+1];
+    const double V0 = U[4*0+1], S0 = U[4*0+0], T0 = U[4*0+3];
+    const double cs = grrt::slim_detail::one_zone_closure(S0, T0, r_s, in, op).c_s;
+    const double mach0 = std::abs(V0) / (cs / constants::c_cgs);
+    std::printf("  r_s=%.4f  |V0|=%.4e  c_s/c=%.4e  Mach0=%.3f\n",
+                r_s, std::abs(V0), cs/constants::c_cgs, mach0);
+    bool ok = (mach0 > 0.7 && mach0 < 1.4);
+    double prevV = std::abs(U[1]);
+    for (int i = 1; i < N; ++i) {
+        const double Vi = std::abs(U[4*i+1]);
+        if (Vi > prevV*1.001) { std::printf("  FAIL: |V| not monotone at i=%d\n", i); ok=false; }
+        prevV = Vi;
+    }
+    if (!ok) { std::printf("  FAIL: transonic structure invalid\n"); failures++; }
+}
+
 int main(){
     test_coupled_repose_roundtrip();
     test_coupled_naive_seed_converges();
@@ -450,6 +480,7 @@ int main(){
     test_dC_dp_vs_resolve_oracle();
     test_coupled_jacobian_convective_state();
     test_massconsv_roundtrip();
+    test_transonic_seed_structure();
     std::printf("\n## %d failure(s) ##\n", failures);
     return failures?1:0;
 }
