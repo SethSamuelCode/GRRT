@@ -471,6 +471,48 @@ static void test_transonic_seed_structure() {
     if (!ok) { std::printf("  FAIL: transonic structure invalid\n"); failures++; }
 }
 
+// =============================================================================
+// (MS1) Multi-start converges a basin-miss column. Pins a previously-failing inner
+// node (a full256 failure whose Σ demand sits above the f_adv=0 grey Σ0 ceiling, so
+// only the 2-D f_adv-freeing bring-up can reach it — and it misses its basin from
+// the single default starting guess). The multi-start retry must converge it at the
+// SAME pinned (Σ, T_c). Asserts convergence.
+// =============================================================================
+static void test_multistart_converges_basin_miss() {
+    std::printf("\n=== MS1: multi-start converges a basin-miss column ===\n");
+    auto op = build_opacity_luts(1e-14,1e6,3000.0,1e8);
+    SlimDiskInputs in{}; in.mass=1.0; in.spin=0.9; in.alpha=0.1; in.r_g=1.48e6; in.r_out=50.0;
+    in.n_nodes=18; in.tol=1e-8; in.r_in=0.5*grrt::slim_detail::isco_prograde(in.mass,in.spin);
+    in.mdot=1.6399e16;
+    std::vector<double> U = build_thin_disk_seed(in, op);
+    // Node SWAP (spec caveat): the spec's node 3 (r≈3.92) is NOT a basin miss in this
+    // unit harness — its default 2-D seed already lands the basin (primary Newton
+    // converged=1 in 1 iter), so it is trivially green and cannot exhibit the red state.
+    // Node 4 (r≈4.71) is node 3's immediate inner neighbour and IS a genuine basin miss:
+    // its thin-seed pin Σ≈1.53e4 sits ABOVE the f_adv=0 grey Σ0 ceiling (~few×10³), so
+    // build_coupled_seed returns false (Σ0-match gate) and the Σ-continuation fresh-anchor
+    // cannot even build; the only path is the 2-D f_adv-freeing bring-up, which misses its
+    // basin from the single default guess → the CURRENT code returns converged=0 (verified
+    // pre-implementation). The pin is REACHABLE (a self-consistent thin-seed (Σ,T_c) pair),
+    // so basin entry is the sole obstacle — exactly what the multi-start cures.
+    const int N=std::max(in.n_nodes,4); const int i=4;                 // r≈4.71, a genuine basin miss
+    const double r_s=U[4*N+1], lr0=std::log(r_s), lr1=std::log(in.r_out);
+    const double t=double(i)/double(N-1); const double ri=std::exp(lr0+(lr1-lr0)*t);
+    const int j=i+1; const double tj=double(j)/double(N-1); const double rj=std::exp(lr0+(lr1-lr0)*tj);
+    const double Omi=grrt::slim_detail::omega_from_ell(in.mass,in.spin,ri,U[4*i+2]);
+    const double Omj=grrt::slim_detail::omega_from_ell(in.mass,in.spin,rj,U[4*j+2]);
+    ColumnCoupledInputs ci{};
+    ci.Sigma_target=std::max(U[4*i+0],1e2); ci.Tc=std::max(U[4*i+3],1.0);
+    ci.shear=std::max(grrt::slim_coupled_detail::shear_cgs(in,ri,Omi,rj,Omj),1e-300);
+    ci.omega_z=std::max(grrt::slim_coupled_detail::omega_perp_cgs(in,ri),1e-300);
+    ci.alpha=in.alpha;
+    ci.rho_mid_guess=std::max(grrt::slim_detail::one_zone_closure(ci.Sigma_target,ci.Tc,ri,in,op).rho_mid,1e-30);
+    ci.n_nodes=96; ci.max_iters=300; ci.tol=1e-8; ci.Teff_guess=0.0;
+    const bool ok = solve_column_coupled(ci, op, nullptr).converged;
+    std::printf("  node %d r=%.3f Σ=%.3e Tc=%.3e -> converged=%d\n", i, ri, ci.Sigma_target, ci.Tc, ok);
+    if (!ok) { std::printf("  FAIL: multi-start did not converge the basin-miss node\n"); failures++; }
+}
+
 int main(){
     test_coupled_repose_roundtrip();
     test_coupled_naive_seed_converges();
@@ -481,6 +523,7 @@ int main(){
     test_coupled_jacobian_convective_state();
     test_massconsv_roundtrip();
     test_transonic_seed_structure();
+    test_multistart_converges_basin_miss();
     std::printf("\n## %d failure(s) ##\n", failures);
     return failures?1:0;
 }

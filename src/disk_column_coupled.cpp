@@ -1063,6 +1063,63 @@ GRRT_EXPORT ColumnClosure solve_column_coupled(const ColumnCoupledInputs& in,
         }
     }
 
+    // --- Fallback (COLD MULTI-START of the 2-D bring-up): entered ONLY on primary-solve
+    //     failure. Scattered inner radial nodes fail the column solve as a solver-BASIN
+    //     MISS (proven non-physical: the failing radii MOVE when the radial grid is
+    //     re-gridded N=18→32). Such a node demands Σ ABOVE the f_adv=0 grey column's
+    //     saturating Σ0 ceiling (~few×10³), so it has NO f_adv=0 root — build_coupled_seed
+    //     honestly returns false (its Σ0-match gate) and the Σ-continuation fresh-anchor
+    //     below cannot even be built. The only path to that (Σ,T_c) is the 2-D
+    //     (T_eff,f_adv)-freeing bring-up (build_coupled_seed_2d) — which misses its basin
+    //     from its single DEFAULT starting guess at these scattered nodes. Retry the SAME
+    //     cold 2-D bring-up from a bounded spread of ONLY the starting-guess fields
+    //     build_coupled_seed_2d reads: Teff_guess and rho_mid_guess. (build_coupled_seed_2d
+    //     hard-starts f_adv=0 and reads no initial f_adv, so f_adv is NOT a knob here.)
+    //     Vary a MUTABLE COPY of the inputs (in2) — never the const `in` — so the pinned
+    //     Σ_target and T_c stay IDENTICAL to the primary solve: only WHICH basin the SAME
+    //     (Σ,T_c) root is approached from changes, so this can never converge a different
+    //     column. First converged wins; ≤12 tries; on exhaustion fall through to the
+    //     existing Σ-continuation UNCHANGED. Because it is entered only on failure, the
+    //     healthy (already-converging) path is bit-identical.
+    if (!converged) {
+        ColumnCoupledInputs in2 = in;   // mutable copy; the const `in` is never mutated
+        const double Te_def  = (in.Teff_guess > 0.0) ? in.Teff_guess
+                                                     : estimate_Teff_guess(in, op);
+        const double rho_def = in.rho_mid_guess;
+        // "build the 2-D seed from in2 → polish with the SAME augmented Newton (against the
+        // ORIGINAL pins `in`) → return on convergence" — the exact cold-path calls reused,
+        // not reimplemented. The Newton reads only the pins/physics (Σ_target, T_c, shear,
+        // ω_z, α), NOT the seed knobs, so polishing against `in` fixes the converged column
+        // to the original (Σ,T_c); in2 only steers seed construction.
+        auto try_seed_and_polish = [&](double te_mult, double rho_mult) -> bool {
+            in2.Teff_guess    = Te_def  * te_mult;
+            in2.rho_mid_guess = std::max(rho_def * rho_mult, 1e-30);
+            std::vector<double> Ums;
+            if (!build_coupled_seed_2d(in2, op, Ums)) return false;
+            int itms = 0;
+            if (!affine_invariant_newton(Ums, in, op, &itms)) return false;
+            U.swap(Ums);
+            converged = true;
+            std::printf("  [coupled] cold multi-start (2-D bring-up): converged=1"
+                        " (Teff x%.3g, rho x%.3g) in %d polish iters\n",
+                        te_mult, rho_mult, itms);
+            return true;
+        };
+        // Starting-guess spread. Teff_guess is the dominant knob (the grey column's Σ0 is a
+        // single-valued saturating function of T_eff), so sweep it first at the default rho,
+        // then add rho_mid_guess variations. The default (x1,x1) combo is omitted — the cold
+        // path already built (and, where merit-selected, polished) exactly that 2-D seed.
+        struct MSCombo { double te, rho; };
+        static constexpr MSCombo MS_COMBOS[] = {
+            {0.5, 1.0}, {2.0, 1.0}, {0.25, 1.0}, {4.0, 1.0},
+            {1.0, 0.3}, {1.0, 3.0}, {0.5, 0.3},  {2.0, 3.0},
+            {0.5, 3.0}, {2.0, 0.3}, {0.25, 0.3}, {4.0, 3.0},
+        };  // 12 combos (the ≤12 cap); first converged wins
+        for (const auto& cb : MS_COMBOS) {
+            if (try_seed_and_polish(cb.te, cb.rho)) break;
+        }
+    }
+
     // --- Fallback: (Σ,T_c) continuation from a CONSISTENT anchor (rarely needed; the
     //     augmented system is balanced and should converge directly). ---
     auto try_continuation = [&](const std::vector<double>& Uref,
