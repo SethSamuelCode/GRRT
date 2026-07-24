@@ -513,6 +513,43 @@ static void test_multistart_converges_basin_miss() {
     if (!ok) { std::printf("  FAIL: multi-start did not converge the basin-miss node\n"); failures++; }
 }
 
+// AS1: advective seed builds a reachable T_c where f_adv=0 has none (node 10 geometry).
+// (Namespace note: build_coupled_seed[_advective], ColumnCoupledInputs, solve_column_coupled
+//  and build_thin_disk_seed live in namespace grrt (used bare via `using namespace grrt`);
+//  only shear_cgs/omega_perp_cgs are in grrt::slim_coupled_detail — matching MS1's style.)
+static void test_advective_seed_high_sigma() {
+    std::printf("\n=== AS1: advective seed-T_c for a high-Σ node ===\n");
+    auto op = build_opacity_luts(1e-14,1e6,3000.0,1e8);
+    SlimDiskInputs in{}; in.mass=1.0; in.spin=0.9; in.alpha=0.1; in.r_g=1.48e6; in.r_out=50.0;
+    in.n_nodes=18; in.tol=1e-8; in.r_in=0.5*grrt::slim_detail::isco_prograde(in.mass,in.spin);
+    in.mdot=1.6399e16;
+    std::vector<double> U = build_thin_disk_seed(in, op);
+    const int N=std::max(in.n_nodes,4); const int i=10;                 // r≈14.0, the full256 holdout
+    const double r_s=U[4*N+1], lr0=std::log(r_s), lr1=std::log(in.r_out);
+    const double t=double(i)/double(N-1); const double ri=std::exp(lr0+(lr1-lr0)*t);
+    const int j=i+1; const double tj=double(j)/double(N-1); const double rj=std::exp(lr0+(lr1-lr0)*tj);
+    const double Omi=grrt::slim_detail::omega_from_ell(in.mass,in.spin,ri,U[4*i+2]);
+    const double Omj=grrt::slim_detail::omega_from_ell(in.mass,in.spin,rj,U[4*j+2]);
+    ColumnCoupledInputs ci{};
+    ci.Sigma_target=std::max(U[4*i+0],1e2); ci.Tc=std::max(U[4*i+3],1.0);   // thin Tc (stale)
+    ci.shear=std::max(grrt::slim_coupled_detail::shear_cgs(in,ri,Omi,rj,Omj),1e-300);
+    ci.omega_z=std::max(grrt::slim_coupled_detail::omega_perp_cgs(in,ri),1e-300);
+    ci.alpha=in.alpha;
+    ci.rho_mid_guess=std::max(grrt::slim_detail::one_zone_closure(ci.Sigma_target,ci.Tc,ri,in,op).rho_mid,1e-30);
+    ci.n_nodes=96; ci.max_iters=300; ci.tol=1e-8; ci.Teff_guess=0.0;
+    std::vector<double> U0, Ua;
+    const bool ok0 = build_coupled_seed(ci, op, U0);
+    const bool oka = build_coupled_seed_advective(ci, op, Ua);
+    std::printf("  build_coupled_seed(f_adv=0)=%d  advective=%d\n", ok0, oka);
+    if (!oka) { std::printf("  FAIL: advective seed did not build\n"); failures++; return; }
+    const int Na=ci.n_nodes; const double Tc_adv=std::max(Ua[2],1.0), fadv=Ua[4*Na+3];
+    std::printf("  advective seed: T_c=%.3e  f_adv=%.3f\n", Tc_adv, fadv);
+    ColumnCoupledInputs cj=ci; cj.Tc=Tc_adv;
+    const bool okc = solve_column_coupled(cj, op, nullptr).converged;
+    std::printf("  solve at (Σ,T_c_adv) converged=%d\n", okc);
+    if (!(fadv>0.0 && Tc_adv>3.0e6 && okc)) { std::printf("  FAIL: advective seed not usable\n"); failures++; }
+}
+
 int main(){
     test_coupled_repose_roundtrip();
     test_coupled_naive_seed_converges();
@@ -524,6 +561,7 @@ int main(){
     test_massconsv_roundtrip();
     test_transonic_seed_structure();
     test_multistart_converges_basin_miss();
+    test_advective_seed_high_sigma();
     std::printf("\n## %d failure(s) ##\n", failures);
     return failures?1:0;
 }

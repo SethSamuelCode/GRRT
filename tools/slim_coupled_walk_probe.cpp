@@ -199,8 +199,8 @@ static int calibrate_seed_to_manifold(std::vector<double>& U, const SlimDiskInpu
         // solving f_adv), so it returns the GREY Tc, not the manifold — a calibration no-op
         // (audit Bug #1).
         std::vector<double> Uc;
-        if (build_coupled_seed(ci, op, Uc)) {
-            U[4 * i + 3] = Uc[2];   // manifold midplane T_c (f_adv≈0 root)
+        if (build_coupled_seed(ci, op, Uc) || build_coupled_seed_advective(ci, op, Uc)) {
+            U[4 * i + 3] = Uc[2];   // manifold midplane T_c (f_adv≈0 or advective root)
             ++n_ok;
             // Verify the RELAX's own function converges at the calibrated Tc (same rho_mid).
             ColumnCoupledInputs cv = ci; cv.Tc = U[4 * i + 3];

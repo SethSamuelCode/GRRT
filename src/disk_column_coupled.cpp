@@ -518,6 +518,94 @@ static bool build_coupled_seed(const ColumnCoupledInputs& in, const OpacityLUTs&
     return true;
 }
 
+// f_adv-laddered sibling of build_coupled_seed. For advective (high-Σ) inner nodes the
+// f_adv=0 grey column's Σ0 SATURATES (few×10³ g/cm²) below the disk's demanded Σ_target
+// (~1.5e4), so build_coupled_seed honestly returns false (its Σ0-match gate) and the seed-
+// T_c callers fall back to a stale, unreachable cold thin T_c. Freeing f_adv > 0 lifts the
+// Σ0 ceiling (advection carries energy off ⇒ a hotter, thinner-but-Σ-matchable column), so
+// the SAME T_eff-secant + Σ0-match + packing run at a small f_adv ladder DOES land a Σ-
+// matched column, whose OWN midplane T(0) is the reachable seed T_c (never pinned). We take
+// the SMALLEST f_adv on the ladder that Σ0-matches (the least-advective feasible column).
+//
+// This deliberately DUPLICATES build_coupled_seed's secant (rather than refactoring a shared
+// helper) so build_coupled_seed's f_adv=0 behavior stays byte-identical. The only physics
+// difference is `fa` substituted for the hard 0.0 in base_inputs_from and packed into
+// U[4N+3]. Same SIGMA_SEED_BAND=0.30 honest-match gate. Returns false if NO ladder rung Σ0-
+// matches (the caller then falls through — no fabricated column).
+static bool build_coupled_seed_advective(const ColumnCoupledInputs& in, const OpacityLUTs& op,
+                                         std::vector<double>& U) {
+    const int N = in.n_nodes;
+    constexpr double SIGMA_SEED_BAND = 0.30;  // same honest Σ0-match band as build_coupled_seed
+
+    for (double fa : {0.5, 1.0, 2.0, 4.0}) {
+        auto sigma_of = [&](double Te, ColumnBVPSolution& sout) -> double {
+            ColumnInputs b = base_inputs_from(in, Te, fa);
+            sout = solve_column_bvp(b, op);
+            return sout.converged ? sout.Sigma0 : -1.0;
+        };
+
+        const double Te0_guess = (in.Teff_guess > 0.0) ? in.Teff_guess
+                                                       : estimate_Teff_guess(in, op);
+        ColumnBVPSolution s0, s1, sbest;
+        double T0 = Te0_guess;
+        double f0 = sigma_of(T0, s0) - in.Sigma_target;
+        if (!s0.converged) {
+            bool ok = false;
+            for (double m : {0.5, 2.0, 0.25, 4.0, 0.1, 10.0}) {
+                T0 = Te0_guess * m;
+                f0 = sigma_of(T0, s0) - in.Sigma_target;
+                if (s0.converged) { ok = true; break; }
+            }
+            if (!ok) continue;   // this f_adv rung cannot even bring up; try the next
+        }
+        double T1 = T0 * 1.2;
+        double f1 = sigma_of(T1, s1) - in.Sigma_target;
+        if (!s1.converged) { T1 = T0 * 0.8; f1 = sigma_of(T1, s1) - in.Sigma_target; }
+        if (!s1.converged) continue;
+
+        sbest = (std::abs(f1) < std::abs(f0)) ? s1 : s0;
+        double Te_best = (std::abs(f1) < std::abs(f0)) ? T1 : T0;
+        const double sig_tol = 1e-10 * in.Sigma_target;
+
+        for (int k = 0; k < 40; ++k) {
+            if (std::abs(f1) < sig_tol) break;
+            double denom = (f1 - f0);
+            double T2 = (std::abs(denom) > 0.0) ? T1 - f1 * (T1 - T0) / denom : T1;
+            if (!(T2 > 0.0)) T2 = 0.5 * (T0 + T1);
+            ColumnBVPSolution s2;
+            double f2 = sigma_of(T2, s2) - in.Sigma_target;
+            if (!s2.converged) {
+                T2 = 0.5 * (T1 + T2);
+                f2 = sigma_of(T2, s2) - in.Sigma_target;
+                if (!s2.converged) break;
+            }
+            T0 = T1; f0 = f1; T1 = T2; f1 = f2;
+            if (std::abs(f1) < std::abs(sbest.Sigma0 - in.Sigma_target) || !sbest.converged) {
+                sbest = s2; Te_best = T2;
+            }
+        }
+        if (!sbest.converged) continue;
+
+        // Same honest Σ0-match gate as build_coupled_seed: reject unless the packed profile's
+        // OWN Σ0 matches the pinned target to the basin-width band. If this rung misses, a
+        // larger f_adv (higher Σ0 ceiling) may match — try the next rung.
+        if (!(std::abs(sbest.Sigma0 - in.Sigma_target) <= SIGMA_SEED_BAND * in.Sigma_target))
+            continue;
+
+        U.assign(4*N + 4, 0.0);
+        for (int i = 0; i < N; ++i) {
+            U[4*i+0] = sbest.P_gas[i]; U[4*i+1] = sbest.Q[i];
+            U[4*i+2] = sbest.T[i];     U[4*i+3] = sbest.z[i];
+        }
+        U[4*N]   = sbest.z0;          // z0
+        U[4*N+1] = in.Sigma_target;   // Σ0 pinned at target
+        U[4*N+2] = Te_best;           // T_eff (the Σ0-matched value at this f_adv)
+        U[4*N+3] = fa;                // the advected fraction this seed was built at
+        return true;                  // SMALLEST Σ0-matching f_adv wins
+    }
+    return false;
+}
+
 // Build the augmented seed by a 2-D (T_eff, f_adv) BRING-UP that mirrors the independent
 // slim_fadv_freedom_probe: outer Newton on the 2×2 map (T_eff, f_adv) → (T_c, Σ) with the
 // base solve_column_bvp as the inner column solver, so the inner 4N+2 block residual is
