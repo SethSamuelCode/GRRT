@@ -294,7 +294,7 @@ int main() {
     const int kMaxIters = 160;
 
     ColumnOpts copt;             // bring-up defaults (300 column iters, tol 1e-8)
-    copt.n_z = 96;               // DIAGNOSTIC: n_z=24 undercounts column capacity 2-4x (nz-refine study) — test at 96
+    copt.n_z = 256;              // reliable 18/18-feasible seed (n_z=96 only 15/18; stretched grid shelved 2026-07-24)
     const double r_isco = slim_detail::isco_prograde(in_base.mass, in_base.spin);
 
     std::printf("# =====================================================================\n");

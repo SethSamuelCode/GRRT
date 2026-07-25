@@ -350,6 +350,24 @@ target_include_directories(slim-coupled-nt-probe PRIVATE include/ ${CMAKE_BINARY
 # tools/slim_coupled_walk_probe.cpp.
 add_executable(slim-coupled-walk-probe tools/slim_coupled_walk_probe.cpp)
 target_include_directories(slim-coupled-walk-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+# The per-node coupled column solves in slim_disk_coupled.cpp are OpenMP-parallelized;
+# this include-the-.cpp probe needs /openmp on ITS OWN target (it does NOT link grrt, so
+# it does not inherit the library's OpenMP link).  MSVC: OpenMP::OpenMP_CXX adds /openmp.
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(slim-coupled-walk-probe PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+# OpenMP parallel==serial CORRECTNESS GATE for the coupled per-node column solves.
+# Builds the coupled residual R and reduced Jacobian J at a feasible (manifold-calibrated)
+# base point once SERIAL (1 thread) and once PARALLEL (max threads) and asserts they match
+# to FP tolerance AND are deterministic (two parallel builds agree); then times a Jacobian
+# build serial vs parallel.  Same include-the-.cpp consumer order as the walk probe; needs
+# /openmp on THIS target.  Safe to delete along with tools/slim_omp_gate_probe.cpp.
+add_executable(slim-omp-gate-probe tools/slim_omp_gate_probe.cpp)
+target_include_directories(slim-omp-gate-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(slim-omp-gate-probe PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 # PLUMBING CONSISTENCY AUDIT probe (DELETABLE, audit-only): replicates Path A
 # (calibrate_seed_to_manifold's ColumnCoupledInputs + 2-D/1-D seed builder) and Path B
@@ -425,4 +443,15 @@ target_include_directories(slim-base-classify-probe PRIVATE include/ ${CMAKE_BIN
 # as the base-classify probe; does NOT link grrt.  Delete with tools/slim_nz_refine_probe.cpp.
 add_executable(slim-nz-refine-probe tools/slim_nz_refine_probe.cpp)
 target_include_directories(slim-nz-refine-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# Richardson capacity probe (DELETABLE, diagnostic): Σ0 capacity vs n_z {96,128,192,256}
+# for the resistant nodes 3 & 9 -> extrapolate the n_z→∞ limit to decide RESOLUTION
+# (curable) vs PHYSICAL WALL (monolithic rebuild).  Delete with tools/slim_richardson_probe.cpp.
+add_executable(slim-richardson-probe tools/slim_richardson_probe.cpp)
+target_include_directories(slim-richardson-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+
+# Full-18 feasibility @ n_z=256 (DELETABLE, diagnostic): all 18 radial nodes, does each
+# column solve at its demanded Σ at high vertical resolution.  Delete with tools/slim_full256_probe.cpp.
+add_executable(slim-full256-probe tools/slim_full256_probe.cpp)
+target_include_directories(slim-full256-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
 

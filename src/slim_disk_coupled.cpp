@@ -68,7 +68,11 @@ static double sigma_from_V(const SlimDiskInputs& in, double r, double V) {
 // node's column converges in a few polish steps.  Keyed by node index.
 struct ColumnCache {
     std::vector<std::vector<double>> Uc;  // [node] -> converged augmented column state
-    std::vector<bool> valid;              // [node] -> has a converged Uc to warm-start from
+    // NOTE: std::vector<char> (NOT std::vector<bool>) is REQUIRED for thread safety.
+    // The per-node column loops below are OpenMP-parallelized; each node writes only its
+    // OWN slot valid[i]. std::vector<bool> is a bit-packed proxy, so writes to distinct
+    // indices sharing a word would DATA-RACE. char gives each element its own byte.
+    std::vector<char> valid;              // [node] -> has a converged Uc to warm-start from
     int n_nodes = 0;                      // radial node count (size of the cache)
     int n_z = 0;                          // column node count (for the expected Uc length)
     void resize(int N, int nz) {
@@ -535,8 +539,14 @@ static void slim_coupled_residual(const std::vector<double>& U, const SlimDiskIn
         Om[i] = omega_from_ell(in.mass, in.spin, r[i], U[4 * i + 2]);
 
     // Closure every node (column).  shear_i / Ω_z,i from the node geometry.
+    // PARALLEL: the per-node column solves are INDEPENDENT — node i reads/writes only
+    // its own ColumnCache slot i (Uc[i], valid[i]) and its own e[i]; no cross-node shared
+    // mutable state (g_budget is untouched here; op is read-only).  So the loop is
+    // embarrassingly parallel and its result is order-independent (pure per-node scatter).
+    // any_fail is an int OR-reduction (MSVC OpenMP 2.0-compatible).
     std::vector<CoupledNode> e(N);
-    bool any_fail = false;
+    int any_fail = 0;
+    #pragma omp parallel for schedule(dynamic) reduction(||:any_fail)
     for (int i = 0; i < N; ++i) {
         const int j = (i + 1 < N) ? i + 1 : i - 1;   // neighbour for the shear FD
         const double shear_i  = shear_cgs(in, r[i], Om[i], r[j], Om[j]);
@@ -544,7 +554,7 @@ static void slim_coupled_residual(const std::vector<double>& U, const SlimDiskIn
         e[i] = eval_node_coupled(in, op, copt, cache, i,
                                  r[i], U[4*i+0], U[4*i+1], U[4*i+2], U[4*i+3],
                                  shear_i, omegaz_i);
-        if (!e[i].ok) any_fail = true;
+        if (!e[i].ok) any_fail = 1;
     }
     if (any_fail) {
         // Column infeasible at this iterate: fill a large finite sentinel so the merit
@@ -675,6 +685,13 @@ static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const Sl
     // --- Base column solve at U: capture the frozen outputs fc[] + the C3 sensitivities S[]. ---
     std::vector<FrozenCol> fc(N);
     std::vector<ColumnSensitivity> S(N);
+    // PARALLEL: identical independence to the residual node loop — each node solves its
+    // own column (own cache slot i) and scatters into its own fc[i]/S[i].  A `return` is
+    // illegal from an OpenMP region, so an infeasible node sets a shared flag (int
+    // OR-reduction) and the function returns false AFTER the loop (same outcome: J is
+    // discarded on an infeasible base point).  The base loop stays pure per-node scatter.
+    int base_infeasible = 0;
+    #pragma omp parallel for schedule(dynamic) reduction(||:base_infeasible)
     for (int i = 0; i < N; ++i) {
         const int jn = (i + 1 < N) ? i + 1 : i - 1;
         const double shear_i  = shear_cgs(in, r[i], Om[i], r[jn], Om[jn]);
@@ -683,10 +700,11 @@ static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const Sl
         const CoupledNode ei = eval_node_coupled(in, op, copt, cache, i,
                                                  r[i], U[4*i+0], U[4*i+1], U[4*i+2], U[4*i+3],
                                                  shear_i, omegaz_i, &c, &ci);
-        if (!ei.ok || !c.converged) return false;          // infeasible base point
+        if (!ei.ok || !c.converged) { base_infeasible = 1; continue; }   // infeasible node
         fc[i] = FrozenCol{ c.F, c.z0, c.eta3, c.eta4 };
         S[i]  = column_sensitivity(c, ci, op);
     }
+    if (base_infeasible) return false;                     // infeasible base point
 
     // Per-variable FD step — identical keying to slim_coupled_numerical_jacobian.
     auto step_for = [&](int col) -> double {
@@ -1041,7 +1059,7 @@ static bool relax_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
             }
         }
 
-        if (kDiag && (it<8 || it%10==0))
+        if (kDiag)   // EVERY outer iteration (merit trajectory: converging vs stuck)
             std::printf("[COUPLED] it=%d merit=%.3e maxrel=%.2e mu=%.1e r_s=%.4f\n",
                         it, merit, maxrel, lm_mu, U[4*N+1]);
 
