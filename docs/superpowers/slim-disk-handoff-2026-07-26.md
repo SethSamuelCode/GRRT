@@ -134,17 +134,91 @@ The `LU pivot ratio: raw = 9.664e+12` lines in the merit log are from
 **not** the reduced radial Jacobian's. No instrument prints the radial J's conditioning. Do
 not cite those numbers as evidence about the radial solve.
 
-## Corrected resume checklist
-1. **Re-run the base rung on the fixed Jacobian** (`SLIM_DIAG=1`, raise the wall budget at
-   `slim_disk_radial.cpp` ~L414 — it trips at ~2.7h; est. ~54 min/iter now). Read `merit=`
-   across iterations. *This is the first trustworthy measurement of whether the relax converges.*
-2. Expect **different convergence behavior, not marginally different** — LM damping tuned
-   against a singular J may need revisiting.
-3. If it converges → verify physical (H/r, β, f_adv, transonic V) → walk f_Edd up by
+---
+
+# 2026-08-08/09: FIRST TRUSTWORTHY MERIT TRAJECTORY — descends, then STALLS
+
+Base rung (a=0.9, f_Edd=1e-3, N=18, n_z=256), fixed Jacobian, 12 h budget, `SLIM_DIAG=1`:
+
+```
+it=0 merit=3.062e+00 maxrel=1.56e-02 mu=1.8e-03 r_s=2.2745
+it=1 merit=2.886e+00 maxrel=6.25e-02 mu=2.7e-03 r_s=2.2745
+it=2 merit=2.799e+00 maxrel=3.13e-02 mu=4.5e-03 r_s=2.2745
+it=3 merit=2.761e+00 maxrel=1.57e-02 mu=8.4e-03 r_s=2.2744
+it=4 merit=2.759e+00 maxrel=9.77e-04 mu=1.7e-02 r_s=2.2744
+it=5 merit=2.758e+00 maxrel=4.88e-04 mu=3.3e-02 r_s=2.2744
+```
+Seed `18/18` feasible. Killed at it=6 (stalled, and the exe lock blocked rebuilds).
+
+## Verdicts
+- **DESCENDING: YES** — answered for the first time in the project's history. The old
+  "is it converging?" question is closed at the descent level.
+- **CONVERGING: NO.** Acceptance needs `merit < kMeritFloor = 5e-3` (`slim_disk_coupled.cpp:1113`);
+  we asymptote at **2.758 — 550× too high**. The acceptance branch correctly never fires.
+- **The polarity fix is CONFIRMED working by μ:** `mu` went `3.1e+00` (pre-fix) →
+  `1.8e-03` (post-fix), a **~1700×** drop. Exactly as predicted: the dead columns had
+  forced `lm_mu ≥ 1.0` via `coupled_dense_solve`'s pivot rejection
+  (`JtJ[i][i]=0` ⇒ damping `= lm_mu·1e-300`). That retry loop no longer fires ⇒
+  near-undamped Gauss-Newton for the first time.
+
+## Stall signature (three consistent tells)
+1. Merit decrements decay geometrically to nothing (−0.176, −0.087, −0.038, −0.002, −0.001).
+2. **μ doubles every iteration** (1.8e-3 → 3.3e-2): Nielsen raising damping because predicted
+   reduction stops matching actual ⇒ the LM is progressively distrusting its own model.
+3. Steps collapse (`maxrel` → 4.88e-4).
+
+That triad = **a Newton direction that stopped being useful**, NOT an approach to a root.
+
+## The key clue: r_s STILL will not move
+`2.2745 → 2.2744` — ~4e-5 relative over five iterations, despite now having a live Jacobian
+column. **Prime suspect (audit finding #4):** the FD step for `r_s` is
+`h = max(1e-6·|u|, 1e-5) = 1e-5` (`slim_disk_coupled.cpp:720`) against `r_s ≈ 2.27` — a
+**4.4e-6 relative** grid perturbation, marginal against column-solver noise (`tol=1e-8`).
+A non-zero-but-NOISY gradient ⇒ steps miss their predicted reduction ⇒ gain ratio degrades
+⇒ μ climbs ⇒ steps shrink ⇒ stall. Precisely the observed pattern.
+**NOT yet confirmed** — needs the per-row-group residual breakdown to say whether the
+𝒟₀/𝒩₁ regularity rows are what pins merit.
+
+## Cost note
+~2 h/outer iteration, NOT the ~50 min projected. Honest reason: with a dead Jacobian the
+state barely moved, so every column warm-started to "converged in 1 polish iter". Now the
+state genuinely moves and the column solves do real work. The speedup wasn't lost — it is
+being spent on computation that previously wasn't happening.
+
+## Resume checklist (as of 2026-08-09)
+
+**Done:** budget fixed (`9b895c4`), base rung re-run on the fixed Jacobian, trajectory
+captured above, ℓ/ℓ_in/r_s Jacobian columns now GATED (`7a46892`).
+
+**The blocker is now: WHY does it stall at merit 2.758?** — and the binding constraint on
+answering that is OBSERVABILITY, because every question costs a ~12 h run.
+
+1. **[in progress] Instrument first, then diagnose.** Per-row-group scaled-residual breakdown
+   printed every outer iteration (groups per the `setrows` partition at
+   `slim_disk_coupled.cpp:1006-1009`: mass / ang / rad / ene / bc_ell / bc_ene / **reg_D0** /
+   **reg_N1**), plus env-gated (`SLIM_CHECKPOINT`) per-iteration dumps of `U` so a stalled
+   state can be analyzed or resumed without re-running. Purely observational — no computed
+   value may change; gated by slim-omp-gate-probe + test-slim-coupled-jacobian.
+2. **Re-run and read which group pins merit.**
+   - **reg_D0 / reg_N1 dominant** → the sonic-point regularity is what can't be satisfied ⇒
+     audit finding #4 (FD step for `r_s`: `1e-5 → 1e-3` at `:720`; ℓ relative `1e-6 → 1e-4`
+     at `:729`) is the targeted fix. Path-only; a Jacobian is a preconditioner, its accuracy
+     changes the path, never the root.
+   - **energy / radial-momentum dominant** → a different problem; do NOT spend the FD-step
+     change on it.
+3. Cheap A/Bs available before anything expensive: `SLIM_FD_ONESIDED=0` (restores central
+   differencing, ~2× slower, no rebuild); `kStepCap 0.5→0.8` (`:970`) — but NOTE the observed
+   `maxrel` (≤6.25e-2) is far below the 0.5 cap, so the trust region is **not** binding and
+   this change would currently do nothing.
+4. Consider a **smaller N** (18→12) for the diagnostic loop only: feasibility is driven by
+   `n_z`, not `N`, so N=12 keeps the 18/18-feasible property while cutting both column count
+   and full-FD column count (~14 vs 20) — roughly 2× faster iterations for diagnosis.
+5. Once it converges → verify physical (H/r, β, f_adv, transonic V) → walk f_Edd up by
    continuation toward 0.9 → wire T_eff(r)/H(r) into the volumetric-disk render.
-4. If it still stalls → A/B `SLIM_FD_ONESIDED=0` first (cheap), then consider extending
-   `test-slim-coupled-jacobian` to gate the ℓ/ℓ_in/r_s columns, then the deeper levers
-   (analytic ℓ sensitivity to kill full-FD entirely; graph-colored FD; Broyden).
-5. **Do NOT** pursue a coarser-n_z Jacobian: base-rung feasibility is n_z-sensitive (15/18 at
+6. **Do NOT** pursue a coarser-n_z Jacobian: base-rung feasibility is n_z-sensitive (15/18 at
    n_z=96 vs 18/18 at 256), so a coarse-J would silently see infeasible columns and corrupt
    the direction. (User's call, and correct.)
+7. **Unresolved smell:** `slim_fadv_ok` builds its radial grid from `in.r_in`, not `r_s`
+   (`slim_disk_radial.cpp:2497`), while every other consumer uses `[r_s, r_out]`. Since
+   `r_in = 0.5·r_isco` and `r_s ≈ 0.98·r_isco`, that feasibility test evaluates nodes at the
+   wrong radius and could collapse λ for a spurious reason. Worth a targeted check.
