@@ -706,6 +706,12 @@ static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const Sl
     }
     if (base_infeasible) return false;                     // infeasible base point
 
+    // Snapshot the converged base columns. Every full-FD column below warm-starts from
+    // THIS pristine snapshot (not from the previous column's mutated cache), so each
+    // column's result is independent of evaluation order — the precondition for a
+    // bit-identical parallelization (Task 2). See spec 2026-07-26-jacobian-column-parallel.
+    const ColumnCache base_snap = cache;
+
     // Per-variable FD step — identical keying to slim_coupled_numerical_jacobian.
     auto step_for = [&](int col) -> double {
         const double u = U[col];
@@ -744,13 +750,19 @@ static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const Sl
     // differencing when a perturbed side goes infeasible. U is feasible (checked above),
     // so f0 is true on the normal path.
     std::vector<double> R0; bool f0 = false;
-    slim_coupled_residual(U, in, op, copt, cache, R0, f0);
+    { ColumnCache anchor_cache = base_snap;
+      slim_coupled_residual(U, in, op, copt, anchor_cache, R0, f0); }
     auto full_fd_col = [&](int col) {
         const double h = step_for(col);
-        Up = U; Um = U; Up[col] += h; Um[col] -= h;
+        ColumnCache col_cache = base_snap;                 // warm-start from the pristine base
+        std::vector<double> Upc = U, Umc = U, Rpc, Rmc;
+        Upc[col] += h; Umc[col] -= h;
         bool fp = false, fm = false;
-        slim_coupled_residual(Up, in, op, copt, cache, Rp, fp);
-        slim_coupled_residual(Um, in, op, copt, cache, Rm, fm);
+        // The −h solve intentionally reuses col_cache (warm-started from the +h solve) —
+        // this is per-call state, so it does NOT affect order-independence ACROSS columns
+        // (each column gets its own fresh copy of base_snap); do not split into two copies.
+        slim_coupled_residual(Upc, in, op, copt, col_cache, Rpc, fp);
+        slim_coupled_residual(Umc, in, op, copt, col_cache, Rmc, fm);
         // A perturbed side that goes infeasible is sentinel-filled (1e300); the central
         // difference (1e300 − finite) is FINITE (~1e305), so the isfinite guard would NOT
         // catch it and a garbage entry would land in J. Fall back to a one-sided difference
@@ -758,9 +770,9 @@ static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const Sl
         // gradient — the LM damping + feasibility line search bound the held unknown).
         for (int row = 0; row < n; ++row) {
             double d;
-            if (fp && fm)      d = (Rp[row] - Rm[row]) / (2.0 * h);
-            else if (fp && f0) d = (Rp[row] - R0[row]) / h;   // backward side infeasible
-            else if (fm && f0) d = (R0[row] - Rm[row]) / h;   // forward side infeasible
+            if (fp && fm)      d = (Rpc[row] - Rmc[row]) / (2.0 * h);
+            else if (fp && f0) d = (Rpc[row] - R0[row]) / h;   // backward side infeasible
+            else if (fm && f0) d = (R0[row] - Rmc[row]) / h;   // forward side infeasible
             else               d = 0.0;                        // both sides infeasible
             if (!std::isfinite(d)) d = 0.0;
             J[(size_t)row * n + col] = d;
