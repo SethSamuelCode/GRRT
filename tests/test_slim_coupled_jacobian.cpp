@@ -9,12 +9,23 @@
 // column_sensitivity (the Schur term −B D⁻¹ C) instead of O(N²) column re-solves.
 //
 // THE GATE: at a FEASIBLE operating point (all columns converge), perturb each radial
-// Σ_i and T_c,i, re-solve the column(s), re-assemble slim_coupled_residual, and central-
-// difference → the TOTAL dR_r/d{Σ,T_c} columns.  Compare to J_red's corresponding
+// unknown, re-solve the column(s), re-assemble slim_coupled_residual, and central-
+// difference → the TOTAL dR_r/dU_r columns.  Compare to J_red's corresponding
 // columns in the SAME scaled space the solver uses (row = 1/group-scale).  Gate: per-
-// column scaled 2-norm < 1e-3 (the inherited opacity-LUT / column-FD floor).  This
-// specifically validates that C3's analytic sensitivities were assembled correctly into
-// the radial Jacobian's Σ,T_c columns.
+// column scaled 2-norm < 1e-3 (the inherited opacity-LUT / column-FD floor).
+//
+// BOTH of J_red's construction paths are covered, because they are structurally different
+// code and a bug in one cannot be caught by gating the other:
+//   • Σ_i, T_c,i  — the SCHUR/analytic path (C3 column_sensitivity assembled into J_red).
+//   • ℓ_i, ℓ_in, r_s — the FULL-FD path (FD of the LIVE residual, re-solving columns).
+//     Previously UNGATED, which let an inverted feasibility polarity zero ALL of these
+//     columns undetected (fixed in 3c001ad).  Now gated, plus an always-on NON-ZERO
+//     column assert — the cheap, oracle-independent check that pins exactly that
+//     regression.  r_s is the dense one: it rescales the ENTIRE log grid
+//     (r_i = exp(lr0 + (lr1-lr0)t), lr0 = log r_s), and the oracle picks that up for free
+//     because slim_coupled_residual re-derives the grid from U[4N+1] on every call.
+// The oracle is a genuine independent perturb-resolve, NOT slim_coupled_numerical_jacobian
+// (that shares code lineage with the thing under test, and carried the identical bug).
 //
 // FEASIBILITY: the diagnostic proved columns do NOT converge at f_Edd≈0.02–0.9 (high Σ).
 // So this gate runs on a small SYNTHETIC radial state (N=6) whose (Σ,T_c) is scanned down
@@ -205,9 +216,20 @@ static std::vector<double> fd_oracle_column(const std::vector<double>& U, const 
     const int N = std::max(in.n_nodes, 4);
     const int n = 4 * N + 2;
     const double u = U[col];
-    // Type-keyed step: Σ (offset 0) / T_c (offset 3).  Relative with a small absolute floor.
-    const int off = col % 4;
-    const double floor = (off == 0) ? 1e2 : 1.0;   // Σ ~ ≥1e2, T_c ~ ≥1
+    // Type-keyed step, relative with a small absolute floor on |u|.  The two GLOBALS
+    // (ℓ_in = col 4N, r_s = col 4N+1) MUST be keyed off `col >= 4*N` BEFORE any col%4
+    // test: 4N%4 == 0, so ℓ_in would otherwise be misread as a "Σ" column and get the
+    // 1e2 floor — a step ~100× its own magnitude (ℓ_in ~ O(1)), i.e. not a derivative.
+    double floor;
+    if (col >= 4 * N) {
+        floor = 1.0;                               // ℓ_in ~ O(1), r_s ~ O(10): |u| dominates
+    } else {
+        switch (col % 4) {
+            case 0:  floor = 1e2; break;           // Σ   ~ ≥1e2
+            case 2:  floor = 1.0; break;           // ℓ   ~ O(1)
+            default: floor = 1.0; break;           // V, T_c
+        }
+    }
     const double h = std::max(rel_step * std::abs(u), rel_step * floor);
     std::vector<double> Up = U, Um = U, Rp, Rm;
     Up[col] += h; Um[col] -= h;
@@ -408,6 +430,99 @@ static int run_gate(const std::vector<double>& U, const char* label,
     };
     for (int i = 0; i < N; ++i) check_col(4*i+0);   // Σ_i
     for (int i = 0; i < N; ++i) check_col(4*i+3);   // T_c,i
+
+    // ---- FULL-FD columns: ℓ_i (4i+2), ℓ_in (4N+0), r_s (4N+1). --------------------------
+    // These are the columns slim_coupled_reduced_jacobian builds by FULL FD of the LIVE
+    // residual (re-solving every column), NOT by the C3 Schur path — a structurally DIFFERENT
+    // code path from the Σ/T_c columns above, and one that was previously ungated.  It has to
+    // be gated: an inverted feasibility polarity once made all of these identically ZERO and
+    // nothing noticed (fixed in 3c001ad).  Two checks per column:
+    //   (a) NON-ZERO (the regression assert for exactly that failure mode) — ALWAYS gated.
+    //       Cheap, oracle-independent, and it would have caught the original bug instantly.
+    //   (b) analytic-vs-oracle scaled 2-norm < GATE — gated ONLY where the oracle is itself
+    //       step-CONVERGED (same discipline the steep state uses: the FD oracle can only
+    //       ARBITRATE where it is an accurate derivative).  Reported either way.
+    // The oracle is the SAME genuine perturb-resolve fd_oracle_column used above: perturb the
+    // unknown, re-solve the affected columns from scratch, re-assemble slim_coupled_residual,
+    // central-difference.  It is NOT slim_coupled_numerical_jacobian (which shares code lineage
+    // with the thing under test and carried the identical bug) — independence is the point.
+    // r_s and ℓ_in are handled correctly for free: slim_coupled_residual re-derives the WHOLE
+    // log grid r_i = exp(lr0 + (lr1-lr0)t), lr0 = log(r_s) from U[4N+1] on every call, so
+    // perturbing r_s genuinely moves every node (and its column is dense, as it must be).
+    // NOTE production defaults these columns to ONE-SIDED differencing (kOneSidedFD, env
+    // SLIM_FD_ONESIDED) while this oracle is CENTRAL; that scheme difference alone is far
+    // below GATE, so no tolerance widening is warranted.
+    std::printf("  --- FULL-FD columns (ell_i, ell_in, r_s): non-zero assert + analytic-vs-oracle (gate < %.0e) ---\n", GATE);
+    std::vector<int> ffd_cols;
+    for (int i = 0; i < N; ++i) ffd_cols.push_back(4*i + 2);   // ℓ_i
+    ffd_cols.push_back(4*N + 0);                               // ℓ_in
+    ffd_cols.push_back(4*N + 1);                               // r_s
+    double worst_ffd = 0.0; int worst_ffd_col = -1;
+    int n_ffd_gated = 0, n_ffd_info = 0;
+    auto check_full_fd_col = [&](int col) {
+        // (a) ZERO-COLUMN regression assert, in the gate's scaled metric.
+        int nnz = 0; double an2 = 0.0;
+        for (int r = 0; r < n; ++r) {
+            const double a = Jred[(size_t)r*n+col] * rs_inv[r];
+            if (a != 0.0) ++nnz;
+            an2 += a * a;
+        }
+        const bool nz_ok = (nnz > 0);
+        if (!nz_ok && !informational) fails++;
+
+        // Re-warm the oracle cache at the BASE state before each full-FD column, so a column
+        // is not warm-started from the PREVIOUS column's perturbed geometry (r_s moves the
+        // grid, ℓ_i moves the shear) — keeps each column's oracle order-independent.
+        { std::vector<double> Rw; bool infw = false; slim_coupled_residual(U, in, op, copt, ocache, Rw, infw); }
+
+        bool oinf = false;
+        const std::vector<double> orc = fd_oracle_column(U, in, op, copt, ocache, col, 1e-3, oinf);
+        if (oinf) {
+            std::printf("    %-9s : nnz=%3d/%d %s | ORACLE INFEASIBLE (perturbed column failed) — cannot gate%s\n",
+                        col_label(col, N).c_str(), nnz, n, nz_ok ? "PASS" : "<<FAIL ZERO COLUMN",
+                        informational ? " [oracle limit, not Jacobian]" : "");
+            if (!informational) fails++;
+            return;
+        }
+        // (b) oracle SELF-consistency (step convergence): |orc@1e-3 − orc@5e-4| in the gate
+        // metric.  < GATE ⇒ the oracle is a trustworthy arbiter here ⇒ this column is GATED.
+        bool oinf2 = false;
+        const std::vector<double> orc2 = fd_oracle_column(U, in, op, copt, ocache, col, 5e-4, oinf2);
+        double osc = -1.0;
+        if (!oinf2) {
+            double dd = 0.0, rr = 0.0;
+            for (int r = 0; r < n; ++r) {
+                const double a = orc[r]  * rs_inv[r];
+                const double b = orc2[r] * rs_inv[r];
+                dd += (a - b) * (a - b); rr += a * a;
+            }
+            osc = std::sqrt(dd) / (std::sqrt(rr) + 1e-300);
+        }
+        double dn2 = 0.0, rn2 = 0.0; int worst_r = -1; double worst_e = 0.0;
+        for (int r = 0; r < n; ++r) {
+            const double a = Jred[(size_t)r*n+col] * rs_inv[r];
+            const double f = orc[r]                * rs_inv[r];
+            dn2 += (a - f) * (a - f); rn2 += f * f;
+            const double e = std::abs(a - f);
+            if (e > worst_e) { worst_e = e; worst_r = r; }
+        }
+        const double rel = std::sqrt(dn2) / (std::sqrt(rn2) + 1e-300);
+        const bool oracle_valid = (osc >= 0.0 && osc < GATE);
+        const bool rel_ok = (rel < GATE);
+        if (rel > worst_ffd) { worst_ffd = rel; worst_ffd_col = col; }
+        if (oracle_valid && !informational) ++n_ffd_gated; else ++n_ffd_info;
+        const char* verdict = informational   ? "[informational state]"
+                            : !oracle_valid   ? "[INFORMATIONAL: oracle step-UNCONVERGED here]"
+                            : rel_ok          ? "GATED PASS" : "GATED <<FAIL";
+        std::printf("    %-9s : nnz=%3d/%d %s | |col|=%.3e | rel = %.3e (worst row=%d) | oracle self-consistency = %.3e  %s\n",
+                    col_label(col, N).c_str(), nnz, n, nz_ok ? "PASS" : "<<FAIL ZERO COLUMN",
+                    std::sqrt(an2), rel, worst_r, osc, verdict);
+        if (!informational && oracle_valid && !rel_ok) fails++;
+    };
+    for (int col : ffd_cols) check_full_fd_col(col);
+    std::printf("  worst full-FD column mismatch  = %.3e at %s  (gate %.0e; %d gated / %d informational)\n",
+                worst_ffd, worst_ffd_col >= 0 ? col_label(worst_ffd_col, N).c_str() : "-",
+                GATE, n_ffd_gated, n_ffd_info);
 
     if (informational) {
         std::printf("  [informational] worst analytic-vs-oracle = %.3e at %s — NOT a gate; on this\n"
