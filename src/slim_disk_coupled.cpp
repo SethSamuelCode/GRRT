@@ -943,6 +943,11 @@ static bool relax_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
     // numerical (re-solve-every-column) Jacobian stays available as a fallback + oracle
     // behind SLIM_COUPLED_NUMJAC=1 (set it to force the old path for A/B comparison).
     const bool kNumJac = std::getenv("SLIM_COUPLED_NUMJAC") != nullptr;
+    // OBSERVABILITY ONLY (no effect on the solve): SLIM_CHECKPOINT=<path-prefix> dumps
+    // the state vector U once per outer iteration to "<prefix>_it%03d.txt".  Unset (the
+    // default) => nothing is opened, nothing is written.  See the write site below for
+    // the file format and the U layout.
+    const char* const kCkptPrefix = std::getenv("SLIM_CHECKPOINT");
 
     ColumnCache cache; cache.resize(N, copt.n_z);
 
@@ -1106,9 +1111,102 @@ static bool relax_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
             }
         }
 
-        if (kDiag)   // EVERY outer iteration (merit trajectory: converging vs stuck)
+        if (kDiag) {  // EVERY outer iteration (merit trajectory: converging vs stuck)
             std::printf("[COUPLED] it=%d merit=%.3e maxrel=%.2e mu=%.1e r_s=%.4f\n",
                         it, merit, maxrel, lm_mu, U[4*N+1]);
+            // --- PURELY OBSERVATIONAL: per-row-group breakdown of the SAME scaled
+            // residual the merit is built from.  merit = sqrt(Σ_rows (R[row]/s_grp)²/n)
+            // (slim_scaled_residual_norm), so these group L2s satisfy
+            //     merit = sqrt(Σ_groups L2_group² / n).
+            // Reuses the residual R ALREADY computed for this accepted iterate (no extra
+            // residual evaluation, no column solves); the group scales are the same cheap
+            // O(N) reduction over U that slim_scaled_residual_norm does internally.  Note
+            // the row-scale vector rs_inv built above belongs to the PRE-step iterate, so
+            // it is deliberately NOT reused here — the scales must match the U/R pair that
+            // produced the merit being printed.  Group partition is exactly the setrows
+            // partition above (mass|ang|rad|ene|bc_ell|bc_ene|reg_D0|reg_N1).
+            const GroupScales gsd = slim_group_scales(U, in);
+            struct GrpStat { double l2 = 0.0, mx = 0.0; int at = 0; };
+            auto grp = [&](int b, int e, double sc) -> GrpStat {
+                GrpStat g; g.at = b;
+                const double s = std::max(sc, 1e-300);
+                for (int rr = b; rr < e; ++rr) {
+                    const double v = R[rr] / s;
+                    g.l2 += v * v;
+                    if (std::abs(v) > g.mx) { g.mx = std::abs(v); g.at = rr; }
+                }
+                g.l2 = std::sqrt(g.l2);
+                return g;
+            };
+            const GrpStat g_mass = grp(0,       N,       gsd.mass);
+            const GrpStat g_ang  = grp(N,       2*N,     gsd.ang);
+            const GrpStat g_rad  = grp(2*N,     3*N-1,   gsd.rad);
+            const GrpStat g_ene  = grp(3*N-1,   4*N-2,   gsd.ene);
+            const GrpStat g_bcl  = grp(4*N-2,   4*N-1,   gsd.bc_ell);
+            const GrpStat g_bce  = grp(4*N-1,   4*N,     gsd.ene);
+            const GrpStat g_rD0  = grp(4*N,     4*N+1,   gsd.reg_D0);
+            const GrpStat g_rN1  = grp(4*N+1,   4*N+2,   gsd.reg_N1);
+            std::printf("[COUPLED] it=%d RESID mass=%.2e(max %.2e@%d) ang=%.2e(max %.2e@%d)"
+                        " rad=%.2e(max %.2e@%d) ene=%.2e(max %.2e@%d)\n",
+                        it, g_mass.l2, g_mass.mx, g_mass.at, g_ang.l2, g_ang.mx, g_ang.at,
+                        g_rad.l2, g_rad.mx, g_rad.at, g_ene.l2, g_ene.mx, g_ene.at);
+            std::printf("[COUPLED] it=%d RESID bc_ell=%.2e(max %.2e@%d) bc_ene=%.2e(max %.2e@%d)"
+                        " reg_D0=%.2e(max %.2e@%d) reg_N1=%.2e(max %.2e@%d)\n",
+                        it, g_bcl.l2, g_bcl.mx, g_bcl.at, g_bce.l2, g_bce.mx, g_bce.at,
+                        g_rD0.l2, g_rD0.mx, g_rD0.at, g_rN1.l2, g_rN1.mx, g_rN1.at);
+        }
+
+        // --- PURELY OBSERVATIONAL: state checkpoint (OFF unless SLIM_CHECKPOINT is set).
+        // HOW TO USE:
+        //   set SLIM_CHECKPOINT=C:\path\prefix   (unset => nothing is written, zero I/O)
+        // One file PER OUTER ITERATION: "<prefix>_it%03d.txt" — per-iteration (not a
+        // single overwritten file) precisely so states can be DIFFED across iterations,
+        // which is the point of checkpointing a stalling relax.
+        // FILE FORMAT: '#'-prefixed header (iteration, N, merit, maxrel, lm_mu, and the
+        // SlimDiskInputs needed to interpret/reload the state), then exactly 4N+2 lines,
+        // one value of U per line, "%.17g" (round-trip exact).
+        // U LAYOUT (verified against this file: cs[] packing above, the physicality
+        // check in the line search, and unpack_profile):
+        //   for i in [0,N):  U[4*i+0] = Sigma_i [g/cm^2]
+        //                    U[4*i+1] = V_i     (radial velocity, <0 = inflow)
+        //                    U[4*i+2] = ell_i   (specific angular momentum)
+        //                    U[4*i+3] = T_c,i   [K]
+        //   then             U[4*N+0] = ell_in  (eigenvalue)
+        //                    U[4*N+1] = r_s     (sonic radius [M])
+        // NODE RADII are NOT stored (they are implied): the grid is log-uniform on
+        //   [r_s, r_out] with r_i = exp(ln r_s + (ln r_out - ln r_s)*i/(N-1)),
+        //   r_s = U[4*N+1], r_out = the r_out recorded in the header.
+        // A failed open is a NON-EVENT for the solve: warn under kDiag and continue.
+        if (kCkptPrefix != nullptr && kCkptPrefix[0] != '\0') {
+            char path[1024];
+            std::snprintf(path, sizeof(path), "%s_it%03d.txt", kCkptPrefix, it);
+            std::FILE* f = std::fopen(path, "w");
+            if (f == nullptr) {
+                if (kDiag) std::printf("[COUPLED] it=%d CHECKPOINT open failed: %s\n", it, path);
+            } else {
+                std::fprintf(f, "# GRRT slim-disk COUPLED state checkpoint (SLIM_CHECKPOINT)\n");
+                std::fprintf(f, "# iter %d\n", it);
+                std::fprintf(f, "# N %d\n", N);
+                std::fprintf(f, "# n_unknowns %d\n", n);
+                std::fprintf(f, "# merit %.17g\n", merit);
+                std::fprintf(f, "# maxrel %.17g\n", maxrel);
+                std::fprintf(f, "# lm_mu %.17g\n", lm_mu);
+                std::fprintf(f, "# mass %.17g\n", in.mass);
+                std::fprintf(f, "# spin %.17g\n", in.spin);
+                std::fprintf(f, "# alpha %.17g\n", in.alpha);
+                std::fprintf(f, "# mdot %.17g\n", in.mdot);
+                std::fprintf(f, "# r_g %.17g\n", in.r_g);
+                std::fprintf(f, "# r_in %.17g\n", in.r_in);
+                std::fprintf(f, "# r_out %.17g\n", in.r_out);
+                std::fprintf(f, "# n_nodes %d\n", in.n_nodes);
+                std::fprintf(f, "# n_z %d\n", copt.n_z);
+                std::fprintf(f, "# layout [Sigma_i,V_i,ell_i,T_c_i] x N, then ell_in, r_s\n");
+                std::fprintf(f, "# grid r_i = exp(ln(r_s) + (ln(r_out)-ln(r_s))*i/(N-1)), r_s = U[4N+1]\n");
+                std::fprintf(f, "# %d values follow, one per line\n", n);
+                for (int i = 0; i < n; ++i) std::fprintf(f, "%.17g\n", U[i]);
+                std::fclose(f);
+            }
+        }
 
         const bool merit_floored = (merit < kMeritFloor);
         const bool step_ideal    = (maxrel < in.tol);
