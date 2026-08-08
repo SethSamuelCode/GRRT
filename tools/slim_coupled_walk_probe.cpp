@@ -305,10 +305,18 @@ int main() {
     std::printf("#   TARGET f_Edd = 0.9 (POC).  Outcome = deliverable (honest).\n");
     std::printf("# =====================================================================\n\n");
 
-    // Per-attempt safety budgets (generous — the walk is slow: per-rung radial
-    // Newton × per-node column solves). A single cold base solve at modest N is
-    // seconds-to-minutes; cap each attempt so a stuck one aborts, not hangs.
-    const double kWallPerAttempt = 420.0;     // 7 min / attempt
+    // Per-attempt safety budgets. Cap each attempt so a STUCK one aborts, not hangs.
+    //
+    // SIZING (2026-07-26): the budget is checked at the TOP of each outer Newton
+    // iteration (slim_disk_coupled.cpp ~L983), so a value BELOW one iteration's cost
+    // silently permits exactly ONE iteration and aborts at it=1. The old 420 s was
+    // sized for the comment's "cold base solve at modest N is seconds-to-minutes"
+    // regime and was never revisited when the coupled path went to n_z=256, where a
+    // single outer iteration measured 9668 s. Consequence: the base rung had NEVER
+    // been observed past it=0 — every "is it converging?" reading came from one point.
+    // 12 h admits ~13 iterations at the current post-speedup cost (~50 min/iter);
+    // higher rungs still fail fast at the SEED, so they cannot consume this.
+    const double kWallPerAttempt = 43200.0;   // 12 h / attempt
     const long long kIterPerAttempt = 60000;  // cumulative inner-iter cap / attempt
 
     // =======================================================================
