@@ -778,9 +778,20 @@ static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const Sl
             J[(size_t)row * n + col] = d;
         }
     };
-    for (int i = 0; i < N; ++i) full_fd_col(4*i+2);   // ℓ_i
-    full_fd_col(4*N+0);                               // ℓ_in
-    full_fd_col(4*N+1);                               // r_s
+    // Parallelize over the ℓ_i / ℓ_in / r_s columns. Each column is INDEPENDENT: full_fd_col
+    // seeds its own col_cache from base_snap and writes only its own J column, so there is
+    // no shared mutable state and the result is identical to the serial order (Task 1
+    // base-seeding is the precondition). schedule(dynamic): every column task solves ALL
+    // nodes incl. the one dominant high-Σ node, so tasks are near-equal-cost and dynamic
+    // scheduling keeps threads full. The inner per-node parallel-for inside slim_coupled_
+    // residual runs serially here (OpenMP nesting is off by default) — intended.
+    std::vector<int> fd_cols;
+    fd_cols.reserve(N + 2);
+    for (int i = 0; i < N; ++i) fd_cols.push_back(4*i + 2);  // ℓ_i
+    fd_cols.push_back(4*N + 0);                              // ℓ_in
+    fd_cols.push_back(4*N + 1);                              // r_s
+    #pragma omp parallel for schedule(dynamic)
+    for (int k = 0; k < (int)fd_cols.size(); ++k) full_fd_col(fd_cols[k]);
 
     // ---------- (3) Column-mediated Schur term for Σ_i, T_c,i (analytic via C3). ----------
     // B_i columns = ∂R_r/∂{F_i,z0_i,η3_i,η4_i} via central-FD of the FROZEN residual w.r.t.
