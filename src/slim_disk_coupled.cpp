@@ -656,7 +656,8 @@ static void slim_coupled_residual_frozen(const std::vector<double>& U, const Sli
 //     four HELD outputs — the explicit residual derivatives) and dC_i/d{Σ,T_c} is C3's
 //     analytic IFT sensitivity (column_sensitivity).  Σ_i (resp. T_c,i) enters ONLY column
 //     i (not its neighbours'), so the Schur sum over nodes collapses to the single node i.
-//   • ℓ_i, ℓ_in, r_s columns — FULL central-FD of the LIVE residual (re-solving columns):
+//   • ℓ_i, ℓ_in, r_s columns — FULL FD of the LIVE residual (re-solving columns), one-sided
+//     (forward) by default / central with SLIM_FD_ONESIDED=0 — see the block below:
 //     captures the shear→Ω(ℓ) and grid→(shear,Ω_⊥) mediated column response WITHOUT a
 //     bespoke dC/dshear chain (06-20 "option (b)").  ℓ_in carries no column dependence; ℓ_i
 //     and r_s do (via the geometry the columns are solved at).
@@ -748,21 +749,41 @@ static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const Sl
     // ---------- (2) FULL-FD for the ℓ_i, ℓ_in, r_s columns (option (b): re-solve cols). ----------
     // Base residual at the (feasibility-checked) point U — the anchor for one-sided
     // differencing when a perturbed side goes infeasible. U is feasible (checked above),
-    // so f0 is true on the normal path.
-    std::vector<double> R0; bool f0 = false;
+    // so inf0 is FALSE on the normal path.
+    std::vector<double> R0; bool inf0 = true;
     { ColumnCache anchor_cache = base_snap;
-      slim_coupled_residual(U, in, op, copt, anchor_cache, R0, f0); }
+      slim_coupled_residual(U, in, op, copt, anchor_cache, R0, inf0); }
+    // One-sided (forward) differencing for the full-FD columns HALVES the dominant cost
+    // (2 residual evals per column -> 1; each eval re-solves ALL N columns, ~95% of the
+    // iteration's column-solve work). Accuracy cost is buried far below the existing error
+    // floor: the FD budget here is dominated by column-solver NOISE (copt.tol/h ~ 1e-8/1e-6
+    // ~ 1e-2), which is IDENTICAL for both schemes (central merely divides by 2h), while
+    // truncation only rises O(h^2)~1e-12 -> O(h)~1e-6 — still a million-fold below the
+    // noise floor. So `h` must NOT change: step_for(col) stays exactly as it is.
+    // Default ON; SLIM_FD_ONESIDED=0 restores central differencing (A/B without a rebuild).
+    static const bool kOneSidedFD = [] {
+        const char* e = std::getenv("SLIM_FD_ONESIDED");
+        return !(e && e[0] == '0');
+    }();
     auto full_fd_col = [&](int col) {
         const double h = step_for(col);
         ColumnCache col_cache = base_snap;                 // warm-start from the pristine base
         std::vector<double> Upc = U, Umc = U, Rpc, Rmc;
-        Upc[col] += h; Umc[col] -= h;
-        bool fp = false, fm = false;
-        // The −h solve intentionally reuses col_cache (warm-started from the +h solve) —
-        // this is per-call state, so it does NOT affect order-independence ACROSS columns
-        // (each column gets its own fresh copy of base_snap); do not split into two copies.
-        slim_coupled_residual(Upc, in, op, copt, col_cache, Rpc, fp);
-        slim_coupled_residual(Umc, in, op, copt, col_cache, Rmc, fm);
+        // Flags are INFEASIBILITY flags (true = that side has no usable residual).
+        // Initialized true so a SKIPPED side (one-sided fast path) never reads as usable —
+        // Rmc is empty then and must never be touched by the central branch.
+        bool infp = true, infm = true;
+        Upc[col] += h;
+        slim_coupled_residual(Upc, in, op, copt, col_cache, Rpc, infp);
+        // One-sided: solve the −h side ONLY if the +h side went INFEASIBLE (rare), so the
+        // common path costs ONE residual eval. Central mode always solves both. The −h solve
+        // intentionally reuses col_cache (warm-started from the +h solve) — this is per-call
+        // state, so it does NOT affect order-independence ACROSS columns (each column gets
+        // its own fresh copy of base_snap); do not split into two copies.
+        if (!kOneSidedFD || infp) {
+            Umc[col] -= h;
+            slim_coupled_residual(Umc, in, op, copt, col_cache, Rmc, infm);
+        }
         // A perturbed side that goes infeasible is sentinel-filled (1e300); the central
         // difference (1e300 − finite) is FINITE (~1e305), so the isfinite guard would NOT
         // catch it and a garbage entry would land in J. Fall back to a one-sided difference
@@ -770,10 +791,10 @@ static bool slim_coupled_reduced_jacobian(const std::vector<double>& U, const Sl
         // gradient — the LM damping + feasibility line search bound the held unknown).
         for (int row = 0; row < n; ++row) {
             double d;
-            if (fp && fm)      d = (Rpc[row] - Rmc[row]) / (2.0 * h);
-            else if (fp && f0) d = (Rpc[row] - R0[row]) / h;   // backward side infeasible
-            else if (fm && f0) d = (R0[row] - Rmc[row]) / h;   // forward side infeasible
-            else               d = 0.0;                        // both sides infeasible
+            if      (!infp && !infm) d = (Rpc[row] - Rmc[row]) / (2.0 * h);  // central
+            else if (!infp && !inf0) d = (Rpc[row] - R0[row]) / h;           // forward
+            else if (!infm && !inf0) d = (R0[row] - Rmc[row]) / h;           // backward
+            else                     d = 0.0;                                // no usable gradient
             if (!std::isfinite(d)) d = 0.0;
             J[(size_t)row * n + col] = d;
         }
@@ -878,21 +899,24 @@ static void slim_coupled_numerical_jacobian(const std::vector<double>& U,
     // Base residual at U — the anchor for one-sided differencing when a perturbed side
     // goes infeasible (a finite ~1e305 sentinel difference would otherwise slip past the
     // isfinite guard and inject garbage).
-    std::vector<double> Up, Um, Rp, Rm, R0; bool f0 = false;
-    slim_coupled_residual(U, in, op, copt, cache, R0, f0);
+    // Flags are INFEASIBILITY flags (true = that side has no usable residual); every side
+    // here is ALWAYS solved (this oracle stays strictly central — no one-sided fast path),
+    // so each flag is overwritten with a real value before it is read.
+    std::vector<double> Up, Um, Rp, Rm, R0; bool inf0 = true;
+    slim_coupled_residual(U, in, op, copt, cache, R0, inf0);
     for (int col = 0; col < n; ++col) {
         const double h = step_for(col);
         Up = U; Um = U;
         Up[col] += h; Um[col] -= h;
-        bool fp = false, fm = false;
-        slim_coupled_residual(Up, in, op, copt, cache, Rp, fp);
-        slim_coupled_residual(Um, in, op, copt, cache, Rm, fm);
+        bool infp = true, infm = true;
+        slim_coupled_residual(Up, in, op, copt, cache, Rp, infp);
+        slim_coupled_residual(Um, in, op, copt, cache, Rm, infm);
         for (int row = 0; row < n; ++row) {
             double d;
-            if (fp && fm)      d = (Rp[row] - Rm[row]) / (2.0 * h);
-            else if (fp && f0) d = (Rp[row] - R0[row]) / h;   // backward side infeasible
-            else if (fm && f0) d = (R0[row] - Rm[row]) / h;   // forward side infeasible
-            else               d = 0.0;                        // both sides infeasible
+            if      (!infp && !infm) d = (Rp[row] - Rm[row]) / (2.0 * h);   // central
+            else if (!infp && !inf0) d = (Rp[row] - R0[row]) / h;           // forward
+            else if (!infm && !inf0) d = (R0[row] - Rm[row]) / h;           // backward
+            else                     d = 0.0;                               // no usable gradient
             if (!std::isfinite(d)) d = 0.0;
             J[(size_t)row * n + col] = d;
         }
