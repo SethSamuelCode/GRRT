@@ -2428,6 +2428,21 @@ static int deglitch_sigma_outliers(const SlimDiskInputs& in, std::vector<double>
     // band; a genuine warm-branch gradient across a few log-grid nodes is well under it.
     constexpr double kOutlierFac = 8.0;
     constexpr int    kHalf       = 3;     // window half-width (median over 2·kHalf+1)
+    // T_c-outlier factor (S-CURVE BRANCH test, added for the node-9 stall).  A node
+    // can sit on the WRONG ROOT of the thermal S-curve fold — cool/gas-dominated
+    // where its neighbours are hot/radiation-dominated, or vice versa — WITHOUT its Σ
+    // moving far enough to trip kOutlierFac (the observed stall has Σ only 1.45× off
+    // the local median but T_c 2.3× off).  Σ alone therefore cannot detect a branch
+    // flip; T_c can, because the two roots of the fold are separated in temperature
+    // by construction.  Threshold measured from the stalled base-rung iterates
+    // (a=0.9, f_Edd=1e-3, N=18): over a ±3-node window the LEGITIMATE nodes deviate
+    // from the window log-median by at most 1.45× (node 3 high, node 1 low — the
+    // steep inner rise), while the branch-flipped node sits at 2.23–2.37×.  2.0×
+    // separates the two populations with margin on both sides and fires on no other
+    // node; the exact log-space midpoint of the gap is 1.80×, so 2.0 is the
+    // conservative (fewer-false-positives) end of the admissible band.
+    constexpr double kOutlierFacT = 2.0;
+    const bool kDiagDeglitch = std::getenv("SLIM_DIAG") != nullptr;
 
     // Rebuild the grid from r_s = U[4N+1] (same as the residual / unpack).
     const double r_s = U[4*N+1];
@@ -2464,14 +2479,28 @@ static int deglitch_sigma_outliers(const SlimDiskInputs& in, std::vector<double>
         const double Sc      = std::max(U[4*i+0], kSigmaFloor);
         const double med_lnS = local_median(i, 0);          // smooth-trend log-Σ
         const double lnfac   = std::log(kOutlierFac);
-        if (std::abs(std::log(Sc) - med_lnS) > lnfac) {
+        const double Tc      = std::max(U[4*i+3], kTFloor);
+        const double med_lnT = local_median(i, 3);          // smooth-trend log-T_c
+        const double lnfacT  = std::log(kOutlierFacT);
+        const bool   bad_S   = std::abs(std::log(Sc) - med_lnS) > lnfac;
+        const bool   bad_T   = std::abs(std::log(Tc) - med_lnT) > lnfacT;
+        if (bad_S || bad_T) {
             // On the wrong branch: project Σ and T_c back to the local smooth trend,
             // then re-derive V from exact mass conservation. No magic profile.
+            // Same repair for both triggers — a T_c-only repair would leave Σ and V
+            // on the old root, i.e. thermally hot/cool but hydrostatically still the
+            // other branch, which the very next Newton step would simply undo.
             const double Snew = std::exp(med_lnS);
-            const double Tnew = std::exp(local_median(i, 3));
+            const double Tnew = std::exp(med_lnT);
             U[4*i+0] = std::max(Snew, kSigmaFloor);
             U[4*i+3] = std::max(Tnew, kTFloor);
             U[4*i+1] = Vfrom(i, U[4*i+0]);
+            if (kDiagDeglitch)
+                std::printf("[DEGLITCH] node=%d trig=%s%s Sigma %.4e -> %.4e (x%.2f)"
+                            "  T_c %.4e -> %.4e (x%.2f)\n",
+                            i, bad_S ? "S" : "", bad_T ? "T" : "",
+                            Sc, U[4*i+0], Sc / std::max(U[4*i+0], 1e-300),
+                            Tc, U[4*i+3], Tc / std::max(U[4*i+3], 1e-300));
             ++nrepaired;
         }
     }
