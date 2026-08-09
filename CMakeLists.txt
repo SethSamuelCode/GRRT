@@ -369,6 +369,20 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(slim-omp-gate-probe PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+# S-CURVE / MULTI-ROOT probe (DELETABLE, READ-ONLY diagnostic): at a node's exact
+# reconstructed ColumnCoupledInputs (mirroring eval_node_coupled) from a live coupled
+# checkpoint, scans the base column's Sigma0(T_eff) to expose EVERY distinct converged
+# branch at the SAME (r, Sigma), then sweeps the production seed path over Tc_seed to
+# see which branch each seed lands in.  Answers "does the column solve admit multiple
+# roots at node 9?" (the S-curve hypothesis for the Group-2 residual stall).  Same
+# include-the-.cpp consumer order as the walk probe; needs /openmp on THIS target.
+# Safe to delete along with tools/slim_multiroot_probe.cpp.
+add_executable(slim-multiroot-probe tools/slim_multiroot_probe.cpp)
+target_include_directories(slim-multiroot-probe PRIVATE include/ ${CMAKE_BINARY_DIR}/include third_party/)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(slim-multiroot-probe PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
 # PLUMBING CONSISTENCY AUDIT probe (DELETABLE, audit-only): replicates Path A
 # (calibrate_seed_to_manifold's ColumnCoupledInputs + 2-D/1-D seed builder) and Path B
 # (eval_node_coupled's ColumnCoupledInputs + solve_column_coupled) at the SAME node and
