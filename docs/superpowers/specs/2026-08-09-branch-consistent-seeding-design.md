@@ -42,17 +42,56 @@ branch is fixed by **continuity from the outer boundary inward**. Local multipli
 follows an improper branch" is precisely ours. The prescribed remedy is **continuation in r**, not
 per-node multi-start.
 
-## SCOPE CORRECTION (important)
+## SCOPE CORRECTION (important) — with one proven exception
 
 An earlier draft proposed also adding a branch guard to `solve_column_coupled`'s cold multi-start
-fallback. **That is unnecessary and would be wrong.** That path varies only *starting guesses* on a
-mutable copy while Σ_target and T_c stay pinned (`src/disk_column_coupled.cpp:1166-1171` documents
-this explicitly), and the probe's Stage D confirmed the coupled solve is **single-valued at pinned
-(Σ, T_c)**: 18 of 21 starting-guess combos — including all 13 production combos — converged to the
-same root.
+fallback. **That is unnecessary.** That path varies only *starting guesses* on a mutable copy while
+Σ_target and T_c stay pinned (`src/disk_column_coupled.cpp:1166-1171` documents this explicitly),
+and the probe's Stage D confirmed the coupled solve is **single-valued at pinned (Σ, T_c)**: 18 of
+21 starting-guess combos — including all 13 production combos — converged to the same root.
 
-**The branch is chosen once, during seeding.** Thereafter T_c is a Newton unknown moved
-continuously. So both fixes below live in the seeding path only.
+**Proof that T_c cannot be re-seeded during evaluation** (verified in code, 2026-08-09):
+- All four consumers take `const std::vector<double>& U` — `eval_node_coupled` (:213),
+  `slim_coupled_residual` (:513), `slim_coupled_residual_frozen` (:621),
+  `slim_coupled_reduced_jacobian` (:667). `T_c = U[4i+3]` is compiler-enforced read-only there.
+- The only seed builder that writes `U[4*i+3]` is `build_transonic_coupled_seed`
+  (`src/slim_disk_coupled.cpp:199`, inside the function starting :155) — the **shelved lever-C
+  builder, which grep confirms is never called**. Dead code.
+
+**THE EXCEPTION — `deglitch_sigma_outliers` DOES overwrite T_c mid-relax.** Called from
+`src/slim_disk_coupled.cpp:1105` after every accepted step, it replaces an outlier node's Σ, T_c and
+V with the local log-median over a ±3-node window:
+```cpp
+const double Tnew = std::exp(local_median(i, 3));
+U[4*i+0] = std::max(Snew, kSigmaFloor);
+U[4*i+3] = std::max(Tnew, kTFloor);        // T_c replaced outright
+U[4*i+1] = Vfrom(i, U[4*i+0]);
+```
+This is branch-**repairing**, not branch-flipping — it moves an outlier *toward* its neighbours. But
+it is a discontinuous T_c write outside the Newton, so "the branch is chosen only at seeding" is
+true of *evaluation* but not of the full iteration.
+
+**It never fires for node 9 because it is keyed on the wrong variable:** the trigger is Σ deviating
+by more than `kOutlierFac = 8.0`, and node 9's Σ is only ~1.5× off the local median while its **T_c
+is 2.33× off**.
+
+### Fix 0 (fast experiment, runs first)
+Extend the outlier trigger to fire on **T_c** deviation as well as Σ (suggested
+`kOutlierFacT = 2.0`; a legitimate node sits within ~1.2× of the window median given the ~0.182
+ln-r spacing, while node 9 is at 2.33×). This reuses machinery that is already written and running,
+and answers the decisive question — *does forcing node 9 onto its neighbours' branch unstick the
+relax?* — faster than anything else.
+
+**Treat it as an experiment, not the fix.** Replacing a Newton unknown with a median is blunt, and
+the audit already flagged that repeated firing near convergence means it is fighting the Newton. Its
+value is the answer, not the mechanism.
+
+### Ordering (and why Fix 2 is NOT first)
+**Fix 0 → Fix 1 → Fix 2.** `SIGMA_SEED_BAND` controls *scatter, not branch*: `build_coupled_seed`
+secants on T_eff to match Σ₀, and Σ₀(T_eff) is single-peaked, so for any Σ_target below the nose
+there are **two exact roots**. The *starting guess* picks the side; the *band* only sets how close
+the secant must get. The probe's measured ±10% spread was **within the cool basin**, while the
+branches differ by ~2×. Fix 2 first would be a wasted run.
 
 ---
 
