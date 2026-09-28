@@ -295,6 +295,10 @@ int main() {
 
     ColumnOpts copt;             // bring-up defaults (300 column iters, tol 1e-8)
     copt.n_z = 256;              // reliable 18/18-feasible seed (n_z=96 only 15/18; stretched grid shelved 2026-07-24)
+    // E0a2 harness knobs (diagnostic overrides; unset = historical rig exactly).
+    if (const char* e = std::getenv("SLIM_WALK_N"))    in_base.n_nodes = std::atoi(e);
+    if (const char* e = std::getenv("SLIM_WALK_ROUT")) in_base.r_out   = std::atof(e);
+    if (const char* e = std::getenv("SLIM_WALK_NZ"))   copt.n_z        = std::atoi(e);
     const double r_isco = slim_detail::isco_prograde(in_base.mass, in_base.spin);
 
     std::printf("# =====================================================================\n");
@@ -316,7 +320,8 @@ int main() {
     // been observed past it=0 — every "is it converging?" reading came from one point.
     // 12 h admits ~13 iterations at the current post-speedup cost (~50 min/iter);
     // higher rungs still fail fast at the SEED, so they cannot consume this.
-    const double kWallPerAttempt = 43200.0;   // 12 h / attempt
+    double kWallPerAttempt = 43200.0;         // 12 h / attempt
+    if (const char* e = std::getenv("SLIM_WALK_WALL_S")) kWallPerAttempt = std::atof(e);   // E0a2
     const long long kIterPerAttempt = 60000;  // cumulative inner-iter cap / attempt
 
     // =======================================================================
@@ -324,12 +329,14 @@ int main() {
     // =======================================================================
     std::printf("### PHASE 1 — base of the ladder (cold thin-disk seed) ###\n");
     const double base_fEdd[] = {1e-3, 3e-3, 1e-2, 3e-2, 1e-1};
+    const bool base_only = std::getenv("SLIM_WALK_BASE_ONLY") != nullptr;   // E0a2
 
     double best_base_fEdd = -1.0;
     std::vector<double> best_base_U;
     WalkDiag best_base_diag;
 
     for (double f : base_fEdd) {
+        if (base_only && f != base_fEdd[0]) break;                          // E0a2
         SlimDiskInputs in = in_base;
         in.mdot = mdot_from_fEdd(in, f);
         std::vector<double> U = build_thin_disk_seed(in, op);
@@ -359,6 +366,14 @@ int main() {
         const double total = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - t_start).count();
         std::printf("\n[total wall %.1fs]\nDONE (BASE-INFEASIBLE)\n", total);
+        return 0;
+    }
+
+    if (base_only) {   // E0a2: base-rung-only diagnostics — never start the ladder.
+        std::printf("\n### BASE-ONLY mode: stopping after PHASE 1 (no ladder). ###\n");
+        const double total_bo = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t_start).count();
+        std::printf("\n[total wall %.1fs]\nDONE (BASE-ONLY)\n", total_bo);
         return 0;
     }
 

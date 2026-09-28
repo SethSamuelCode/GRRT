@@ -1034,6 +1034,7 @@ static bool relax_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
         bool step_taken=false, bail=false;
         double merit_try=merit;
         std::vector<double> Utry, Rtry;
+        int n_rj_phys=0, n_rj_fadv=0, n_rj_infeas=0; double lam_acc=0.0;   // E0a: line-search observability (per outer it, accumulates across LM retries)
 
         while (true) {
             bool solved=false;
@@ -1074,11 +1075,12 @@ static bool relax_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
                 for (int i=0;i<N&&physical;++i){ const double S=Utry[4*i+0],V=Utry[4*i+1],T=Utry[4*i+3];
                     if (S<=0.0||T<=0.0||!(V<0.0)) physical=false; }
                 if (physical){ const double rs=Utry[4*N+1]; if(!(rs>in.r_in&&rs<in.r_out)) physical=false; }
-                if (physical && !slim_fadv_ok(in, op, Utry, 50.0)) physical=false;
+                if (!physical) ++n_rj_phys;                                                            // E0a
+                if (physical && !slim_fadv_ok(in, op, Utry, 50.0)) { physical=false; ++n_rj_fadv; }    // E0a
                 if (physical){
                     merit_try=eval_merit(Utry,Rtry,infeas_try);
-                    if (infeas_try || !std::isfinite(merit_try)) { physical=false; }  // a column failed
-                    else { F_new=merit_to_F(merit_try); break; }
+                    if (infeas_try || !std::isfinite(merit_try)) { physical=false; ++n_rj_infeas; }    // E0a (a column failed)
+                    else { F_new=merit_to_F(merit_try); lam_acc=lam; break; }                          // E0a
                 }
                 lam*=0.5;
             }
@@ -1114,6 +1116,8 @@ static bool relax_coupled(const SlimDiskInputs& in, const OpacityLUTs& op,
         if (kDiag) {  // EVERY outer iteration (merit trajectory: converging vs stuck)
             std::printf("[COUPLED] it=%d merit=%.3e maxrel=%.2e mu=%.1e r_s=%.4f\n",
                         it, merit, maxrel, lm_mu, U[4*N+1]);
+            std::printf("[COUPLED] it=%d ls_rej phys/fadv/infeas=%d/%d/%d lam_acc=%.3e\n",
+                        it, n_rj_phys, n_rj_fadv, n_rj_infeas, lam_acc);   // E0a
             // --- PURELY OBSERVATIONAL: per-row-group breakdown of the SAME scaled
             // residual the merit is built from.  merit = sqrt(Σ_rows (R[row]/s_grp)²/n)
             // (slim_scaled_residual_norm), so these group L2s satisfy
